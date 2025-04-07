@@ -4,15 +4,21 @@ import datetime
 import json
 import hashlib
 
-print("🟢 START scraper.py")
+print("🟢 scraper.py gestartet")
 
 def load_list(filename):
+    print(f"📂 Lade Datei: {filename}")
     with open(filename, 'r', encoding='utf-8') as f:
-        return [line.strip().lower() for line in f if line.strip()]
+        data = [line.strip().lower() for line in f if line.strip()]
+        print(f"✅ {filename} geladen mit {len(data)} Einträgen")
+        return data
 
 def load_schedule():
+    print("📂 Lade schedule.json")
     with open("schedule.json", 'r') as f:
-        return json.load(f)
+        data = json.load(f)
+        print(f"✅ schedule.json geladen mit {len(data)} Zeiträumen")
+        return data
 
 def get_current_interval(schedule):
     today = datetime.date.today()
@@ -24,7 +30,7 @@ def get_current_interval(schedule):
     return 3600
 
 def run_scraper():
-    print("📡 run_scraper() gestartet")
+    print("📡 Starte run_scraper()")
 
     products = load_list("products.txt")
     urls = load_list("urls.txt")
@@ -50,5 +56,6 @@ def run_scraper():
         time.sleep(interval)
 
 if __name__ == "__main__":
-    print("📦 Main wurde erreicht")
+    print("📦 __main__ erreicht")
     run_scraper()
+
