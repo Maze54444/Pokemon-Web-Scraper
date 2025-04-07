@@ -62,6 +62,9 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"❌ Telegram-Fehler: {e}", flush=True)
 
+def all_keywords_found(keywords, text):
+    return all(word in text for word in keywords)
+
 def run_once(seen):
     print("🔍 Starte Einzelscan", flush=True)
 
@@ -78,7 +81,8 @@ def run_once(seen):
             content = response.text.lower()
 
             for product in products:
-                if product in content:
+                keywords = product.lower().split()
+                if all_keywords_found(keywords, content):
                     identifier = hashlib.md5(f"{product}_{url}".encode()).hexdigest()
                     if identifier not in seen:
                         seen.add(identifier)
