@@ -4,6 +4,13 @@ import datetime
 import json
 import hashlib
 
+# Starte Datei-Check zur Verifizierung, dass das Skript läuft
+try:
+    with open("startcheck.txt", "w", encoding="utf-8") as f:
+        f.write(f"✅ Bot gestartet: {datetime.datetime.now()}\n")
+except Exception as e:
+    print(f"❌ Fehler beim Schreiben von startcheck.txt: {e}")
+
 print("🚀 scraper.py wurde gestartet!")
 
 # --- Dateien laden ---
