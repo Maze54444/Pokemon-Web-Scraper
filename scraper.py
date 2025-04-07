@@ -1,11 +1,11 @@
 import requests
+import time
 import datetime
 import json
 import hashlib
 
 print("🟢 START scraper.py")
 
-# Hilfsfunktionen
 def load_list(filename):
     with open(filename, 'r', encoding='utf-8') as f:
         return [line.strip().lower() for line in f if line.strip()]
@@ -23,29 +23,32 @@ def get_current_interval(schedule):
             return entry["interval"]
     return 3600
 
-# Mini-Scraper ohne Schleife
-def run_once():
-    print("🔍 run_once() gestartet")
+def run_scraper():
+    print("📡 run_scraper() gestartet")
 
     products = load_list("products.txt")
     urls = load_list("urls.txt")
     schedule = load_schedule()
 
-    interval = get_current_interval(schedule)
-    print(f"⏱ Aktuelles Intervall: {interval} Sekunden")
+    while True:
+        print(f"\n--- [{datetime.datetime.now()}] Starte Scan ---")
+        interval = get_current_interval(schedule)
 
-    for url in urls:
-        print(f"🌐 Prüfe URL: {url}")
-        response = requests.get(url, timeout=10)
-        content = response.text.lower()
+        for url in urls:
+            print(f"🌐 Prüfe URL: {url}")
+            try:
+                response = requests.get(url, timeout=10)
+                content = response.text.lower()
 
-        for product in products:
-            if product in content:
-                print(f"✅ TREFFER: {product} auf {url}")
+                for product in products:
+                    if product in content:
+                        print(f"✅ TREFFER: {product} auf {url}")
+            except Exception as e:
+                print(f"❌ Fehler bei {url}: {e}")
 
-    print("✅ Durchlauf abgeschlossen.")
+        print(f"⏳ Warte {interval} Sekunden...\n")
+        time.sleep(interval)
 
-# Main-Aufruf
 if __name__ == "__main__":
-    print("📡 Main wurde erreicht")
-    run_once()
+    print("📦 Main wurde erreicht")
+    run_scraper()
