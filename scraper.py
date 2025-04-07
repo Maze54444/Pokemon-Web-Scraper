@@ -4,6 +4,8 @@ import datetime
 import json
 import hashlib
 
+print("🚀 scraper.py wurde gestartet!")
+
 # --- Dateien laden ---
 def load_list(filename):
     with open(filename, 'r', encoding='utf-8') as f:
@@ -54,6 +56,7 @@ def send_telegram_message(text):
 
 # --- Hauptfunktion ---
 def run_scraper():
+    print("✅ run_scraper() wird ausgeführt!")
     products = load_list("products.txt")
     urls = load_list("urls.txt")
     schedule = load_schedule()
@@ -86,4 +89,5 @@ def run_scraper():
 
 # --- Start ---
 if __name__ == "__main__":
+    print("📡 Hauptblock gestartet")
     run_scraper()
