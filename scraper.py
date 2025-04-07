@@ -81,11 +81,9 @@ def run_scraper():
                 print(f"Fehler beim Abrufen von {url}: {e}")
 
         save_seen(seen)
-        print(f"--- Warte {interval} Sekunden ---\n")
+        print(f"--- [{datetime.datetime.now()}] Warte {interval} Sekunden bis zum nächsten Scan ---\n")
         time.sleep(interval)
 
 # --- Start ---
 if __name__ == "__main__":
     run_scraper()
-
-
