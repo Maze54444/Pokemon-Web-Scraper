@@ -93,7 +93,7 @@ def run_once(seen):
 
 if __name__ == "__main__":
     print("📦 Hauptblock wurde erreicht", flush=True)
-    seen = load_seen()
+    seen = set()
     while True:
         interval = run_once(seen)
         time.sleep(interval)
