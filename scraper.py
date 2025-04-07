@@ -1,10 +1,9 @@
 import requests
-import time
 import datetime
 import json
-import hashlib
+import time
 
-print("🟢 scraper.py gestartet")
+print("🟢 START scraper.py")
 
 def load_list(filename):
     print(f"📂 Lade Datei: {filename}")
@@ -29,33 +28,31 @@ def get_current_interval(schedule):
             return entry["interval"]
     return 3600
 
-def run_scraper():
-    print("📡 Starte run_scraper()")
+def run_once():
+    print("🔍 Starte Einzelscan")
 
     products = load_list("products.txt")
     urls = load_list("urls.txt")
     schedule = load_schedule()
+    interval = get_current_interval(schedule)
+    print(f"⏱ Intervall ist: {interval} Sekunden")
 
-    while True:
-        print(f"\n--- [{datetime.datetime.now()}] Starte Scan ---")
-        interval = get_current_interval(schedule)
+    for url in urls:
+        print(f"🌐 Prüfe URL: {url}")
+        try:
+            response = requests.get(url, timeout=10)
+            content = response.text.lower()
+            for product in products:
+                if product in content:
+                    print(f"✅ TREFFER: {product} auf {url}")
+        except Exception as e:
+            print(f"❌ Fehler bei {url}: {e}")
 
-        for url in urls:
-            print(f"🌐 Prüfe URL: {url}")
-            try:
-                response = requests.get(url, timeout=10)
-                content = response.text.lower()
-
-                for product in products:
-                    if product in content:
-                        print(f"✅ TREFFER: {product} auf {url}")
-            except Exception as e:
-                print(f"❌ Fehler bei {url}: {e}")
-
-        print(f"⏳ Warte {interval} Sekunden...\n")
-        time.sleep(interval)
+    print(f"⏳ Nächster Durchlauf in {interval} Sekunden...\n")
+    return interval
 
 if __name__ == "__main__":
-    print("📦 __main__ erreicht")
-    run_scraper()
-
+    print("📦 Hauptblock wurde erreicht")
+    while True:
+        interval = run_once()
+        time.sleep(interval)
