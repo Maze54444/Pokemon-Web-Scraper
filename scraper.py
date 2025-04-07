@@ -3,6 +3,8 @@ import datetime
 import json
 import time
 import hashlib
+from bs4 import BeautifulSoup
+import re
 
 print("🟢 START scraper.py", flush=True)
 
@@ -65,6 +67,36 @@ def send_telegram_message(text):
 def all_keywords_found(keywords, text):
     return all(word in text for word in keywords)
 
+# 🎯 Spezialparser für tcgviert.com
+def parse_tcgviert(content, keywords, seen):
+    soup = BeautifulSoup(content, "html.parser")
+    found = []
+
+    products = soup.find_all("a", href=True)
+    for product in products:
+        title_tag = product.find("p")
+        price_tag = product.find_next(string=re.compile(r"\d{1,3}[.,]\d{2} ?€"))
+
+        if title_tag:
+            title = title_tag.get_text(strip=True).lower()
+            if all_keywords_found(keywords, title):
+                link = "https://tcgviert.com" + product['href']
+                price = price_tag.strip() if price_tag else "Preis nicht gefunden"
+                product_id = hashlib.md5((title + link).encode()).hexdigest()
+
+                if product_id not in seen:
+                    found.append((title, link, price, product_id))
+    return found
+
+# 🔁 Standardparser für alle anderen Seiten
+def parse_generic(content, keywords, base_url, product, seen):
+    text = content.lower()
+    if all_keywords_found(keywords, text):
+        identifier = hashlib.md5(f"{product}_{base_url}".encode()).hexdigest()
+        if identifier not in seen:
+            return [(product, base_url, "Preis nicht gefunden", identifier)]
+    return []
+
 def run_once(seen):
     print("🔍 Starte Einzelscan", flush=True)
 
@@ -78,16 +110,23 @@ def run_once(seen):
         print(f"🌐 Prüfe URL: {url}", flush=True)
         try:
             response = requests.get(url, timeout=10)
-            content = response.text.lower()
+            content = response.text
 
             for product in products:
                 keywords = product.lower().split()
-                if all_keywords_found(keywords, content):
-                    identifier = hashlib.md5(f"{product}_{url}".encode()).hexdigest()
-                    if identifier not in seen:
-                        seen.add(identifier)
-                        send_telegram_message(f"🔥 Neuer Fund: {product}\n🛒 {url}")
-                        print(f"✅ TREFFER: {product} auf {url}", flush=True)
+                hits = []
+
+                if "tcgviert.com" in url:
+                    hits = parse_tcgviert(content, keywords, seen)
+                else:
+                    hits = parse_generic(content, keywords, url, product, seen)
+
+                for name, link, price, identifier in hits:
+                    seen.add(identifier)
+                    message = f"🔥 Neuer Fund: {name}\n💶 Preis: {price}\n🔗 Link: {link}"
+                    send_telegram_message(message)
+                    print(f"✅ TREFFER: {name} ({price}) → {link}", flush=True)
+
         except Exception as e:
             print(f"❌ Fehler bei {url}: {e}", flush=True)
 
