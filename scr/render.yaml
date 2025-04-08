@@ -3,5 +3,5 @@ services:
     name: produkt-scraper
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r src/requirements.txt
     startCommand: python src/main.py
