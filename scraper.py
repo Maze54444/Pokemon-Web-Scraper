@@ -9,7 +9,6 @@ import os
 
 print("🟢 START scraper.py", flush=True)
 
-# 🔥 seen.txt bei jedem Start löschen
 if os.path.exists("seen.txt"):
     os.remove("seen.txt")
     print("🗑️ seen.txt gelöscht (beim Start)", flush=True)
@@ -70,8 +69,10 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"❌ Telegram-Fehler: {e}", flush=True)
 
-def all_keywords_found(keywords, text):
-    return all(word in text for word in keywords)
+# 🔍 Flexible Keyword-Erkennung (mind. 75 % müssen vorkommen)
+def is_flexible_match(keywords, text, threshold=0.75):
+    matches = sum(1 for word in keywords if word in text)
+    return (matches / len(keywords)) >= threshold
 
 def parse_tcgviert(content, keywords, seen):
     soup = BeautifulSoup(content, "html.parser")
@@ -84,7 +85,7 @@ def parse_tcgviert(content, keywords, seen):
 
         if title_tag:
             title = title_tag.get_text(strip=True).lower()
-            if all_keywords_found(keywords, title):
+            if is_flexible_match(keywords, title):
                 link = "https://tcgviert.com" + product['href']
                 price = price_tag.strip() if price_tag else "Preis nicht gefunden"
                 product_id = hashlib.md5((title + link).encode()).hexdigest()
@@ -95,7 +96,7 @@ def parse_tcgviert(content, keywords, seen):
 
 def parse_generic(content, keywords, base_url, product, seen):
     text = content.lower()
-    if all_keywords_found(keywords, text):
+    if is_flexible_match(keywords, text):
         identifier = hashlib.md5(f"{product}_{base_url}".encode()).hexdigest()
         if identifier not in seen:
             return [(product, base_url, "Preis nicht gefunden", identifier)]
