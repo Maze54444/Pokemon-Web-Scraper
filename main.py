@@ -1,3 +1,5 @@
+# main.py
+
 from utils.files import load_list, load_seen, save_seen
 from utils.scheduler import get_current_interval
 from utils.telegram import send_telegram_message
@@ -27,5 +29,6 @@ def run():
         print(f"⏳ Warte {interval} Sekunden bis zum nächsten Scan")
         time.sleep(interval)
 
+# 🧠 Der entscheidende Block:
 if __name__ == "__main__":
     run()
