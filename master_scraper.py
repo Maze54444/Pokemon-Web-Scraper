@@ -6,6 +6,8 @@ import time
 import re
 from bs4 import BeautifulSoup
 from datetime import datetime
+import unicodedata
+
 
 # 🔁 Auto-Reset der seen.txt beim Start (optional)
 if os.path.exists("seen.txt"):
@@ -45,11 +47,18 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"❌ Telegram-Fehler: {e}", flush=True)
 
-def is_flexible_match(keywords, text, threshold=0.75):
-    text_words = re.findall(r'\w+', text.lower())
-    matches = [word for word in keywords if word in text_words]
-    score = len(matches) / len(keywords)
-    print(f"🟡 LOG: Keywords = {keywords}")
+def clean_text(text):
+    text = unicodedata.normalize("NFKD", text)
+    text = re.sub(r'[^a-z0-9 ]', ' ', text.lower())
+    return text
+
+def is_flexible_match(keywords, raw_text, threshold=0.75):
+    text = clean_text(raw_text)
+    text_words = set(text.split())
+    keywords_clean = [clean_text(word) for word in keywords]
+    matches = [word for word in keywords_clean if word in text_words]
+    score = len(matches) / len(keywords_clean)
+    print(f"🟡 LOG: Keywords = {keywords_clean}")
     print(f"🟡 LOG: Gefundene Wörter = {matches} → Trefferquote = {score:.2f}")
     return score >= threshold
 
