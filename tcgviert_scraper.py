@@ -43,9 +43,24 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"❌ Telegram-Fehler: {e}", flush=True)
 
-def is_flexible_match(keywords, text, threshold=0.75):
-    matches = [word for word in keywords if word in text]
-    return (len(matches) / len(keywords)) >= threshold
+def is_flexible_match(keywords, raw_text, threshold=0.75):
+    text = clean_text(raw_text)
+    text_words = text.split()
+
+    keywords_clean = [clean_text(word) for word in keywords]
+    matches = []
+
+    for word in keywords_clean:
+        for text_word in text_words:
+            if word in text_word:  # Teilwortsuche!
+                matches.append(word)
+                break
+
+    score = len(matches) / len(keywords_clean)
+    print(f"🟡 LOG: Keywords = {keywords_clean}")
+    print(f"🟡 LOG: Gefundene Wörter = {matches} → Trefferquote = {score:.2f}")
+    return score >= threshold
+
 
 def check_products():
     products = load_list("products.txt")
