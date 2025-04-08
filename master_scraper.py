@@ -46,8 +46,12 @@ def send_telegram_message(text):
         print(f"❌ Telegram-Fehler: {e}", flush=True)
 
 def is_flexible_match(keywords, text, threshold=0.75):
-    matches = [word for word in keywords if word in text]
-    return (len(matches) / len(keywords)) >= threshold
+    text_words = re.findall(r'\w+', text.lower())
+    matches = [word for word in keywords if word in text_words]
+    score = len(matches) / len(keywords)
+    print(f"🟡 LOG: Keywords = {keywords}")
+    print(f"🟡 LOG: Gefundene Wörter = {matches} → Trefferquote = {score:.2f}")
+    return score >= threshold
 
 # 🔍 JSON-Methode für tcgviert.com
 def scrape_tcgviert(products, seen):
