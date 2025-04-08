@@ -5,8 +5,14 @@ import time
 import hashlib
 from bs4 import BeautifulSoup
 import re
+import os
 
 print("🟢 START scraper.py", flush=True)
+
+# 🔥 seen.txt bei jedem Start löschen
+if os.path.exists("seen.txt"):
+    os.remove("seen.txt")
+    print("🗑️ seen.txt gelöscht (beim Start)", flush=True)
 
 def load_list(filename):
     print(f"📂 Lade Datei: {filename}", flush=True)
@@ -67,7 +73,6 @@ def send_telegram_message(text):
 def all_keywords_found(keywords, text):
     return all(word in text for word in keywords)
 
-# 🎯 Spezialparser für tcgviert.com
 def parse_tcgviert(content, keywords, seen):
     soup = BeautifulSoup(content, "html.parser")
     found = []
@@ -88,7 +93,6 @@ def parse_tcgviert(content, keywords, seen):
                     found.append((title, link, price, product_id))
     return found
 
-# 🔁 Standardparser für alle anderen Seiten
 def parse_generic(content, keywords, base_url, product, seen):
     text = content.lower()
     if all_keywords_found(keywords, text):
