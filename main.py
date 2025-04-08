@@ -15,8 +15,9 @@ def run_once():
     products = load_list("data/products.txt")
     urls = load_list("data/urls.txt")
     keywords_map = prepare_keywords(products)
-
+    
     print(f"🔄 Durchlauf: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"🔍 Suchbegriffe: {keywords_map}", flush=True)
     
     # TCGViert-spezifischer Scraper
     new_matches = scrape_tcgviert(keywords_map, seen)
@@ -47,14 +48,25 @@ def run_loop():
             print("🔄 Neustart in 60 Sekunden...", flush=True)
             time.sleep(60)
 
+def test_telegram():
+    """Testet die Telegram-Benachrichtigungsfunktion"""
+    print("🧪 Starte Telegram-Test", flush=True)
+    result = send_telegram_message("🧪 Test-Nachricht vom TCG-Scraper")
+    if result:
+        print("✅ Telegram-Test erfolgreich", flush=True)
+    else:
+        print("❌ Telegram-Test fehlgeschlagen", flush=True)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["once", "loop"], default="loop",
-                        help="Ausführungsmodus: once = Einzelabruf, loop = Dauerschleife")
+    parser.add_argument("--mode", choices=["once", "loop", "test"], default="loop",
+                        help="Ausführungsmodus: once = Einzelabruf, loop = Dauerschleife, test = Telegram-Test")
     args = parser.parse_args()
 
     print(f"📦 Modus gewählt: {args.mode}", flush=True)
     if args.mode == "once":
         run_once()
+    elif args.mode == "test":
+        test_telegram()
     else:
         run_loop()

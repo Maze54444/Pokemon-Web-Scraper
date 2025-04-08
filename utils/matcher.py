@@ -13,9 +13,18 @@ def clean_text(text):
 def is_keyword_in_text(keywords, text):
     """
     Prüft, ob ALLE Wörter im Text vorkommen
+    Flexiblere Version, die einzelne Wörter im Text sucht
     """
     text = clean_text(text)
-    return all(word in text for word in keywords)
+    
+    # Debug-Ausgabe für besseres Verständnis
+    matches = [word for word in keywords if word in text]
+    missing = [word for word in keywords if word not in text]
+    
+    if missing:
+        print(f"    Fehlende Wörter: {missing}", flush=True)
+    
+    return len(missing) == 0  # Alle Wörter müssen vorkommen
 
 def prepare_keywords(products):
     """

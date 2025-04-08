@@ -11,6 +11,11 @@ def scrape_tcgviert(keywords_map, seen):
     :return: Liste der neuen Treffer
     """
     print("🌐 Starte JSON-Scraper für tcgviert.com", flush=True)
+    print(f"🔍 Suche nach folgenden Begriffen: {list(keywords_map.keys())}", flush=True)
+    
+    # Test-Nachricht senden, um zu überprüfen, ob Telegram funktioniert
+    test_msg = "🧪 Test-Benachrichtigung vom TCG-Scraper"
+    send_telegram_message(test_msg)
     
     new_matches = []
     
@@ -33,9 +38,14 @@ def scrape_tcgviert(keywords_map, seen):
             title = product["title"]
             handle = product["handle"]
             
+            print(f"🔍 Prüfe Produkt: '{title}'", flush=True)
+            
             # Prüfe jeden Suchbegriff gegen den Produkttitel
             for search_term, tokens in keywords_map.items():
-                if is_keyword_in_text(tokens, title):
+                match_result = is_keyword_in_text(tokens, title)
+                print(f"  - Vergleiche mit '{search_term}' (Tokens: {tokens}): {match_result}", flush=True)
+                
+                if match_result:
                     # Eindeutige ID für dieses Produkt
                     product_id = f"tcgviert_{handle}"
                     
@@ -112,6 +122,7 @@ def scrape_tcgviert_html_fallback(keywords_map, seen):
                     continue
                 
                 title = title_elem.text.strip()
+                print(f"🔍 Prüfe HTML-Produkt: '{title}'", flush=True)
                 
                 # Link extrahieren
                 link_elem = product.select_one("a.product-card__link")
@@ -131,7 +142,10 @@ def scrape_tcgviert_html_fallback(keywords_map, seen):
                 
                 # Prüfe jeden Suchbegriff gegen den Produkttitel
                 for search_term, tokens in keywords_map.items():
-                    if is_keyword_in_text(tokens, title):
+                    match_result = is_keyword_in_text(tokens, title)
+                    print(f"  - Vergleiche mit '{search_term}' (Tokens: {tokens}): {match_result}", flush=True)
+                    
+                    if match_result:
                         if product_id not in seen:
                             # Status (Vorbestellung/verfügbar)
                             status = "🔜 Vorbestellung" if "vorbestellungen" in url else "✅ Verfügbar"
