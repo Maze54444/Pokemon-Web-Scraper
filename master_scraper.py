@@ -49,8 +49,9 @@ def send_telegram_message(text):
 
 def clean_text(text):
     text = unicodedata.normalize("NFKD", text)
-    text = re.sub(r'[^a-z0-9 ]', ' ', text.lower())
-    return text
+    text = text.encode("ascii", "ignore").decode("utf-8")  # Entfernt Akzente korrekt
+    text = re.sub(r"[^a-zA-Z0-9 ]", " ", text)
+    return text.lower()
 
 def is_flexible_match(keywords, raw_text, threshold=0.75):
     text = clean_text(raw_text)
