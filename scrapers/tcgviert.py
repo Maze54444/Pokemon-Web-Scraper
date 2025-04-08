@@ -10,29 +10,57 @@ def scrape_tcgviert(keywords_map, seen):
     :param seen: Set mit bereits gesehenen Produkttiteln
     :return: Liste der neuen Treffer
     """
-    print("🌐 Starte JSON-Scraper für tcgviert.com", flush=True)
+    print("🌐 Starte Scraper für tcgviert.com", flush=True)
     print(f"🔍 Suche nach folgenden Begriffen: {list(keywords_map.keys())}", flush=True)
     
-    # Test-Nachricht senden, um zu überprüfen, ob Telegram funktioniert
-    test_msg = "🧪 Test-Benachrichtigung vom TCG-Scraper"
-    send_telegram_message(test_msg)
+    json_matches = []
+    html_matches = []
     
+    # Versuche beide Methoden und kombiniere die Ergebnisse
+    try:
+        json_matches = scrape_tcgviert_json(keywords_map, seen)
+    except Exception as e:
+        print(f"❌ Fehler beim JSON-Scraping: {e}", flush=True)
+    
+    try:
+        html_matches = scrape_tcgviert_html_fallback(keywords_map, seen)
+    except Exception as e:
+        print(f"❌ Fehler beim HTML-Fallback: {e}", flush=True)
+    
+    # Kombiniere eindeutige Ergebnisse
+    all_matches = list(set(json_matches + html_matches))
+    print(f"✅ Insgesamt {len(all_matches)} einzigartige Treffer gefunden", flush=True)
+    return all_matches
+
+def scrape_tcgviert_json(keywords_map, seen):
+    """JSON-Scraper für tcgviert.com"""
     new_matches = []
     
     try:
         # Versuche zuerst den JSON-Endpunkt
         response = requests.get("https://tcgviert.com/products.json", timeout=10)
         if response.status_code != 200:
-            print("⚠️ API antwortet nicht mit Status 200. Versuche HTML-Fallback...", flush=True)
-            return scrape_tcgviert_html_fallback(keywords_map, seen)
+            print("⚠️ API antwortet nicht mit Status 200", flush=True)
+            return []
         
         data = response.json()
         if "products" not in data or not data["products"]:
-            print("⚠️ Keine Produkte im JSON gefunden. Versuche HTML-Fallback...", flush=True)
-            return scrape_tcgviert_html_fallback(keywords_map, seen)
+            print("⚠️ Keine Produkte im JSON gefunden", flush=True)
+            return []
         
         products = data["products"]
-        print(f"🔍 {len(products)} Produkte zum Prüfen gefunden", flush=True)
+        print(f"🔍 {len(products)} Produkte zum Prüfen gefunden (JSON)", flush=True)
+        
+        # Debug-Ausgabe für alle Produkte mit bestimmten Keywords
+        print("🔍 Alle Produkte mit Journey Together oder Reisegefährten im Titel:", flush=True)
+        journey_products = []
+        for product in products:
+            title = product["title"]
+            if "journey together" in title.lower() or "reisegefährten" in title.lower():
+                print(f"  - {title}", flush=True)
+                journey_products.append(product)
+        
+        print(f"🔍 {len(journey_products)} Produkte mit gesuchten Keywords gefunden", flush=True)
         
         for product in products:
             title = product["title"]
@@ -49,7 +77,8 @@ def scrape_tcgviert(keywords_map, seen):
                     # Eindeutige ID für dieses Produkt
                     product_id = f"tcgviert_{handle}"
                     
-                    if product_id not in seen:
+                    # Temporär die seen-Prüfung deaktivieren
+                    if True:  # Vorher: if product_id not in seen:
                         # Produkt wurde noch nicht gemeldet
                         url = f"https://tcgviert.com/products/{handle}"
                         
@@ -84,21 +113,21 @@ def scrape_tcgviert(keywords_map, seen):
         
     except Exception as e:
         print(f"❌ Fehler beim TCGViert JSON-Scraping: {e}", flush=True)
-        # Versuche HTML-Fallback bei Fehlern
-        return scrape_tcgviert_html_fallback(keywords_map, seen)
     
     return new_matches
 
 def scrape_tcgviert_html_fallback(keywords_map, seen):
     """Fallback-Scraper für TCGViert über HTML, falls JSON-API nicht funktioniert"""
-    print("🔄 Starte HTML-Fallback für tcgviert.com", flush=True)
+    print("🔄 Starte HTML-Scraping für tcgviert.com", flush=True)
     new_matches = []
     
     try:
         # URLs zum Durchsuchen
         urls = [
             "https://tcgviert.com/collections/vorbestellungen",
-            "https://tcgviert.com/collections/neu-eingetroffen"
+            "https://tcgviert.com/collections/neu-eingetroffen",
+            "https://tcgviert.com/collections/pokemon-reisegefahrten-journey-together-sv09",
+            "https://tcgviert.com/collections/pokemon-tcg"
         ]
         
         from bs4 import BeautifulSoup
@@ -114,6 +143,18 @@ def scrape_tcgviert_html_fallback(keywords_map, seen):
             products = soup.select(".product-card")
             
             print(f"🔍 {len(products)} Produkte auf {url} gefunden", flush=True)
+            
+            # Debug-Ausgabe für Journey Together oder Reisegefährten Produkte
+            journey_products = []
+            for product in products:
+                title_elem = product.select_one(".product-card__title")
+                if title_elem:
+                    title = title_elem.text.strip()
+                    if "journey together" in title.lower() or "reisegefährten" in title.lower():
+                        print(f"  - HTML-Produkt: {title}", flush=True)
+                        journey_products.append(title)
+            
+            print(f"🔍 {len(journey_products)} HTML-Produkte mit gesuchten Keywords gefunden", flush=True)
             
             for product in products:
                 # Extrahiere Titel und Link
@@ -146,7 +187,8 @@ def scrape_tcgviert_html_fallback(keywords_map, seen):
                     print(f"  - Vergleiche mit '{search_term}' (Tokens: {tokens}): {match_result}", flush=True)
                     
                     if match_result:
-                        if product_id not in seen:
+                        # Temporär die seen-Prüfung deaktivieren
+                        if True:  # Vorher: if product_id not in seen:
                             # Status (Vorbestellung/verfügbar)
                             status = "🔜 Vorbestellung" if "vorbestellungen" in url else "✅ Verfügbar"
                             
