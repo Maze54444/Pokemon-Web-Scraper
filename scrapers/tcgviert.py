@@ -23,7 +23,7 @@ def scrape_tcgviert_json(keywords_map, seen):
             price = product["variants"][0]["price"] if product["variants"] else "?"
             for entry, keys in keywords_map.items():
                 id = hashlib.md5((title + url).encode()).hexdigest()
-                if id not in seen and is_flexible_match(keys, clean):
+                if id not in seen and is_keyword_in_text(keys, clean):
                     send_telegram_message(f"🔥 Neuer Fund (API): {title}\n💶 Preis: {price} €\n🔗 Link: {url}")
                     seen.add(id)
                     print(f"✅ JSON TREFFER: {title} – {price} € – {url}", flush=True)
@@ -44,7 +44,7 @@ def scrape_tcgviert_html(keywords_map, seen):
             url = "https://tcgviert.com" + product_tag["href"]
             for entry, keys in keywords_map.items():
                 id = hashlib.md5((title + url).encode()).hexdigest()
-                if id not in seen and is_flexible_match(keys, clean):
+                if id not in seen and if is_keyword_in_text(keys, clean):
                     send_telegram_message(f"🔥 Neuer Fund (HTML): {title}\n🔗 Link: {url}")
                     seen.add(id)
                     print(f"✅ HTML TREFFER: {title} – {url}", flush=True)
