@@ -1,7 +1,8 @@
 import requests
 import re
+from bs4 import BeautifulSoup
 from utils.telegram import send_telegram_message
-from utils.matcher import is_keyword_in_text
+from utils.matcher import is_keyword_in_text, clean_text
 
 def scrape_tcgviert(keywords_map, seen):
     """
@@ -103,6 +104,123 @@ def create_product_id(title, base_id="tcgviert"):
         product_id += "_top"
     
     return product_id
+
+def fetch_product_details(product_url):
+    """
+    Ruft detaillierte Produktinformationen direkt von der Produktseite ab
+    
+    :param product_url: URL der Produktseite
+    :return: Dictionary mit Preis und Verfügbarkeitsstatus
+    """
+    print(f"🔍 Rufe Produktdetails von {product_url} ab", flush=True)
+    details = {
+        "price": "Preis nicht verfügbar",
+        "status": "Status unbekannt"
+    }
+    
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        response = requests.get(product_url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            print(f"⚠️ Fehler beim Abrufen der Produktdetails: Status {response.status_code}", flush=True)
+            return details
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Preis extrahieren - verschiedene mögliche Selektoren
+        price_selectors = [
+            ".product__price", 
+            ".price", 
+            ".product-single__price",
+            "[data-product-price]",
+            ".product-price",
+            ".product-single__price"
+        ]
+        
+        for selector in price_selectors:
+            price_elem = soup.select_one(selector)
+            if price_elem:
+                price_text = price_elem.get_text().strip()
+                # Entferne nicht-numerische Zeichen außer Punkt und Komma
+                price_clean = re.sub(r'[^\d,.]', '', price_text)
+                if price_clean:
+                    details["price"] = price_clean + "€"
+                    print(f"✅ Preis gefunden: {details['price']}", flush=True)
+                    break
+        
+        # Verfügbarkeitsstatus extrahieren
+        # Prüfe auf "Ausverkauft"-Indikatoren
+        sold_out_indicators = ["ausverkauft", "sold out", "out of stock", "nicht verfügbar", "not available"]
+        page_text = soup.get_text().lower()
+        
+        # Suche nach Verfügbarkeitsindikator im Text
+        availability_selectors = [
+            ".product-form__inventory", 
+            ".product__availability",
+            ".stock-status",
+            "[data-stock-status]",
+            ".inventoryMessage"
+        ]
+        
+        availability_text = ""
+        for selector in availability_selectors:
+            availability_elem = soup.select_one(selector)
+            if availability_elem:
+                availability_text = availability_elem.get_text().lower().strip()
+                break
+        
+        # Bestimme Status basierend auf Text
+        if any(indicator in page_text for indicator in sold_out_indicators) or any(indicator in availability_text for indicator in sold_out_indicators):
+            details["status"] = "❌ Ausverkauft"
+        elif "vorbestellung" in page_text or "pre-order" in page_text:
+            details["status"] = "🔜 Vorbestellung"
+        elif "add to cart" in page_text or "in den warenkorb" in page_text:
+            details["status"] = "✅ Verfügbar"
+        
+        # Prüfe zusätzlich auf Add-to-Cart-Button
+        cart_button = soup.select_one("button[name='add'], .add-to-cart, .product-form__cart-submit")
+        if cart_button and "disabled" not in cart_button.get("class", []) and "sold-out" not in cart_button.get("class", []):
+            details["status"] = "✅ Verfügbar"
+        
+        print(f"✅ Status gefunden: {details['status']}", flush=True)
+        
+        # Alternativ: JSON-Daten aus der Seite extrahieren
+        # Dies ist eine robustere Methode, da viele Shops Produktdaten als JSON in die Seite einbetten
+        script_tags = soup.find_all("script", type="application/ld+json")
+        for script in script_tags:
+            try:
+                import json
+                json_data = json.loads(script.string)
+                
+                # Suche nach Produktdaten im JSON
+                if isinstance(json_data, dict) and "offers" in json_data:
+                    offers = json_data["offers"]
+                    if isinstance(offers, dict):
+                        # Preis extrahieren
+                        if "price" in offers and offers["price"]:
+                            details["price"] = str(offers["price"]) + "€"
+                            print(f"✅ Preis aus JSON gefunden: {details['price']}", flush=True)
+                        
+                        # Verfügbarkeit extrahieren
+                        if "availability" in offers:
+                            availability = offers["availability"].lower()
+                            if "outofstock" in availability:
+                                details["status"] = "❌ Ausverkauft"
+                            elif "preorder" in availability:
+                                details["status"] = "🔜 Vorbestellung"
+                            elif "instock" in availability:
+                                details["status"] = "✅ Verfügbar"
+                            print(f"✅ Status aus JSON gefunden: {details['status']}", flush=True)
+            except Exception as e:
+                print(f"⚠️ Fehler beim Parsen der JSON-Daten: {e}", flush=True)
+        
+    except Exception as e:
+        print(f"❌ Fehler beim Abrufen der Produktdetails: {e}", flush=True)
+    
+    return details
 
 def discover_collection_urls():
     """Entdeckt aktuelle Collection-URLs durch Scraping der Hauptseite"""
@@ -329,10 +447,13 @@ def scrape_tcgviert_html(urls, keywords_map, seen):
                         # Vollständige URL erstellen
                         product_url = f"https://tcgviert.com{href}" if href.startswith("/") else href
                         
+                        # NEU: Rufe detaillierte Produktinformationen ab
+                        product_details = fetch_product_details(product_url)
+                        
                         msg = (
                             f"🎯 *{text}*\n"
-                            f"💶 Preis nicht verfügbar\n"
-                            f"📊 Status unbekannt\n"
+                            f"💶 {product_details['price']}\n"
+                            f"📊 {product_details['status']}\n"
                             f"🔎 Treffer für: '{matched_term}'\n"
                             f"🔗 [Zum Produkt]({product_url})"
                         )
@@ -417,7 +538,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen):
                     if price_elem:
                         break
                 
-                price = price_elem.text.strip() if price_elem else "Preis unbekannt"
+                initial_price = price_elem.text.strip() if price_elem else "Preis nicht verfügbar"
                 
                 # Erstelle eine eindeutige ID basierend auf den Produktinformationen
                 product_id = create_product_id(title)
@@ -433,14 +554,24 @@ def scrape_tcgviert_html(urls, keywords_map, seen):
                         break
                 
                 if matched_term and product_id not in seen:
-                    # Status bestimmen
-                    status = "Unbekannt"
+                    # Status initial bestimmen
+                    initial_status = "Unbekannt"
                     if "ausverkauft" in product.text.lower() or "sold out" in product.text.lower():
-                        status = "❌ Ausverkauft"
+                        initial_status = "❌ Ausverkauft"
                     elif "vorbestellung" in product.text.lower() or "pre-order" in product.text.lower():
-                        status = "🔜 Vorbestellung"
+                        initial_status = "🔜 Vorbestellung"
                     else:
-                        status = "✅ Verfügbar"
+                        initial_status = "✅ Verfügbar"
+                    
+                    # NEU: Wenn Preis oder Status unbekannt/nicht verfügbar sind, rufe Produktdetails ab
+                    if initial_price == "Preis nicht verfügbar" or initial_status == "Unbekannt" or initial_status == "Status unbekannt":
+                        print(f"🔍 Fehlende Informationen - rufe Produktseite für Details ab: {product_url}", flush=True)
+                        product_details = fetch_product_details(product_url)
+                        price = product_details["price"]
+                        status = product_details["status"]
+                    else:
+                        price = initial_price
+                        status = initial_status
                     
                     msg = (
                         f"🎯 *{title}*\n"
@@ -478,6 +609,13 @@ def generic_scrape_product(url, product_title, product_url, price, status, match
     """
     # Erstelle eine eindeutige ID basierend auf den Produktinformationen
     product_id = create_product_id(product_title, base_id=site_id)
+    
+    # NEU: Wenn Preis oder Status unbekannt/nicht verfügbar sind, rufe Produktdetails ab
+    if price == "Preis nicht verfügbar" or status == "Status unbekannt" or status == "Unbekannt":
+        print(f"🔍 Fehlende Informationen - rufe Produktseite für Details ab: {product_url}", flush=True)
+        product_details = fetch_product_details(product_url)
+        price = product_details["price"]
+        status = product_details["status"]
     
     if product_id not in seen:
         msg = (
