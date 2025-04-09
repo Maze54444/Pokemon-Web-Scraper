@@ -1,14 +1,18 @@
 import requests
 import re
+from bs4 import BeautifulSoup
 from utils.telegram import send_telegram_message
 from utils.matcher import is_keyword_in_text
+from utils.stock import get_status_text, update_product_status
 
-def scrape_tcgviert(keywords_map, seen):
+def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
     """
     Scraper für tcgviert.com
     
     :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
     :param seen: Set mit bereits gesehenen Produkttiteln
+    :param out_of_stock: Set mit ausverkauften Produkten
+    :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
     :return: Liste der neuen Treffer
     """
     print("🌐 Starte Scraper für tcgviert.com", flush=True)
@@ -19,7 +23,7 @@ def scrape_tcgviert(keywords_map, seen):
     
     # Versuche beide Methoden und kombiniere die Ergebnisse
     try:
-        json_matches = scrape_tcgviert_json(keywords_map, seen)
+        json_matches = scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available)
     except Exception as e:
         print(f"❌ Fehler beim JSON-Scraping: {e}", flush=True)
     
@@ -27,7 +31,7 @@ def scrape_tcgviert(keywords_map, seen):
         # Hauptseite scrapen, um die richtigen Collection-URLs zu finden
         main_page_urls = discover_collection_urls()
         if main_page_urls:
-            html_matches = scrape_tcgviert_html(main_page_urls, keywords_map, seen)
+            html_matches = scrape_tcgviert_html(main_page_urls, keywords_map, seen, out_of_stock, only_available)
     except Exception as e:
         print(f"❌ Fehler beim HTML-Scraping: {e}", flush=True)
     
@@ -106,8 +110,6 @@ def create_product_id(title, base_id="tcgviert"):
 
 def discover_collection_urls():
     """Entdeckt aktuelle Collection-URLs durch Scraping der Hauptseite"""
-    from bs4 import BeautifulSoup
-    
     print("🔍 Suche nach gültigen Collection-URLs auf der Hauptseite", flush=True)
     valid_urls = []
     
@@ -182,7 +184,7 @@ def discover_collection_urls():
         print(f"❌ Fehler bei der Collection-URL-Entdeckung: {e}", flush=True)
         return ["https://tcgviert.com/collections/all"]  # Fallback zur Alle-Produkte-Seite
 
-def scrape_tcgviert_json(keywords_map, seen):
+def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False):
     """JSON-Scraper für tcgviert.com"""
     new_matches = []
     
@@ -231,10 +233,7 @@ def scrape_tcgviert_json(keywords_map, seen):
                     matched_term = search_term
                     break
             
-            if matched_term and product_id not in seen:
-                # Produkt wurde noch nicht gemeldet
-                url = f"https://tcgviert.com/products/{handle}"
-                
+            if matched_term:
                 # Preis aus der ersten Variante extrahieren, falls vorhanden
                 price = "Preis unbekannt"
                 if product.get("variants") and len(product["variants"]) > 0:
@@ -247,34 +246,51 @@ def scrape_tcgviert_json(keywords_map, seen):
                         available = True
                         break
                 
-                status = "✅ Verfügbar" if available else "❌ Ausverkauft"
-                
-                # Nachricht zusammenstellen
-                msg = (
-                    f"🎯 *{title}*\n"
-                    f"💶 {price}\n"
-                    f"📊 {status}\n"
-                    f"🔎 Treffer für: '{matched_term}'\n"
-                    f"🔗 [Zum Produkt]({url})"
+                # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
+                if only_available and not available:
+                    continue
+                    
+                # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
+                should_notify, is_back_in_stock = update_product_status(
+                    product_id, available, seen, out_of_stock
                 )
                 
-                # Telegram-Nachricht senden
-                if send_telegram_message(msg):
-                    seen.add(product_id)
-                    new_matches.append(product_id)
-                    print(f"✅ Neuer Treffer gefunden: {title}", flush=True)
+                if should_notify:
+                    # Status-Text erstellen
+                    status_text = get_status_text(available, is_back_in_stock)
+                    
+                    # URL erstellen
+                    url = f"https://tcgviert.com/products/{handle}"
+                    
+                    # Nachricht zusammenstellen
+                    msg = (
+                        f"🎯 *{title}*\n"
+                        f"💶 {price}\n"
+                        f"📊 {status_text}\n"
+                        f"🔎 Treffer für: '{matched_term}'\n"
+                        f"🔗 [Zum Produkt]({url})"
+                    )
+                    
+                    # Telegram-Nachricht senden
+                    if send_telegram_message(msg):
+                        # Je nach Verfügbarkeit unterschiedliche IDs speichern
+                        if available:
+                            seen.add(f"{product_id}_status_available")
+                        else:
+                            seen.add(f"{product_id}_status_unavailable")
+                        
+                        new_matches.append(product_id)
+                        print(f"✅ Neuer Treffer gemeldet: {title} - {status_text}", flush=True)
         
     except Exception as e:
         print(f"❌ Fehler beim TCGViert JSON-Scraping: {e}", flush=True)
     
     return new_matches
 
-def scrape_tcgviert_html(urls, keywords_map, seen):
+def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=False):
     """HTML-Scraper für tcgviert.com"""
     print("🔄 Starte HTML-Scraping für tcgviert.com", flush=True)
     new_matches = []
-    
-    from bs4 import BeautifulSoup
     
     for url in urls:
         try:
@@ -325,22 +341,56 @@ def scrape_tcgviert_html(urls, keywords_map, seen):
                             matched_term = search_term
                             break
                     
-                    if matched_term and product_id not in seen:
+                    if matched_term:
                         # Vollständige URL erstellen
                         product_url = f"https://tcgviert.com{href}" if href.startswith("/") else href
                         
-                        msg = (
-                            f"🎯 *{text}*\n"
-                            f"💶 Preis nicht verfügbar\n"
-                            f"📊 Status unbekannt\n"
-                            f"🔎 Treffer für: '{matched_term}'\n"
-                            f"🔗 [Zum Produkt]({product_url})"
-                        )
-                        
-                        if send_telegram_message(msg):
-                            seen.add(product_id)
-                            new_matches.append(product_id)
-                            print(f"✅ Neuer Treffer gefunden (HTML-Link): {text}", flush=True)
+                        # Produktdetailseite besuchen, um Verfügbarkeit zu prüfen
+                        try:
+                            detail_response = requests.get(product_url, headers=headers, timeout=10)
+                            detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+                            
+                            # Prüfe Verfügbarkeit
+                            available = "ausverkauft" not in detail_soup.text.lower() and "sold out" not in detail_soup.text.lower()
+                            
+                            # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
+                            if only_available and not available:
+                                continue
+                                
+                            # Aktualisiere Produkt-Status
+                            should_notify, is_back_in_stock = update_product_status(
+                                product_id, available, seen, out_of_stock
+                            )
+                            
+                            if should_notify:
+                                # Preis suchen
+                                price = "Preis nicht verfügbar"
+                                price_elem = detail_soup.select_one(".price, .product-price, [data-price]")
+                                if price_elem:
+                                    price = price_elem.get_text().strip()
+                                
+                                # Status-Text
+                                status_text = get_status_text(available, is_back_in_stock)
+                                
+                                msg = (
+                                    f"🎯 *{text}*\n"
+                                    f"💶 {price}\n"
+                                    f"📊 {status_text}\n"
+                                    f"🔎 Treffer für: '{matched_term}'\n"
+                                    f"🔗 [Zum Produkt]({product_url})"
+                                )
+                                
+                                if send_telegram_message(msg):
+                                    # Status in ID speichern
+                                    if available:
+                                        seen.add(f"{product_id}_status_available")
+                                    else:
+                                        seen.add(f"{product_id}_status_unavailable")
+                                    
+                                    new_matches.append(product_id)
+                                    print(f"✅ Neuer Treffer gefunden (HTML-Link): {text} - {status_text}", flush=True)
+                        except Exception as e:
+                            print(f"❌ Fehler beim Prüfen der Produktdetails: {e}", flush=True)
                 continue
             
             # Debug-Ausgabe für Journey Together oder Reisegefährten Produkte
@@ -432,28 +482,44 @@ def scrape_tcgviert_html(urls, keywords_map, seen):
                         matched_term = search_term
                         break
                 
-                if matched_term and product_id not in seen:
+                if matched_term:
                     # Status bestimmen
-                    status = "Unbekannt"
+                    available = True  # Standard: verfügbar
                     if "ausverkauft" in product.text.lower() or "sold out" in product.text.lower():
-                        status = "❌ Ausverkauft"
-                    elif "vorbestellung" in product.text.lower() or "pre-order" in product.text.lower():
-                        status = "🔜 Vorbestellung"
-                    else:
-                        status = "✅ Verfügbar"
+                        available = False
                     
-                    msg = (
-                        f"🎯 *{title}*\n"
-                        f"💶 {price}\n"
-                        f"📊 {status}\n"
-                        f"🔎 Treffer für: '{matched_term}'\n"
-                        f"🔗 [Zum Produkt]({product_url})"
+                    # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
+                    if only_available and not available:
+                        continue
+                        
+                    # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
+                    should_notify, is_back_in_stock = update_product_status(
+                        product_id, available, seen, out_of_stock
                     )
                     
-                    if send_telegram_message(msg):
-                        seen.add(product_id)
-                        new_matches.append(product_id)
-                        print(f"✅ Neuer Treffer gefunden (HTML): {title}", flush=True)
+                    if should_notify:
+                        # Status-Text erstellen
+                        status_text = get_status_text(available, is_back_in_stock)
+                        if "vorbestellung" in product.text.lower() or "pre-order" in product.text.lower():
+                            status_text = "🔜 Vorbestellung"
+                        
+                        msg = (
+                            f"🎯 *{title}*\n"
+                            f"💶 {price}\n"
+                            f"📊 {status_text}\n"
+                            f"🔎 Treffer für: '{matched_term}'\n"
+                            f"🔗 [Zum Produkt]({product_url})"
+                        )
+                        
+                        if send_telegram_message(msg):
+                            # Je nach Verfügbarkeit unterschiedliche IDs speichern
+                            if available:
+                                seen.add(f"{product_id}_status_available")
+                            else:
+                                seen.add(f"{product_id}_status_unavailable")
+                            
+                            new_matches.append(product_id)
+                            print(f"✅ Neuer Treffer gefunden (HTML): {title} - {status_text}", flush=True)
             
         except Exception as e:
             print(f"❌ Fehler beim Scrapen von {url}: {e}", flush=True)
@@ -461,7 +527,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen):
     return new_matches
 
 # Generische Version für Anpassung an andere Webseiten
-def generic_scrape_product(url, product_title, product_url, price, status, matched_term, seen, new_matches, site_id="generic"):
+def generic_scrape_product(url, product_title, product_url, price, status, matched_term, seen, out_of_stock, new_matches, site_id="generic", is_available=True):
     """
     Generische Funktion zur Verarbeitung gefundener Produkte für beliebige Websites
     
@@ -469,17 +535,28 @@ def generic_scrape_product(url, product_title, product_url, price, status, match
     :param product_title: Produkttitel
     :param product_url: Produkt-URL 
     :param price: Produktpreis
-    :param status: Verfügbarkeitsstatus
+    :param status: Status-Text für die Nachricht
     :param matched_term: Übereinstimmender Suchbegriff
-    :param seen: Set mit bereits gesehenen Produkt-IDs
+    :param seen: Set mit bereits gemeldeten Produkten
+    :param out_of_stock: Set mit ausverkauften Produkten
     :param new_matches: Liste der neu gefundenen Produkt-IDs
     :param site_id: ID der Website (für Produkt-ID-Erstellung)
+    :param is_available: Ob das Produkt verfügbar ist (True/False)
     :return: None
     """
     # Erstelle eine eindeutige ID basierend auf den Produktinformationen
     product_id = create_product_id(product_title, base_id=site_id)
     
-    if product_id not in seen:
+    # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
+    should_notify, is_back_in_stock = update_product_status(
+        product_id, is_available, seen, out_of_stock
+    )
+    
+    if should_notify:
+        # Status-Text aktualisieren, wenn Produkt wieder verfügbar ist
+        if is_back_in_stock:
+            status = "🎉 Wieder verfügbar!"
+            
         msg = (
             f"🎯 *{product_title}*\n"
             f"💶 {price}\n"
@@ -489,6 +566,11 @@ def generic_scrape_product(url, product_title, product_url, price, status, match
         )
         
         if send_telegram_message(msg):
-            seen.add(product_id)
+            # Je nach Verfügbarkeit unterschiedliche IDs speichern
+            if is_available:
+                seen.add(f"{product_id}_status_available")
+            else:
+                seen.add(f"{product_id}_status_unavailable")
+            
             new_matches.append(product_id)
-            print(f"✅ Neuer Treffer gefunden ({site_id}): {product_title}", flush=True)
+            print(f"✅ Neuer Treffer gefunden ({site_id}): {product_title} - {status}", flush=True)
