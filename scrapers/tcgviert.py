@@ -7,11 +7,6 @@ from bs4 import BeautifulSoup
 from utils.telegram import send_telegram_message
 from utils.matcher import is_keyword_in_text, clean_text
 
-# Importiere die neuen Anfrage-Funktionen
-# Hinweis: Diese Zeile muss auskommentiert werden, wenn die Funktionen direkt in dieser Datei definiert sind
-# from request_handling import create_session, get_random_headers, make_request
-
-# Fallback, falls die Datei nicht importiert werden kann
 def create_session():
     """
     Erstellt eine robuste Session mit Retry-Logik und realistischen Headers
@@ -146,6 +141,7 @@ def scrape_tcgviert(keywords_map, seen):
 def scrape_product_urls(keywords_map, seen, session=None):
     """
     Direkte Suche nach Produkt-URLs für die gesuchten Produkte
+    Mit verbesserter Fehlerbehandlung und Logging
     
     :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
     :param seen: Set mit bereits gesehenen Produkttiteln
@@ -154,7 +150,80 @@ def scrape_product_urls(keywords_map, seen, session=None):
     """
     new_matches = []
     
+    # Bekannte, funktionierende URLs direkt testen
+    known_urls = [
+        "https://tcgviert.com/products/pokemon-tcg-journey-together-sv09-36er-display-en-max-1-per-person",
+        "https://tcgviert.com/products/pokemon-tcg-journey-together-sv09-checklane-blister-en-max-6-per-person",
+        "https://tcgviert.com/products/pokemon-tcg-journey-together-sv09-premium-checklane-blister-en-max-6-per-person",
+        "https://tcgviert.com/products/pokemon-tcg-journey-together-sv09-elite-trainer-box-en-max-1-per-person"
+    ]
+    
+    # Zuerst bekannte URLs prüfen
+    print(f"🔍 Teste zuerst {len(known_urls)} bekannte Produkt-URLs", flush=True)
+    for url in known_urls:
+        try:
+            response = make_request(url, session)
+            
+            if not response:
+                print(f"⚠️ Keine Antwort für URL: {url}", flush=True)
+                continue
+                
+            if response.status_code != 200:
+                print(f"⚠️ Status-Code {response.status_code} für URL: {url}", flush=True)
+                continue
+            
+            # Die Seite erfolgreich geladen
+            print(f"✅ Seite erfolgreich geladen: {url}", flush=True)
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            product_title_elem = soup.select_one(".product__title h1, .product-single__title, h1.title")
+            
+            if not product_title_elem:
+                print(f"⚠️ Kein Produkttitel gefunden auf: {url}", flush=True)
+                continue
+            
+            product_title = product_title_elem.text.strip()
+            print(f"✅ Produkt gefunden: {product_title}", flush=True)
+            
+            # Prüfe, ob das Produkt zu einem der Suchbegriffe passt
+            matched_term = None
+            for search_term, tokens in keywords_map.items():
+                if is_keyword_in_text(tokens, product_title):
+                    matched_term = search_term
+                    break
+            
+            if matched_term:
+                # Erstelle eine eindeutige ID basierend auf den Produktinformationen
+                product_id = create_product_id(product_title)
+                
+                if product_id not in seen:
+                    # Rufe detaillierte Produktinformationen ab
+                    product_details = fetch_product_details_from_soup(soup, url)
+                    
+                    msg = (
+                        f"🎯 *{product_title}*\n"
+                        f"💶 {product_details['price']}\n"
+                        f"📊 {product_details['status']}\n"
+                        f"🔎 Treffer für: '{matched_term}'\n"
+                        f"🔗 [Zum Produkt]({url})"
+                    )
+                    
+                    if send_telegram_message(msg):
+                        seen.add(product_id)
+                        new_matches.append(product_id)
+                        print(f"✅ Neuer Treffer gefunden (bekannte URL): {product_title}", flush=True)
+        except Exception as e:
+            print(f"❌ Fehler beim Überprüfen der bekannten URL {url}: {e}", flush=True)
+    
+    # Wenn wir bereits Matches gefunden haben, können wir hier aufhören
+    if new_matches:
+        print(f"✅ {len(new_matches)} Treffer mit bekannten URLs gefunden - keine weiteren URLs werden überprüft", flush=True)
+        return new_matches
+    
+    # Andernfalls generiere systematisch potenzielle URLs
+    
     # Generiere wahrscheinliche Produkt-URLs basierend auf Suchbegriffen
+    print("🔍 Generiere systematisch potenzielle Produkt-URLs", flush=True)
     potential_urls = []
     
     # Mapping für Suchbegriffe zu möglichen URL-Slugs
@@ -173,12 +242,14 @@ def scrape_product_urls(keywords_map, seen, session=None):
         "top-trainer-box",
         "checklane-blister",
         "premium-checklane-blister",
-        "sleeved-booster",
-        "premium-box"
+        "sleeved-booster"
     ]
     
     # Sprachen für die URL-Generierung
-    languages = ["en", "de", "jp"]
+    languages = ["en", "de"]  # Reduziert auf die häufigsten Sprachen
+    
+    # Stückzahl-Limitierungen
+    limits = ["max-1-per-person", "max-6-per-person"]
     
     # Generiere URLs basierend auf Kombinationen
     base_url = "https://tcgviert.com/products/"
@@ -197,68 +268,271 @@ def scrape_product_urls(keywords_map, seen, session=None):
             slug = search_lower.replace(" ", "-").replace(":", "").replace("(", "").replace(")", "")
             slug_candidates.append(slug)
         
-        # Generiere mögliche URLs
+        # Generiere mögliche URLs - jetzt mit weniger Permutationen für schnellere Ausführung
         for slug in slug_candidates:
             for lang in languages:
                 for prod_type in product_types:
-                    # Format 1: pokemon-tcg-journey-together-sv09-36er-display-en-max-1-per-person
-                    url1 = f"{base_url}pokemon-tcg-{slug}-{prod_type}-{lang}-max"
-                    
-                    # Format 2: journey-together-sv09-36er-display-en
-                    url2 = f"{base_url}{slug}-{prod_type}-{lang}"
-                    
-                    potential_urls.append(url1)
-                    potential_urls.append(url2)
+                    # Für die häufigsten Kombinationen
+                    for limit in limits:
+                        # Format: pokemon-tcg-journey-together-sv09-36er-display-en-max-1-per-person
+                        url = f"{base_url}pokemon-tcg-{slug}-{prod_type}-{lang}-{limit}"
+                        potential_urls.append(url)
     
-    # Entferne Duplikate
+    # Entferne Duplikate und begrenzen die Gesamtzahl
     potential_urls = list(set(potential_urls))
+    max_urls_to_check = 30  # Reduziert auf eine vernünftigere Zahl
+    potential_urls = potential_urls[:max_urls_to_check]
+    
     print(f"🔍 Teste {len(potential_urls)} potenzielle Produkt-URLs", flush=True)
     
     # Überprüfe die URLs
     for url in potential_urls:
-        response = make_request(url, session)
-        
-        if not response or response.status_code != 200:
-            continue
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        product_title_elem = soup.select_one(".product__title h1, .product-single__title, h1.title")
-        
-        if not product_title_elem:
-            continue
-        
-        product_title = product_title_elem.text.strip()
-        print(f"✅ Gültiges Produkt gefunden: {product_title} unter {url}", flush=True)
-        
-        # Prüfe, ob das Produkt zu einem der Suchbegriffe passt
-        matched_term = None
-        for search_term, tokens in keywords_map.items():
-            if is_keyword_in_text(tokens, product_title):
-                matched_term = search_term
-                break
-        
-        if matched_term:
-            # Erstelle eine eindeutige ID basierend auf den Produktinformationen
-            product_id = create_product_id(product_title)
+        try:
+            response = make_request(url, session)
             
-            if product_id not in seen:
-                # Rufe detaillierte Produktinformationen ab
-                product_details = fetch_product_details_from_soup(soup, url)
+            if not response:
+                continue
                 
+            if response.status_code != 200:
+                # Nur noch 404-Fehler loggen wir nicht mehr, um die Logs sauberer zu halten
+                if response.status_code != 404:
+                    print(f"⚠️ Status-Code {response.status_code} für URL: {url}", flush=True)
+                continue
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            product_title_elem = soup.select_one(".product__title h1, .product-single__title, h1.title")
+            
+            if not product_title_elem:
+                continue
+            
+            product_title = product_title_elem.text.strip()
+            print(f"✅ Gültiges Produkt gefunden: {product_title} unter {url}", flush=True)
+            
+            # Prüfe, ob das Produkt zu einem der Suchbegriffe passt
+            matched_term = None
+            for search_term, tokens in keywords_map.items():
+                if is_keyword_in_text(tokens, product_title):
+                    matched_term = search_term
+                    break
+            
+            if matched_term:
+                # Erstelle eine eindeutige ID basierend auf den Produktinformationen
+                product_id = create_product_id(product_title)
+                
+                if product_id not in seen:
+                    # Rufe detaillierte Produktinformationen ab
+                    product_details = fetch_product_details_from_soup(soup, url)
+                    
+                    msg = (
+                        f"🎯 *{product_title}*\n"
+                        f"💶 {product_details['price']}\n"
+                        f"📊 {product_details['status']}\n"
+                        f"🔎 Treffer für: '{matched_term}'\n"
+                        f"🔗 [Zum Produkt]({url})"
+                    )
+                    
+                    if send_telegram_message(msg):
+                        seen.add(product_id)
+                        new_matches.append(product_id)
+                        print(f"✅ Neuer Treffer gefunden (potenzielle URL): {product_title}", flush=True)
+        except Exception as e:
+            print(f"❌ Fehler beim Überprüfen der URL {url}: {e}", flush=True)
+    
+    return new_matches
+
+def scrape_tcgviert_json(keywords_map, seen, session=None):
+    """
+    JSON-Scraper für tcgviert.com mit verbesserter Fehlerbehandlung
+    
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :param seen: Set mit bereits gesehenen Produkttiteln
+    :param session: Optional - existierende Session für die Anfrage
+    :return: Liste der neuen Treffer
+    """
+    new_matches = []
+    
+    try:
+        # Versuche zuerst den JSON-Endpunkt
+        response = make_request("https://tcgviert.com/products.json", session)
+        if not response or response.status_code != 200:
+            print("⚠️ API antwortet nicht mit Status 200", flush=True)
+            return []
+        
+        # Prüfe, ob die Antwort tatsächlich JSON ist
+        content_type = response.headers.get('Content-Type', '')
+        if 'application/json' not in content_type and 'text/json' not in content_type:
+            print(f"⚠️ Server hat kein JSON zurückgegeben. Content-Type: {content_type}", flush=True)
+            
+            # Versuche, die ersten 100 Zeichen der Antwort zu loggen
+            try:
+                print(f"⚠️ Antwortinhalt (Auszug): {response.text[:100]}...", flush=True)
+            except:
+                pass
+            
+            return []
+        
+        # Debuggen der JSON-Antwort
+        try:
+            # Versuche, die ersten 100 Zeichen der Antwort zu loggen
+            response_preview = response.text[:100].replace('\n', ' ')
+            print(f"📝 JSON-Antwort (Auszug): {response_preview}...", flush=True)
+            
+            data = response.json()
+        except json.JSONDecodeError as e:
+            print(f"❌ Fehler beim Dekodieren der JSON-Antwort: {e}", flush=True)
+            print(f"❌ Dies kann passieren, wenn die Website Ihren Zugriff blockiert oder ihr Format geändert hat.", flush=True)
+            
+            # Weitere Debug-Informationen
+            try:
+                print(f"❌ Fehlerposition: Zeile {e.lineno}, Spalte {e.colno}", flush=True)
+                print(f"❌ Fehlerkontext: {e.doc[max(0, e.pos-20):e.pos+20]}", flush=True)
+            except:
+                pass
+                
+            return []
+        
+        if "products" not in data or not data["products"]:
+            print("⚠️ Keine Produkte im JSON gefunden", flush=True)
+            return []
+        
+        products = data["products"]
+        print(f"🔍 {len(products)} Produkte zum Prüfen gefunden (JSON)", flush=True)
+        
+        # Debug-Ausgabe für alle Produkte mit bestimmten Keywords
+        print("🔍 Alle Produkte mit Journey Together oder Reisegefährten im Titel:", flush=True)
+        journey_products = []
+        for product in products:
+            title = product["title"]
+            if "journey together" in title.lower() or "reisegefährten" in title.lower():
+                print(f"  - {title}", flush=True)
+                journey_products.append(product)
+        
+        print(f"🔍 {len(journey_products)} Produkte mit gesuchten Keywords gefunden", flush=True)
+        
+        for product in products:
+            title = product["title"]
+            handle = product["handle"]
+            
+            print(f"🔍 Prüfe Produkt: '{title}'", flush=True)
+            
+            # Erstelle eine eindeutige ID basierend auf den Produktinformationen
+            product_id = create_product_id(title)
+            
+            # Prüfe jeden Suchbegriff gegen den Produkttitel
+            matched_term = None
+            for search_term, tokens in keywords_map.items():
+                match_result = is_keyword_in_text(tokens, title)
+                print(f"  - Vergleiche mit '{search_term}' (Tokens: {tokens}): {match_result}", flush=True)
+                
+                if match_result:
+                    matched_term = search_term
+                    break
+            
+            if matched_term and product_id not in seen:
+                # Produkt wurde noch nicht gemeldet
+                url = f"https://tcgviert.com/products/{handle}"
+                
+                # Preis aus der ersten Variante extrahieren, falls vorhanden
+                price = "Preis unbekannt"
+                if product.get("variants") and len(product["variants"]) > 0:
+                    price = f"{product['variants'][0].get('price', 'N/A')}€"
+                
+                # Status prüfen (verfügbar/ausverkauft)
+                available = False
+                for variant in product.get("variants", []):
+                    if variant.get("available", False):
+                        available = True
+                        break
+                
+                status = "✅ Verfügbar" if available else "❌ Ausverkauft"
+                
+                # Nachricht zusammenstellen
                 msg = (
-                    f"🎯 *{product_title}*\n"
-                    f"💶 {product_details['price']}\n"
-                    f"📊 {product_details['status']}\n"
+                    f"🎯 *{title}*\n"
+                    f"💶 {price}\n"
+                    f"📊 {status}\n"
                     f"🔎 Treffer für: '{matched_term}'\n"
                     f"🔗 [Zum Produkt]({url})"
                 )
                 
+                # Telegram-Nachricht senden
                 if send_telegram_message(msg):
                     seen.add(product_id)
                     new_matches.append(product_id)
-                    print(f"✅ Neuer Treffer gefunden (direkte URL): {product_title}", flush=True)
+                    print(f"✅ Neuer Treffer gefunden: {title}", flush=True)
+        
+    except Exception as e:
+        print(f"❌ Fehler beim TCGViert JSON-Scraping: {e}", flush=True)
     
     return new_matches
+
+def extract_product_info(title):
+    """
+    Extrahiert wichtige Produktinformationen aus dem Titel für eine präzise ID-Erstellung
+    
+    :param title: Produkttitel
+    :return: Tupel mit (series_code, product_type, language)
+    """
+    # Extrahiere Sprache (DE/EN/JP)
+    if "(DE)" in title or "pro Person" in title:
+        language = "DE"
+    elif "(EN)" in title or "per person" in title:
+        language = "EN"
+    elif "(JP)" in title or "japan" in title.lower():
+        language = "JP"
+    else:
+        language = "UNK"
+    
+    # Extrahiere Produkttyp
+    product_type = "unknown"
+    if re.search(r'display|36er', title.lower()):
+        product_type = "display"
+    elif re.search(r'booster|pack|sleeve', title.lower()):
+        product_type = "booster"
+    elif re.search(r'trainer box|elite trainer|box|tin', title.lower()):
+        product_type = "box"
+    elif re.search(r'blister|check\s?lane', title.lower()):
+        product_type = "blister"
+    
+    # Extrahiere Serien-/Set-Code
+    series_code = "unknown"
+    # Suche nach Standard-Codes wie SV09, KP09, etc.
+    code_match = re.search(r'(?:sv|kp|op)(?:\s|-)?\d+', title.lower())
+    if code_match:
+        series_code = code_match.group(0).replace(" ", "").replace("-", "")
+    # Spezifische Serien-Namen
+    elif "journey together" in title.lower():
+        series_code = "sv09"
+    elif "reisegefährten" in title.lower():
+        series_code = "kp09"
+    elif "royal blood" in title.lower():
+        series_code = "op10"
+    
+    return (series_code, product_type, language)
+
+def create_product_id(title, base_id="tcgviert"):
+    """
+    Erstellt eine eindeutige Produkt-ID basierend auf Titel und Produktinformationen
+    
+    :param title: Produkttitel
+    :param base_id: Basis-ID (z.B. Website-Name)
+    :return: Eindeutige Produkt-ID
+    """
+    # Extrahiere strukturierte Informationen
+    series_code, product_type, language = extract_product_info(title)
+    
+    # Erstelle eine strukturierte ID
+    product_id = f"{base_id}_{series_code}_{product_type}_{language}"
+    
+    # Füge zusätzliche Details für spezielle Produkte hinzu
+    if "premium" in title.lower():
+        product_id += "_premium"
+    if "elite" in title.lower():
+        product_id += "_elite"
+    if "top" in title.lower() and "trainer" in title.lower():
+        product_id += "_top"
+    
+    return product_id
 
 def fetch_product_details_from_soup(soup, url):
     """
@@ -346,6 +620,8 @@ def fetch_product_details_from_soup(soup, url):
                         # Preis extrahieren
                         if "price" in offers and offers["price"]:
                             details["price"] = str(offers["price"]) + "€"
+                            print(f"✅ Preis
+details["price"] = str(offers["price"]) + "€"
                             print(f"✅ Preis aus JSON gefunden: {details['price']}", flush=True)
                         
                         # Verfügbarkeit extrahieren
@@ -365,74 +641,6 @@ def fetch_product_details_from_soup(soup, url):
         print(f"❌ Fehler beim Extrahieren der Produktdetails: {e}", flush=True)
     
     return details
-
-def extract_product_info(title):
-    """
-    Extrahiert wichtige Produktinformationen aus dem Titel für eine präzise ID-Erstellung
-    
-    :param title: Produkttitel
-    :return: Tupel mit (series_code, product_type, language)
-    """
-    # Extrahiere Sprache (DE/EN/JP)
-    if "(DE)" in title or "pro Person" in title:
-        language = "DE"
-    elif "(EN)" in title or "per person" in title:
-        language = "EN"
-    elif "(JP)" in title or "japan" in title.lower():
-        language = "JP"
-    else:
-        language = "UNK"
-    
-    # Extrahiere Produkttyp
-    product_type = "unknown"
-    if re.search(r'display|36er', title.lower()):
-        product_type = "display"
-    elif re.search(r'booster|pack|sleeve', title.lower()):
-        product_type = "booster"
-    elif re.search(r'trainer box|elite trainer|box|tin', title.lower()):
-        product_type = "box"
-    elif re.search(r'blister|check\s?lane', title.lower()):
-        product_type = "blister"
-    
-    # Extrahiere Serien-/Set-Code
-    series_code = "unknown"
-    # Suche nach Standard-Codes wie SV09, KP09, etc.
-    code_match = re.search(r'(?:sv|kp|op)(?:\s|-)?\d+', title.lower())
-    if code_match:
-        series_code = code_match.group(0).replace(" ", "").replace("-", "")
-    # Spezifische Serien-Namen
-    elif "journey together" in title.lower():
-        series_code = "sv09"
-    elif "reisegefährten" in title.lower():
-        series_code = "kp09"
-    elif "royal blood" in title.lower():
-        series_code = "op10"
-    
-    return (series_code, product_type, language)
-
-def create_product_id(title, base_id="tcgviert"):
-    """
-    Erstellt eine eindeutige Produkt-ID basierend auf Titel und Produktinformationen
-    
-    :param title: Produkttitel
-    :param base_id: Basis-ID (z.B. Website-Name)
-    :return: Eindeutige Produkt-ID
-    """
-    # Extrahiere strukturierte Informationen
-    series_code, product_type, language = extract_product_info(title)
-    
-    # Erstelle eine strukturierte ID
-    product_id = f"{base_id}_{series_code}_{product_type}_{language}"
-    
-    # Füge zusätzliche Details für spezielle Produkte hinzu
-    if "premium" in title.lower():
-        product_id += "_premium"
-    if "elite" in title.lower():
-        product_id += "_elite"
-    if "top" in title.lower() and "trainer" in title.lower():
-        product_id += "_top"
-    
-    return product_id
 
 def fetch_product_details(product_url, session=None):
     """
@@ -551,100 +759,6 @@ def discover_collection_urls(session=None):
     except Exception as e:
         print(f"❌ Fehler bei der Collection-URL-Entdeckung: {e}", flush=True)
         return fallback_urls  # Fallback zur Alle-Produkte-Seite
-
-def scrape_tcgviert_json(keywords_map, seen, session=None):
-    """
-    JSON-Scraper für tcgviert.com
-    
-    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
-    :param seen: Set mit bereits gesehenen Produkttiteln
-    :param session: Optional - existierende Session für die Anfrage
-    :return: Liste der neuen Treffer
-    """
-    new_matches = []
-    
-    try:
-        # Versuche zuerst den JSON-Endpunkt
-        response = make_request("https://tcgviert.com/products.json", session)
-        if not response or response.status_code != 200:
-            print("⚠️ API antwortet nicht mit Status 200", flush=True)
-            return []
-        
-        data = response.json()
-        if "products" not in data or not data["products"]:
-            print("⚠️ Keine Produkte im JSON gefunden", flush=True)
-            return []
-        
-        products = data["products"]
-        print(f"🔍 {len(products)} Produkte zum Prüfen gefunden (JSON)", flush=True)
-        
-        # Debug-Ausgabe für alle Produkte mit bestimmten Keywords
-        print("🔍 Alle Produkte mit Journey Together oder Reisegefährten im Titel:", flush=True)
-        journey_products = []
-        for product in products:
-            title = product["title"]
-            if "journey together" in title.lower() or "reisegefährten" in title.lower():
-                print(f"  - {title}", flush=True)
-                journey_products.append(product)
-        
-        print(f"🔍 {len(journey_products)} Produkte mit gesuchten Keywords gefunden", flush=True)
-        
-        for product in products:
-            title = product["title"]
-            handle = product["handle"]
-            
-            print(f"🔍 Prüfe Produkt: '{title}'", flush=True)
-            
-            # Erstelle eine eindeutige ID basierend auf den Produktinformationen
-            product_id = create_product_id(title)
-            
-            # Prüfe jeden Suchbegriff gegen den Produkttitel
-            matched_term = None
-            for search_term, tokens in keywords_map.items():
-                match_result = is_keyword_in_text(tokens, title)
-                print(f"  - Vergleiche mit '{search_term}' (Tokens: {tokens}): {match_result}", flush=True)
-                
-                if match_result:
-                    matched_term = search_term
-                    break
-            
-            if matched_term and product_id not in seen:
-                # Produkt wurde noch nicht gemeldet
-                url = f"https://tcgviert.com/products/{handle}"
-                
-                # Preis aus der ersten Variante extrahieren, falls vorhanden
-                price = "Preis unbekannt"
-                if product.get("variants") and len(product["variants"]) > 0:
-                    price = f"{product['variants'][0].get('price', 'N/A')}€"
-                
-                # Status prüfen (verfügbar/ausverkauft)
-                available = False
-                for variant in product.get("variants", []):
-                    if variant.get("available", False):
-                        available = True
-                        break
-                
-                status = "✅ Verfügbar" if available else "❌ Ausverkauft"
-                
-                # Nachricht zusammenstellen
-                msg = (
-                    f"🎯 *{title}*\n"
-                    f"💶 {price}\n"
-                    f"📊 {status}\n"
-                    f"🔎 Treffer für: '{matched_term}'\n"
-                    f"🔗 [Zum Produkt]({url})"
-                )
-                
-                # Telegram-Nachricht senden
-                if send_telegram_message(msg):
-                    seen.add(product_id)
-                    new_matches.append(product_id)
-                    print(f"✅ Neuer Treffer gefunden: {title}", flush=True)
-        
-    except Exception as e:
-        print(f"❌ Fehler beim TCGViert JSON-Scraping: {e}", flush=True)
-    
-    return new_matches
 
 def scrape_tcgviert_html(urls, keywords_map, seen, session=None):
     """HTML-Scraper für tcgviert.com"""
