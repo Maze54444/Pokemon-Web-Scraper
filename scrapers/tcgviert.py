@@ -1,8 +1,105 @@
 import requests
 import re
+import json
+import time
+import random
 from bs4 import BeautifulSoup
 from utils.telegram import send_telegram_message
 from utils.matcher import is_keyword_in_text, clean_text
+
+# Importiere die neuen Anfrage-Funktionen
+# Hinweis: Diese Zeile muss auskommentiert werden, wenn die Funktionen direkt in dieser Datei definiert sind
+# from request_handling import create_session, get_random_headers, make_request
+
+# Fallback, falls die Datei nicht importiert werden kann
+def create_session():
+    """
+    Erstellt eine robuste Session mit Retry-Logik und realistischen Headers
+    
+    :return: Requests Session-Objekt
+    """
+    session = requests.Session()
+    
+    # Standard-Headers für alle Anfragen in dieser Session
+    session.headers.update(get_random_headers())
+    
+    return session
+
+def get_random_headers():
+    """
+    Generiert realistische Browser-Headers mit zufälligen User-Agents
+    
+    :return: Dictionary mit HTTP-Headers
+    """
+    # Liste von realistischen User-Agents
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/112.0",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"
+    ]
+    
+    # Realistischer Header
+    headers = {
+        "User-Agent": random.choice(user_agents),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "de,en-US;q=0.7,en;q=0.3",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.google.com/",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0"
+    }
+    
+    return headers
+
+def make_request(url, session=None, timeout=15, delay=True):
+    """
+    Führt eine HTTP-Anfrage mit verbesserter Fehlerbehandlung durch
+    
+    :param url: URL für die Anfrage
+    :param session: Bestehende Session oder None für eine neue
+    :param timeout: Timeout in Sekunden
+    :param delay: Ob eine zufällige Verzögerung hinzugefügt werden soll
+    :return: Response-Objekt oder None bei Fehler
+    """
+    # Zufällige Verzögerung, um Bot-Erkennung zu vermeiden
+    if delay:
+        time.sleep(random.uniform(1, 3))
+    
+    use_session = session if session else create_session()
+    
+    try:
+        response = use_session.get(url, timeout=timeout)
+        
+        # Überprüfe auf Sperren oder Captchas
+        if response.status_code == 403:
+            print(f"⚠️ Zugriff verweigert (403) für URL: {url}", flush=True)
+            print("⚠️ Die Website hat möglicherweise Anti-Bot-Maßnahmen implementiert.", flush=True)
+        elif response.status_code == 429:
+            print(f"⚠️ Rate-Limit überschritten (429) für URL: {url}", flush=True)
+            # Längere Wartezeit bei Rate-Limiting
+            if delay:
+                time.sleep(random.uniform(10, 15))
+        elif response.status_code != 200:
+            print(f"⚠️ Unerwarteter Status-Code {response.status_code} für URL: {url}", flush=True)
+        
+        return response
+    
+    except requests.exceptions.Timeout:
+        print(f"⚠️ Timeout bei Anfrage an {url}", flush=True)
+    except requests.exceptions.ConnectionError:
+        print(f"⚠️ Verbindungsfehler bei Anfrage an {url}", flush=True)
+    except Exception as e:
+        print(f"❌ Fehler bei Anfrage an {url}: {e}", flush=True)
+    
+    return None
 
 def scrape_tcgviert(keywords_map, seen):
     """
@@ -15,20 +112,29 @@ def scrape_tcgviert(keywords_map, seen):
     print("🌐 Starte Scraper für tcgviert.com", flush=True)
     print(f"🔍 Suche nach folgenden Begriffen: {list(keywords_map.keys())}", flush=True)
     
+    # Eine gemeinsame Session für alle Anfragen
+    session = create_session()
+    
     json_matches = []
     html_matches = []
     
     # Versuche beide Methoden und kombiniere die Ergebnisse
     try:
-        json_matches = scrape_tcgviert_json(keywords_map, seen)
+        json_matches = scrape_tcgviert_json(keywords_map, seen, session)
     except Exception as e:
         print(f"❌ Fehler beim JSON-Scraping: {e}", flush=True)
     
     try:
-        # Hauptseite scrapen, um die richtigen Collection-URLs zu finden
-        main_page_urls = discover_collection_urls()
-        if main_page_urls:
-            html_matches = scrape_tcgviert_html(main_page_urls, keywords_map, seen)
+        # Wenn JSON-Scraping fehlschlägt oder keine Ergebnisse liefert,
+        # versuche die speziellen Produkt-URLs direkt anzusteuern
+        if not json_matches:
+            print("ℹ️ Versuche direkten Zugriff auf Produkt-URLs", flush=True)
+            html_matches = scrape_product_urls(keywords_map, seen, session)
+        else:
+            # Hauptseite scrapen, um die richtigen Collection-URLs zu finden
+            main_page_urls = discover_collection_urls(session)
+            if main_page_urls:
+                html_matches = scrape_tcgviert_html(main_page_urls, keywords_map, seen, session)
     except Exception as e:
         print(f"❌ Fehler beim HTML-Scraping: {e}", flush=True)
     
@@ -36,6 +142,229 @@ def scrape_tcgviert(keywords_map, seen):
     all_matches = list(set(json_matches + html_matches))
     print(f"✅ Insgesamt {len(all_matches)} einzigartige Treffer gefunden", flush=True)
     return all_matches
+
+def scrape_product_urls(keywords_map, seen, session=None):
+    """
+    Direkte Suche nach Produkt-URLs für die gesuchten Produkte
+    
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :param seen: Set mit bereits gesehenen Produkttiteln
+    :param session: Requests Session oder None
+    :return: Liste der neuen Treffer
+    """
+    new_matches = []
+    
+    # Generiere wahrscheinliche Produkt-URLs basierend auf Suchbegriffen
+    potential_urls = []
+    
+    # Mapping für Suchbegriffe zu möglichen URL-Slugs
+    search_to_slug = {
+        "journey together": ["journey-together", "pokemon-tcg-journey-together-sv09"],
+        "sv09": ["journey-together", "sv09"],
+        "reisegefährten": ["reisegefaehrten", "reisegefaehrten-kp09", "pokemon-tcg-reisegefaehrten-kp09"],
+        "kp09": ["reisegefaehrten", "kp09"],
+        "royal blood": ["royal-blood", "piece-royal-blood", "op10-royal-blood"]
+    }
+    
+    # Produkt-Typen für die URL-Generierung
+    product_types = [
+        "36er-display",
+        "elite-trainer-box",
+        "top-trainer-box",
+        "checklane-blister",
+        "premium-checklane-blister",
+        "sleeved-booster",
+        "premium-box"
+    ]
+    
+    # Sprachen für die URL-Generierung
+    languages = ["en", "de", "jp"]
+    
+    # Generiere URLs basierend auf Kombinationen
+    base_url = "https://tcgviert.com/products/"
+    
+    for search_term in keywords_map:
+        search_lower = search_term.lower()
+        
+        # Finde passende Slug-Kandidaten
+        slug_candidates = []
+        for key, slugs in search_to_slug.items():
+            if key in search_lower:
+                slug_candidates.extend(slugs)
+        
+        if not slug_candidates:
+            # Fallback: Versuche den Suchbegriff selbst zu slugifizieren
+            slug = search_lower.replace(" ", "-").replace(":", "").replace("(", "").replace(")", "")
+            slug_candidates.append(slug)
+        
+        # Generiere mögliche URLs
+        for slug in slug_candidates:
+            for lang in languages:
+                for prod_type in product_types:
+                    # Format 1: pokemon-tcg-journey-together-sv09-36er-display-en-max-1-per-person
+                    url1 = f"{base_url}pokemon-tcg-{slug}-{prod_type}-{lang}-max"
+                    
+                    # Format 2: journey-together-sv09-36er-display-en
+                    url2 = f"{base_url}{slug}-{prod_type}-{lang}"
+                    
+                    potential_urls.append(url1)
+                    potential_urls.append(url2)
+    
+    # Entferne Duplikate
+    potential_urls = list(set(potential_urls))
+    print(f"🔍 Teste {len(potential_urls)} potenzielle Produkt-URLs", flush=True)
+    
+    # Überprüfe die URLs
+    for url in potential_urls:
+        response = make_request(url, session)
+        
+        if not response or response.status_code != 200:
+            continue
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        product_title_elem = soup.select_one(".product__title h1, .product-single__title, h1.title")
+        
+        if not product_title_elem:
+            continue
+        
+        product_title = product_title_elem.text.strip()
+        print(f"✅ Gültiges Produkt gefunden: {product_title} unter {url}", flush=True)
+        
+        # Prüfe, ob das Produkt zu einem der Suchbegriffe passt
+        matched_term = None
+        for search_term, tokens in keywords_map.items():
+            if is_keyword_in_text(tokens, product_title):
+                matched_term = search_term
+                break
+        
+        if matched_term:
+            # Erstelle eine eindeutige ID basierend auf den Produktinformationen
+            product_id = create_product_id(product_title)
+            
+            if product_id not in seen:
+                # Rufe detaillierte Produktinformationen ab
+                product_details = fetch_product_details_from_soup(soup, url)
+                
+                msg = (
+                    f"🎯 *{product_title}*\n"
+                    f"💶 {product_details['price']}\n"
+                    f"📊 {product_details['status']}\n"
+                    f"🔎 Treffer für: '{matched_term}'\n"
+                    f"🔗 [Zum Produkt]({url})"
+                )
+                
+                if send_telegram_message(msg):
+                    seen.add(product_id)
+                    new_matches.append(product_id)
+                    print(f"✅ Neuer Treffer gefunden (direkte URL): {product_title}", flush=True)
+    
+    return new_matches
+
+def fetch_product_details_from_soup(soup, url):
+    """
+    Extrahiert Produktdetails aus einem bereits geparsten BeautifulSoup-Objekt
+    
+    :param soup: BeautifulSoup-Objekt der Produktseite
+    :param url: URL der Produktseite (für Debugging)
+    :return: Dictionary mit Preis und Verfügbarkeitsstatus
+    """
+    details = {
+        "price": "Preis nicht verfügbar",
+        "status": "Status unbekannt"
+    }
+    
+    try:
+        # Preis extrahieren - verschiedene mögliche Selektoren
+        price_selectors = [
+            ".product__price", 
+            ".price", 
+            ".product-single__price",
+            "[data-product-price]",
+            ".product-price",
+            ".product-single__price",
+            "#product-variants"
+        ]
+        
+        for selector in price_selectors:
+            price_elem = soup.select_one(selector)
+            if price_elem:
+                price_text = price_elem.get_text().strip()
+                # Entferne nicht-numerische Zeichen außer Punkt und Komma
+                price_clean = re.sub(r'[^\d,.]', '', price_text)
+                if price_clean:
+                    details["price"] = price_clean + "€"
+                    print(f"✅ Preis gefunden: {details['price']}", flush=True)
+                    break
+        
+        # Verfügbarkeitsstatus extrahieren
+        # Prüfe auf "Ausverkauft"-Indikatoren
+        sold_out_indicators = ["ausverkauft", "sold out", "out of stock", "nicht verfügbar", "not available"]
+        page_text = soup.get_text().lower()
+        
+        # Suche nach Verfügbarkeitsindikator im Text
+        availability_selectors = [
+            ".product-form__inventory", 
+            ".product__availability",
+            ".stock-status",
+            "[data-stock-status]",
+            ".inventoryMessage"
+        ]
+        
+        availability_text = ""
+        for selector in availability_selectors:
+            availability_elem = soup.select_one(selector)
+            if availability_elem:
+                availability_text = availability_elem.get_text().lower().strip()
+                break
+        
+        # Bestimme Status basierend auf Text
+        if any(indicator in page_text for indicator in sold_out_indicators) or any(indicator in availability_text for indicator in sold_out_indicators):
+            details["status"] = "❌ Ausverkauft"
+        elif "vorbestellung" in page_text or "pre-order" in page_text:
+            details["status"] = "🔜 Vorbestellung"
+        elif "add to cart" in page_text or "in den warenkorb" in page_text:
+            details["status"] = "✅ Verfügbar"
+        
+        # Prüfe zusätzlich auf Add-to-Cart-Button
+        cart_button = soup.select_one("button[name='add'], .add-to-cart, .product-form__cart-submit")
+        if cart_button and "disabled" not in cart_button.get("class", []) and "sold-out" not in cart_button.get("class", []):
+            details["status"] = "✅ Verfügbar"
+        
+        print(f"✅ Status gefunden: {details['status']}", flush=True)
+        
+        # Alternativ: JSON-Daten aus der Seite extrahieren
+        # Dies ist eine robustere Methode, da viele Shops Produktdaten als JSON in die Seite einbetten
+        script_tags = soup.find_all("script", type="application/ld+json")
+        for script in script_tags:
+            try:
+                json_data = json.loads(script.string)
+                
+                # Suche nach Produktdaten im JSON
+                if isinstance(json_data, dict) and "offers" in json_data:
+                    offers = json_data["offers"]
+                    if isinstance(offers, dict):
+                        # Preis extrahieren
+                        if "price" in offers and offers["price"]:
+                            details["price"] = str(offers["price"]) + "€"
+                            print(f"✅ Preis aus JSON gefunden: {details['price']}", flush=True)
+                        
+                        # Verfügbarkeit extrahieren
+                        if "availability" in offers:
+                            availability = offers["availability"].lower()
+                            if "outofstock" in availability:
+                                details["status"] = "❌ Ausverkauft"
+                            elif "preorder" in availability:
+                                details["status"] = "🔜 Vorbestellung"
+                            elif "instock" in availability:
+                                details["status"] = "✅ Verfügbar"
+                            print(f"✅ Status aus JSON gefunden: {details['status']}", flush=True)
+            except Exception as e:
+                print(f"⚠️ Fehler beim Parsen der JSON-Daten: {e}", flush=True)
+        
+    except Exception as e:
+        print(f"❌ Fehler beim Extrahieren der Produktdetails: {e}", flush=True)
+    
+    return details
 
 def extract_product_info(title):
     """
@@ -105,11 +434,12 @@ def create_product_id(title, base_id="tcgviert"):
     
     return product_id
 
-def fetch_product_details(product_url):
+def fetch_product_details(product_url, session=None):
     """
     Ruft detaillierte Produktinformationen direkt von der Produktseite ab
     
     :param product_url: URL der Produktseite
+    :param session: Optional - existierende Session für die Anfrage
     :return: Dictionary mit Preis und Verfügbarkeitsstatus
     """
     print(f"🔍 Rufe Produktdetails von {product_url} ab", flush=True)
@@ -118,128 +448,53 @@ def fetch_product_details(product_url):
         "status": "Status unbekannt"
     }
     
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
-        response = requests.get(product_url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            print(f"⚠️ Fehler beim Abrufen der Produktdetails: Status {response.status_code}", flush=True)
-            return details
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Preis extrahieren - verschiedene mögliche Selektoren
-        price_selectors = [
-            ".product__price", 
-            ".price", 
-            ".product-single__price",
-            "[data-product-price]",
-            ".product-price",
-            ".product-single__price"
-        ]
-        
-        for selector in price_selectors:
-            price_elem = soup.select_one(selector)
-            if price_elem:
-                price_text = price_elem.get_text().strip()
-                # Entferne nicht-numerische Zeichen außer Punkt und Komma
-                price_clean = re.sub(r'[^\d,.]', '', price_text)
-                if price_clean:
-                    details["price"] = price_clean + "€"
-                    print(f"✅ Preis gefunden: {details['price']}", flush=True)
-                    break
-        
-        # Verfügbarkeitsstatus extrahieren
-        # Prüfe auf "Ausverkauft"-Indikatoren
-        sold_out_indicators = ["ausverkauft", "sold out", "out of stock", "nicht verfügbar", "not available"]
-        page_text = soup.get_text().lower()
-        
-        # Suche nach Verfügbarkeitsindikator im Text
-        availability_selectors = [
-            ".product-form__inventory", 
-            ".product__availability",
-            ".stock-status",
-            "[data-stock-status]",
-            ".inventoryMessage"
-        ]
-        
-        availability_text = ""
-        for selector in availability_selectors:
-            availability_elem = soup.select_one(selector)
-            if availability_elem:
-                availability_text = availability_elem.get_text().lower().strip()
-                break
-        
-        # Bestimme Status basierend auf Text
-        if any(indicator in page_text for indicator in sold_out_indicators) or any(indicator in availability_text for indicator in sold_out_indicators):
-            details["status"] = "❌ Ausverkauft"
-        elif "vorbestellung" in page_text or "pre-order" in page_text:
-            details["status"] = "🔜 Vorbestellung"
-        elif "add to cart" in page_text or "in den warenkorb" in page_text:
-            details["status"] = "✅ Verfügbar"
-        
-        # Prüfe zusätzlich auf Add-to-Cart-Button
-        cart_button = soup.select_one("button[name='add'], .add-to-cart, .product-form__cart-submit")
-        if cart_button and "disabled" not in cart_button.get("class", []) and "sold-out" not in cart_button.get("class", []):
-            details["status"] = "✅ Verfügbar"
-        
-        print(f"✅ Status gefunden: {details['status']}", flush=True)
-        
-        # Alternativ: JSON-Daten aus der Seite extrahieren
-        # Dies ist eine robustere Methode, da viele Shops Produktdaten als JSON in die Seite einbetten
-        script_tags = soup.find_all("script", type="application/ld+json")
-        for script in script_tags:
-            try:
-                import json
-                json_data = json.loads(script.string)
-                
-                # Suche nach Produktdaten im JSON
-                if isinstance(json_data, dict) and "offers" in json_data:
-                    offers = json_data["offers"]
-                    if isinstance(offers, dict):
-                        # Preis extrahieren
-                        if "price" in offers and offers["price"]:
-                            details["price"] = str(offers["price"]) + "€"
-                            print(f"✅ Preis aus JSON gefunden: {details['price']}", flush=True)
-                        
-                        # Verfügbarkeit extrahieren
-                        if "availability" in offers:
-                            availability = offers["availability"].lower()
-                            if "outofstock" in availability:
-                                details["status"] = "❌ Ausverkauft"
-                            elif "preorder" in availability:
-                                details["status"] = "🔜 Vorbestellung"
-                            elif "instock" in availability:
-                                details["status"] = "✅ Verfügbar"
-                            print(f"✅ Status aus JSON gefunden: {details['status']}", flush=True)
-            except Exception as e:
-                print(f"⚠️ Fehler beim Parsen der JSON-Daten: {e}", flush=True)
-        
-    except Exception as e:
-        print(f"❌ Fehler beim Abrufen der Produktdetails: {e}", flush=True)
+    response = make_request(product_url, session)
     
-    return details
+    if not response or response.status_code != 200:
+        return details
+    
+    soup = BeautifulSoup(response.text, "html.parser")
+    return fetch_product_details_from_soup(soup, product_url)
 
-def discover_collection_urls():
-    """Entdeckt aktuelle Collection-URLs durch Scraping der Hauptseite"""
-    from bs4 import BeautifulSoup
+def discover_collection_urls(session=None):
+    """
+    Entdeckt aktuelle Collection-URLs durch Scraping der Hauptseite
     
-    print("🔍 Suche nach gültigen Collection-URLs auf der Hauptseite", flush=True)
+    :param session: Optional - existierende Session für die Anfrage
+    :return: Liste der gefundenen Collection-URLs
+    """
+    print("🔍 Suche nach gültigen Collection-URLs", flush=True)
+    
+    # Fallback-URLs (für den Fall, dass die Hauptseite nicht gescrapt werden kann)
+    fallback_urls = [
+        "https://tcgviert.com/collections/all",
+        "https://tcgviert.com/collections/vorbestellungen",
+        "https://tcgviert.com/collections/pokemon",
+        "https://tcgviert.com/collections/pokemon-tcg"
+    ]
+    
+    # Da wir oft Probleme mit der Hauptseite haben, versuchen wir zuerst direkt die Sammlungs-URLs
+    if not session:
+        session = create_session()
+    
     valid_urls = []
+    for url in fallback_urls:
+        response = make_request(url, session, delay=False)  # Keine Verzögerung, da wir nur wenige URLs testen
+        if response and response.status_code == 200:
+            valid_urls.append(url)
+            print(f"✅ Gültige Collection-URL gefunden: {url}", flush=True)
     
+    if valid_urls:
+        return valid_urls
+    
+    # Falls keine Fallback-URLs funktionieren, versuchen wir die Hauptseite
     try:
-        # Starte mit der Hauptseite
         main_url = "https://tcgviert.com"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
+        response = make_request(main_url, session)
         
-        response = requests.get(main_url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            print(f"⚠️ Fehler beim Abrufen der Hauptseite: Status {response.status_code}", flush=True)
-            return []
+        if not response or response.status_code != 200:
+            print(f"⚠️ Fehler beim Abrufen der Hauptseite: Status {response.status_code if response else 'keine Antwort'}", flush=True)
+            return fallback_urls  # Fallback zu Standard-URLs
         
         soup = BeautifulSoup(response.text, "html.parser")
         
@@ -261,13 +516,10 @@ def discover_collection_urls():
         
         # Prüfe, welche URLs tatsächlich existieren
         for url in collection_urls:
-            try:
-                test_response = requests.get(url, headers=headers, timeout=10)
-                if test_response.status_code == 200:
-                    valid_urls.append(url)
-                    print(f"✅ Gültige Collection-URL gefunden: {url}", flush=True)
-            except Exception:
-                pass
+            response = make_request(url, session, delay=False)  # Keine Verzögerung innerhalb der Schleife
+            if response and response.status_code == 200:
+                valid_urls.append(url)
+                print(f"✅ Gültige Collection-URL gefunden: {url}", flush=True)
         
         # Gib immer die URL für "alle Produkte" mit zurück
         all_products_url = f"{main_url}/collections/all"
@@ -285,7 +537,7 @@ def discover_collection_urls():
                 priority_urls.append(url)
         
         # Füge die Standard-URLs hinzu
-        for url in ["https://tcgviert.com/collections/all", "https://tcgviert.com/collections/vorbestellungen"]:
+        for url in fallback_urls:
             if url in valid_urls and url not in priority_urls:
                 priority_urls.append(url)
         
@@ -298,16 +550,23 @@ def discover_collection_urls():
         
     except Exception as e:
         print(f"❌ Fehler bei der Collection-URL-Entdeckung: {e}", flush=True)
-        return ["https://tcgviert.com/collections/all"]  # Fallback zur Alle-Produkte-Seite
+        return fallback_urls  # Fallback zur Alle-Produkte-Seite
 
-def scrape_tcgviert_json(keywords_map, seen):
-    """JSON-Scraper für tcgviert.com"""
+def scrape_tcgviert_json(keywords_map, seen, session=None):
+    """
+    JSON-Scraper für tcgviert.com
+    
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :param seen: Set mit bereits gesehenen Produkttiteln
+    :param session: Optional - existierende Session für die Anfrage
+    :return: Liste der neuen Treffer
+    """
     new_matches = []
     
     try:
         # Versuche zuerst den JSON-Endpunkt
-        response = requests.get("https://tcgviert.com/products.json", timeout=10)
-        if response.status_code != 200:
+        response = make_request("https://tcgviert.com/products.json", session)
+        if not response or response.status_code != 200:
             print("⚠️ API antwortet nicht mit Status 200", flush=True)
             return []
         
@@ -387,22 +646,18 @@ def scrape_tcgviert_json(keywords_map, seen):
     
     return new_matches
 
-def scrape_tcgviert_html(urls, keywords_map, seen):
+def scrape_tcgviert_html(urls, keywords_map, seen, session=None):
     """HTML-Scraper für tcgviert.com"""
     print("🔄 Starte HTML-Scraping für tcgviert.com", flush=True)
     new_matches = []
     
-    from bs4 import BeautifulSoup
-    
     for url in urls:
         try:
             print(f"🔍 Durchsuche {url}", flush=True)
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
-            response = requests.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                print(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}", flush=True)
+            
+            response = make_request(url, session)
+            if not response or response.status_code != 200:
+                print(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code if response else 'keine Antwort'}", flush=True)
                 continue
             
             soup = BeautifulSoup(response.text, "html.parser")
@@ -448,7 +703,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen):
                         product_url = f"https://tcgviert.com{href}" if href.startswith("/") else href
                         
                         # NEU: Rufe detaillierte Produktinformationen ab
-                        product_details = fetch_product_details(product_url)
+                        product_details = fetch_product_details(product_url, session)
                         
                         msg = (
                             f"🎯 *{text}*\n"
@@ -566,7 +821,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen):
                     # NEU: Wenn Preis oder Status unbekannt/nicht verfügbar sind, rufe Produktdetails ab
                     if initial_price == "Preis nicht verfügbar" or initial_status == "Unbekannt" or initial_status == "Status unbekannt":
                         print(f"🔍 Fehlende Informationen - rufe Produktseite für Details ab: {product_url}", flush=True)
-                        product_details = fetch_product_details(product_url)
+                        product_details = fetch_product_details(product_url, session)
                         price = product_details["price"]
                         status = product_details["status"]
                     else:
@@ -592,7 +847,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen):
     return new_matches
 
 # Generische Version für Anpassung an andere Webseiten
-def generic_scrape_product(url, product_title, product_url, price, status, matched_term, seen, new_matches, site_id="generic"):
+def generic_scrape_product(url, product_title, product_url, price, status, matched_term, seen, new_matches, site_id="generic", session=None):
     """
     Generische Funktion zur Verarbeitung gefundener Produkte für beliebige Websites
     
@@ -605,6 +860,7 @@ def generic_scrape_product(url, product_title, product_url, price, status, match
     :param seen: Set mit bereits gesehenen Produkt-IDs
     :param new_matches: Liste der neu gefundenen Produkt-IDs
     :param site_id: ID der Website (für Produkt-ID-Erstellung)
+    :param session: Optional - existierende Session für die Anfrage
     :return: None
     """
     # Erstelle eine eindeutige ID basierend auf den Produktinformationen
@@ -613,7 +869,7 @@ def generic_scrape_product(url, product_title, product_url, price, status, match
     # NEU: Wenn Preis oder Status unbekannt/nicht verfügbar sind, rufe Produktdetails ab
     if price == "Preis nicht verfügbar" or status == "Status unbekannt" or status == "Unbekannt":
         print(f"🔍 Fehlende Informationen - rufe Produktseite für Details ab: {product_url}", flush=True)
-        product_details = fetch_product_details(product_url)
+        product_details = fetch_product_details(product_url, session)
         price = product_details["price"]
         status = product_details["status"]
     
