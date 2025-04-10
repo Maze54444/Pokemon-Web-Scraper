@@ -5,6 +5,8 @@ import re
 from utils.matcher import clean_text, is_keyword_in_text
 from utils.telegram import send_telegram_message
 from utils.stock import get_status_text, update_product_status
+# Importiere das neue Modul für webseitenspezifische Verfügbarkeitsprüfung
+from utils.availability import detect_availability, extract_price
 
 def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=True, only_available=False):
     """
@@ -91,10 +93,11 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
             # Wenn erforderlich, Produktdetailseite besuchen, um Verfügbarkeit zu prüfen
             is_available = True  # Standard: verfügbar, wenn wir es nicht besser wissen
             price = "Preis nicht verfügbar"
+            status_text = ""
             
             if check_availability:
                 try:
-                    detail_soup, is_available, price = check_product_availability(product_url, headers)
+                    detail_soup, is_available, price, status_text = check_product_availability(product_url, headers)
                     
                     # Falls auf der Detailseite mehr Keywords gefunden werden können
                     if not matched_term and detail_soup:
@@ -117,8 +120,9 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
             )
             
             if should_notify:
-                # Status-Text erstellen
-                status_text = get_status_text(is_available, is_back_in_stock)
+                # Status-Text erstellen oder den bereits generierten verwenden
+                if not status_text:
+                    status_text = get_status_text(is_available, is_back_in_stock)
                 
                 # Nachricht zusammenstellen
                 msg = (
@@ -151,85 +155,23 @@ def check_product_availability(url, headers):
     
     :param url: Produkt-URL
     :param headers: HTTP-Headers für die Anfrage
-    :return: Tuple (BeautifulSoup-Objekt, Verfügbarkeitsstatus, Preis)
+    :return: Tuple (BeautifulSoup-Objekt, Verfügbarkeitsstatus, Preis, Status-Text)
     """
     print(f"🔍 Prüfe Produktdetails für {url}", flush=True)
     
     response = requests.get(url, headers=headers, timeout=15)
     if response.status_code != 200:
-        return None, False, "Preis nicht verfügbar"
+        return None, False, "Preis nicht verfügbar", "❌ Ausverkauft (Fehler beim Laden)"
     
     soup = BeautifulSoup(response.text, "html.parser")
-    page_text = soup.get_text().lower()
     
-    # Preis extrahieren
-    price = extract_price(soup)
+    # Verwende das neue Availability-Modul für webseitenspezifische Erkennung
+    is_available, price, status_text = detect_availability(soup, url)
     
-    # Verfügbarkeit prüfen - Verschiedene Muster
-    unavailable_patterns = [
-        'ausverkauft', 'sold out', 'out of stock', 'nicht verfügbar', 
-        'nicht auf lager', 'vergriffen', 'derzeit nicht verfügbar'
-    ]
-    
-    # Suche nach Add-to-Cart / Buy-Buttons als positives Signal
-    available_buttons = soup.select('button[type="submit"], input[type="submit"], .add-to-cart, .buy-now, #AddToCart, .product-form__cart-submit')
-    has_add_button = len(available_buttons) > 0 and not any(
-        'disabled' in str(btn) or 'ausverkauft' in btn.get_text().lower() or 'sold out' in btn.get_text().lower()
-        for btn in available_buttons
-    )
-    
-    # Prüfe auf "Vorbestellbar" oder "Pre-order" als Form der Verfügbarkeit
-    preorder_patterns = ['vorbestellbar', 'vorbestellung', 'pre-order', 'preorder']
-    is_preorder = any(pattern in page_text for pattern in preorder_patterns)
-    
-    # Prüfe auf diverse "Nicht verfügbar" Signale
-    is_unavailable = any(pattern in page_text for pattern in unavailable_patterns)
-    
-    # Entscheidungslogik
-    is_available = (has_add_button or is_preorder) and not is_unavailable
-    
-    print(f"  - Verfügbarkeit für {url}: {'✅ Verfügbar' if is_available else '❌ Ausverkauft'}", flush=True)
+    print(f"  - Verfügbarkeit für {url}: {status_text}", flush=True)
     print(f"  - Preis: {price}", flush=True)
     
-    return soup, is_available, price
-
-def extract_price(soup):
-    """
-    Extrahiert den Preis aus der Produktseite
-    
-    :param soup: BeautifulSoup-Objekt der Produktseite
-    :return: Formatierter Preis oder Standardtext
-    """
-    # Gemeinsame Preis-Selektoren
-    price_selectors = [
-        '.price', '.product-price', '.woocommerce-Price-amount', 
-        '[itemprop="price"]', '.product__price', '.price-item',
-        '.current-price', '.product-single__price'
-    ]
-    
-    # Versuche, Preis mit verschiedenen Selektoren zu finden
-    for selector in price_selectors:
-        price_elem = soup.select_one(selector)
-        if price_elem:
-            price_text = price_elem.get_text().strip()
-            # Bereinige Preis
-            price_text = re.sub(r'\s+', ' ', price_text)
-            return price_text
-    
-    # Wenn kein strukturiertes Element gefunden wurde, versuche Regex
-    page_text = soup.get_text()
-    price_patterns = [
-        r'(\d+[,.]\d+)\s*[€$£]',  # 19,99 € oder 19.99 €
-        r'[€$£]\s*(\d+[,.]\d+)',  # € 19,99 oder € 19.99
-        r'(\d+[,.]\d+)',          # Nur Zahl als letzter Versuch
-    ]
-    
-    for pattern in price_patterns:
-        match = re.search(pattern, page_text)
-        if match:
-            return f"{match.group(1)}€"
-    
-    return "Preis nicht verfügbar"
+    return soup, is_available, price, status_text
 
 def create_product_id(product_title, site_id="generic"):
     """
@@ -297,4 +239,5 @@ def extract_product_info(title):
     elif "royal blood" in title.lower():
         series_code = "op10"
     
+    return (series_code, product_type, language)
     return (series_code, product_type, language)

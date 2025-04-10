@@ -1,0 +1,140 @@
+Detaillierte Zusammenstellung der Verfügbarkeitsmerkmale nach Webshops
+
+1. Comicplanet
+URL: https://www.comicplanet.de/search?search=reisegef%C3%A4hrten
+Verfügbare Produkte:
+
+Interaktionselement: Deutlich sichtbare blaue Schaltfläche
+Text auf Schaltfläche: "In den Warenkorb"
+Position: Unter dem Produktpreis
+Beispiel: "Pokemon Karmesin & Purpur Reisegefährten Booster Display" mit blauem "In den Warenkorb"-Button
+
+Nicht verfügbare Produkte:
+
+In der Produktübersicht: Schwarze Schaltfläche mit "Details" statt Kaufoption
+Auf der Produktdetailseite: Roter Text "Nicht mehr verfügbar" deutlich sichtbar
+Zusatzfunktion: Oranger Benachrichtigungsbereich mit Text "Benachrichtige mich, sobald der Artikel lieferbar ist."
+E-Mail-Eingabefeld: Vorhanden für Verfügbarkeitsbenachrichtigung
+Beispiel: "Pokemon Karmesin & Purpur Reisegefährten 3er Booster Blister - Irokex deutsch"
+
+2. Kofuku
+URL: https://kofuku.de/search?options%5Bprefix%5D=last&q=reisegef%C3%A4hrten
+Verfügbare Produkte:
+
+Interaktionselement: Dunkelblauer Button
+Text auf Schaltfläche: "In den Warenkorb"
+Position: Unter der Produktbeschreibung
+Beispiel: "Pokémon Karmesin & Purpur Reisegefährten Booster Display (deutsch)" für €169,99
+
+Nicht verfügbare Produkte:
+
+Statusindikator: Kleines Schloss-Symbol mit Text "Ausverkauft" links oben auf dem Produktbild in der Übersicht
+In der Produktübersicht: Ausgegrauer Button mit Text "In den Warenkorb"
+Auf der Produktdetailseite: Vollständig grauer Button mit Text "AUSVERKAUFT"
+Position des Buttons: An gleicher Stelle wie der Kaufbutton bei verfügbaren Artikeln
+Beispiel: "Pokémon Karmesin & Purpur Reisegefährten Top Trainer Box (deutsch)" für €59,99
+
+3. TCGViert
+URL: https://tcgviert.com/collections/vorbestellungen
+Verfügbare Produkte:
+
+Interaktionselement: Schwarze Schaltfläche
+Text auf Schaltfläche: "IN DEN EINKAUFSWAGEN LEGEN"
+Position: Unter der Produktbeschreibung und Mengenauswahl
+Beispiel: "One Piece Card Game: Royal Blood (OP10) - Sleeved Booster (EN)" für €5,99
+
+Nicht verfügbare Produkte:
+
+Statusindikator: Auffälliger grauer Kreis mit weißer Schrift "AUSVERKAUFT" mittig über dem Produktbild in der Übersicht
+Auf der Produktdetailseite: Schwarze Schaltfläche mit Text "BEI VERFÜGBARKEIT INFORMIEREN!"
+Funktion: Button dient zur Registrierung für Verfügbarkeitsbenachrichtigung
+Keine Kaufoption: Kein Warenkorb-Button vorhanden
+Beispiel: "Pokémon TCG: Reisegefährten (KP09) - 36er Display (DE) - max. 1 pro Person" für €159,99
+
+4. Card-Corner
+URL: https://www.card-corner.de/search/?qs=journey+together
+Verfügbare Produkte:
+
+Statusindikator Variante 1: Grünes abgerundetes Rechteck oben links mit weißer Schrift "BESTSELLER"
+Statusindikator Variante 2: Grünes abgerundetes Rechteck oben links mit weißer Schrift "AUF LAGER"
+Verfügbarkeitstext: "Verfügbar" in grüner Schrift
+Lieferinformation: "Lieferzeit: 1-2 Werktage" in neutraler Schrift
+Interaktionselement: Auffälliger gelber runder Button mit Warenkorb-Symbol
+Mengenauswahl: Plus/Minus-Buttons zur Mengenanpassung vor dem Kauf
+Beispiel: "Pokemon Reisegefährten..." für €155,99
+
+Nicht verfügbare Produkte:
+
+Statusindikator: Rotes abgerundetes Rechteck oben links mit weißer Schrift "AUSVERKAUFT"
+Verfügbarkeitstext: "Momentan nicht verfügbar" in roter Schrift
+Interaktionselement: Gelber Button mit Text "Zum Artikel" statt Warenkorb-Symbol
+Keine Kaufmöglichkeit: Keine direkte Bestellmöglichkeit
+Beispiel: "Pokemon Journey Together - Sleeve..." für €5,99
+
+5. Sapphire-Cards
+URL: https://sapphire-cards.de/pokemon/paldean-fates-paldeas-schicksale-sv-4-5/
+Verfügbare Produkte:
+
+Sprachauswahl: Produktsprache wird über Länderflaggen ausgewählt (deutsch/englisch) - die aktive Auswahl wird durch grünen Rahmen um die Flagge angezeigt
+Verfügbarkeitsindikator: Blauer Button mit Text "In den Warenkorb" signalisiert, dass Produkt bestellbar ist
+Mengenauswahl: Minus-Button, Zahleneingabefeld und Plus-Button zur Anpassung der Bestellmenge
+Produktbeispiel: "Pokemon Paldean Fates | Paldeas Schicksale Booster" mit ausgewählter deutscher Version
+
+Nicht verfügbare Produkte:
+
+Verfügbarkeitsindikator: Roter Button mit Text "In den Warenkorb" signalisiert, dass Produkt ausverkauft ist
+Produktbeispiel: "Pokemon Paldean Fates | Paldeas Schicksale Booster" mit ausgewählter englischer Version"
+
+6. Mighty Cards
+
+URL: https://www.mighty-cards.de/pokemon/figuren-plusch-funko-pop-/
+Verfügbare Produkte:
+
+Statusindikator Variante 1: Blauer Button mit weißer Schrift "NEW" in der oberen rechten Ecke des Produkts
+Statusindikator Variante 2: Orangefarbener Button mit weißer Schrift "SALE" in der oberen rechten Ecke des Produkts
+Statusindikator Variante 3: Grüner Button mit weißer Schrift "EXCLUSIVE" in der oberen rechten Ecke des Produkts
+Kaufmöglichkeit: Roter Button mit weißer Schrift "In den Warenkorb"
+Lieferinformation: Text "Versand: in X Tagen" mit Paket-Icon
+Produktbeispiel: "Squirtle No. 77 amiibo Figur (Super Smash Bros. Collection) - Pokemon" für 24.99€
+
+Nicht verfügbare Produkte:
+
+Statusindikator: Roter Button mit weißer Schrift "AUSVERKAUFT"
+Keine Kaufmöglichkeit: Kein "In den Warenkorb"-Button vorhanden
+Produktbeispiel: "Charizard No. 33 amiibo Figur (Super Smash Bros. Collection) - B-Ware - Pokemon" für 19.99€"
+
+7. Games Island
+URL: https://games-island.eu/Pokemon-Booster-Displays
+Verfügbare Produkte:
+
+Statusindikator Variante 1: Grauer oder schwarzer Balken mit weißer Schrift "AUF LAGER"
+Verfügbarkeitstext: "Sofort verfügbar" in grüner Schrift
+Lieferinformation: "Lieferzeit: 1-2 Werktage (DE - Ausland abweichend)" in grauer Box
+Direktlink: Grüner Button mit weißer Schrift "In den Warenkorb"
+Mengenauswahl: Minus-Button, Zahleneingabefeld und Plus-Button zur Anpassung der Bestellmenge
+Produktbeispiel: "Pokemon TCG - Karmesin & Purpur (KP01) Booster Display (18 Packs) - Deutsch" für 74,99€
+
+Nicht verfügbare Produkte:
+Statusindikator Variante 1: Grauer Balken mit weißer Schrift "BESTSELLER"
+Verfügbarkeitstext: "Momentan nicht verfügbar" in roter Schrift
+Direktlink: Grüner Button mit weißer Schrift "Benachrichtigung anfordern"
+Keine direkte Kaufmöglichkeit: Kein "In den Warenkorb"-Button vorhanden
+Produktbeispiel: "Pokemon TCG - Scarlet & Violet 4: Paradox Rift Booster Display - Englisch" für 149,99€"
+
+8. Gameware
+URL: https://www.gameware.at/info/spaces/gameware/gamewareSearch?query=pok%E9mon+display&actionTag=autocomplete%3Apok%E9mon+display
+Verfügbare Produkte:
+
+Statusindikator: Grüner Punkt mit Text "lagernd, in 1-3 Werktagen bei dir"
+Verfügbarkeitstext: Grüner Punkt mit Angabe der Lieferzeit
+Lieferinformation: "Gratis-Versand!" in grüner Schrift
+Direktlink: Grüner Button mit weißer Schrift "IN DEN WARENKORB"
+Produktbeispiel: "Pokemon Karmesin & Purpur Reisegefährten Display" mit "36 deutsche Booster 9.0" für 169,99€
+
+Nicht verfügbare Produkte:
+Statusindikator: Orangefarbener Punkt mit Text "Bestellung momentan nicht möglich"
+Verfügbarkeitstext: "Bestellung momentan nicht möglich" in orangefarbener Schrift
+Direktlink: Grauer Button mit grüner rechter Seite und weißer Schrift "IN DEN WARENKORB"
+Produktbeispiel: "Pokemon KP 10.0 Ewige Rivalen 3-Pack" mit "3 deutscher Booster 10.0" (kein Preis angegeben)"
+
+

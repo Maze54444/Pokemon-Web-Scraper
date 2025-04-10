@@ -4,6 +4,8 @@ from bs4 import BeautifulSoup
 from utils.telegram import send_telegram_message
 from utils.matcher import is_keyword_in_text
 from utils.stock import get_status_text, update_product_status
+# Importiere das neue Modul für webseitenspezifische Verfügbarkeitsprüfung
+from utils.availability import detect_availability
 
 def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
     """
@@ -350,27 +352,22 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                             detail_response = requests.get(product_url, headers=headers, timeout=10)
                             detail_soup = BeautifulSoup(detail_response.text, "html.parser")
                             
-                            # Prüfe Verfügbarkeit
-                            available = "ausverkauft" not in detail_soup.text.lower() and "sold out" not in detail_soup.text.lower()
+                            # Verwende das neue Modul zur Verfügbarkeitsprüfung
+                            is_available, price, status_text = detect_availability(detail_soup, product_url)
                             
                             # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
-                            if only_available and not available:
+                            if only_available and not is_available:
                                 continue
                                 
                             # Aktualisiere Produkt-Status
                             should_notify, is_back_in_stock = update_product_status(
-                                product_id, available, seen, out_of_stock
+                                product_id, is_available, seen, out_of_stock
                             )
                             
                             if should_notify:
-                                # Preis suchen
-                                price = "Preis nicht verfügbar"
-                                price_elem = detail_soup.select_one(".price, .product-price, [data-price]")
-                                if price_elem:
-                                    price = price_elem.get_text().strip()
-                                
-                                # Status-Text
-                                status_text = get_status_text(available, is_back_in_stock)
+                                # Status anpassen wenn wieder verfügbar
+                                if is_back_in_stock:
+                                    status_text = "🎉 Wieder verfügbar!"
                                 
                                 msg = (
                                     f"🎯 *{text}*\n"
@@ -382,7 +379,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                                 
                                 if send_telegram_message(msg):
                                     # Status in ID speichern
-                                    if available:
+                                    if is_available:
                                         seen.add(f"{product_id}_status_available")
                                     else:
                                         seen.add(f"{product_id}_status_unavailable")
@@ -452,23 +449,6 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                 relative_url = link_elem.get("href", "")
                 product_url = f"https://tcgviert.com{relative_url}" if relative_url.startswith("/") else relative_url
                 
-                # Preis extrahieren
-                price_selectors = [
-                    ".product-card__price", 
-                    ".grid-product__price", 
-                    ".product-price", 
-                    ".price", 
-                    "[data-price]"
-                ]
-                
-                price_elem = None
-                for selector in price_selectors:
-                    price_elem = product.select_one(selector)
-                    if price_elem:
-                        break
-                
-                price = price_elem.text.strip() if price_elem else "Preis unbekannt"
-                
                 # Erstelle eine eindeutige ID basierend auf den Produktinformationen
                 product_id = create_product_id(title)
                 
@@ -483,43 +463,48 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                         break
                 
                 if matched_term:
-                    # Status bestimmen
-                    available = True  # Standard: verfügbar
-                    if "ausverkauft" in product.text.lower() or "sold out" in product.text.lower():
-                        available = False
-                    
-                    # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
-                    if only_available and not available:
-                        continue
+                    # Verwende webseitenspezifische Verfügbarkeitsprüfung für tcgviert.com
+                    try:
+                        # Besuche Produktdetailseite für genaue Verfügbarkeitsprüfung
+                        detail_response = requests.get(product_url, headers=headers, timeout=10)
+                        detail_soup = BeautifulSoup(detail_response.text, "html.parser")
                         
-                    # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
-                    should_notify, is_back_in_stock = update_product_status(
-                        product_id, available, seen, out_of_stock
-                    )
-                    
-                    if should_notify:
-                        # Status-Text erstellen
-                        status_text = get_status_text(available, is_back_in_stock)
-                        if "vorbestellung" in product.text.lower() or "pre-order" in product.text.lower():
-                            status_text = "🔜 Vorbestellung"
+                        # Verwende das neue Modul zur Verfügbarkeitsprüfung
+                        is_available, price, status_text = detect_availability(detail_soup, product_url)
                         
-                        msg = (
-                            f"🎯 *{title}*\n"
-                            f"💶 {price}\n"
-                            f"📊 {status_text}\n"
-                            f"🔎 Treffer für: '{matched_term}'\n"
-                            f"🔗 [Zum Produkt]({product_url})"
+                        # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
+                        if only_available and not is_available:
+                            continue
+                            
+                        # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
+                        should_notify, is_back_in_stock = update_product_status(
+                            product_id, is_available, seen, out_of_stock
                         )
                         
-                        if send_telegram_message(msg):
-                            # Je nach Verfügbarkeit unterschiedliche IDs speichern
-                            if available:
-                                seen.add(f"{product_id}_status_available")
-                            else:
-                                seen.add(f"{product_id}_status_unavailable")
+                        if should_notify:
+                            # Status-Text aktualisieren, wenn Produkt wieder verfügbar ist
+                            if is_back_in_stock:
+                                status_text = "🎉 Wieder verfügbar!"
                             
-                            new_matches.append(product_id)
-                            print(f"✅ Neuer Treffer gefunden (HTML): {title} - {status_text}", flush=True)
+                            msg = (
+                                f"🎯 *{title}*\n"
+                                f"💶 {price}\n"
+                                f"📊 {status_text}\n"
+                                f"🔎 Treffer für: '{matched_term}'\n"
+                                f"🔗 [Zum Produkt]({product_url})"
+                            )
+                            
+                            if send_telegram_message(msg):
+                                # Je nach Verfügbarkeit unterschiedliche IDs speichern
+                                if is_available:
+                                    seen.add(f"{product_id}_status_available")
+                                else:
+                                    seen.add(f"{product_id}_status_unavailable")
+                                
+                                new_matches.append(product_id)
+                                print(f"✅ Neuer Treffer gefunden (HTML): {title} - {status_text}", flush=True)
+                    except Exception as e:
+                        print(f"❌ Fehler beim Prüfen der Verfügbarkeit: {e}", flush=True)
             
         except Exception as e:
             print(f"❌ Fehler beim Scrapen von {url}: {e}", flush=True)
