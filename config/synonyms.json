@@ -1,1 +1,34 @@
-{ "sv09": ["reisegefährten", "reisegefährten 36er display"] }
+{
+  "Reisegefährten display": [
+    "Reisegefährten Booster Display",
+    "Reisegefährten 36er Display",
+    "Reisegefährten Display - 36 Booster",
+    "Pokemon Reisegefährten Display",
+    "Pokémon Karmesin & Purpur Reisegefährten Display",
+    "Pokémon Reisegefährten Booster Display",
+    "Pokemon Karmesin & Purpur 9.0 Reisegefährten"
+  ],
+  "Journey Together display": [
+    "Journey Together Booster Display",
+    "Journey Together 36 Booster",
+    "Journey Together Display - 36 Booster",
+    "Pokemon Journey Together Display",
+    "Pokémon Journey Together Display",
+    "Pokémon Scarlet & Violet Journey Together Display",
+    "Pokémon Scarlet & Violet Journey Together Booster Display"
+  ],
+  "sv09": [
+    "Scarlet & Violet Journey Together",
+    "Scarlet and Violet Journey Together",
+    "SV09 Journey Together",
+    "SV09 Display",
+    "SV-09"
+  ],
+  "kp09": [
+    "Karmesin & Purpur Reisegefährten",
+    "Karmesin und Purpur Reisegefährten",
+    "KP09 Reisegefährten",
+    "KP09 Display",
+    "KP-09"
+  ]
+}

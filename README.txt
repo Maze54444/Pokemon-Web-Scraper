@@ -1,187 +1,193 @@
 README
 
-# Pokémon TCG Web-Scraper
+# Pokémon TCG Web-Scraper: Projektübersicht
 
-Ein Python-basierter Web-Scraper, der die Verfügbarkeit von Trading Card Game Produkten (insbesondere Pokémon) auf verschiedenen Websites überwacht und Telegram-Benachrichtigungen sendet, wenn Produkte gefunden werden, die mit vordefinierten Suchbegriffen übereinstimmen.
+## Projektbeschreibung
 
-## Funktionsübersicht
+Dieses Projekt ist ein spezialisierter Web-Scraper, der entwickelt wurde, um Pokémon Trading Card Game (TCG) Produkte auf verschiedenen Online-Shops zu überwachen. Der Scraper durchsucht regelmäßig konfigurierte Webseiten nach bestimmten Produkten, erkennt deren Verfügbarkeitsstatus und sendet Benachrichtigungen über Telegram, wenn neue Produkte gefunden werden oder sich deren Verfügbarkeitsstatus ändert.
 
-- Überwacht tcgviert.com (spezialisierter Scraper) und andere Websites (generischer Scraper)
-- Erkennt neue Produkte basierend auf Suchbegriffen und Synonymen
-- Sendet Telegram-Benachrichtigungen bei Produktfunden
-- Unterstützt intelligente Duplikaterkennung durch strukturierte Produkt-IDs
-- Speichert bereits gemeldete Produkte, um Doppelbenachrichtigungen zu vermeiden
-- Bietet konfigurierbare Abrufintervalle basierend auf Zeitperioden
-- Robuste Fehlerbehandlung mit automatischen Neustarts
+## Hauptfunktionen
+
+1. **Multiseitensuche**: Überwacht verschiedene Online-Shops mit einer Mischung aus spezialisierten und generischen Scrapern
+2. **Intelligente Verfügbarkeitserkennung**: Webseitenspezifische Erkennung des Produktstatus (verfügbar/ausverkauft)
+3. **Suchbegriff-Matching**: Flexible Suche nach konfigurierbaren Keywords und Synonymen
+4. **Statusverfolgung**: Speichert den Verfügbarkeitsstatus von Produkten und benachrichtigt bei Änderungen
+5. **Telegram-Benachrichtigungen**: Sendet formatierte Nachrichten mit Produktdetails und Links
+6. **Zeitplanbasierte Ausführung**: Konfigurierbare Abrufintervalle für verschiedene Zeiträume
+7. **Wiederbenachrichtigung bei Wiederverfügbarkeit**: Spezielle Benachrichtigungen, wenn ausverkaufte Produkte wieder verfügbar werden
 
 ## Ordnerstruktur
 
-```
 Pokemon-Web-Scraper/
 ├── main.py                    # Hauptprogramm und Steuerlogik
 ├── render.yaml                # Konfiguration für Hosting auf Render.com
 ├── requirements.txt           # Benötigte Python-Pakete
 ├── scrapers/
-│   ├── __init__.py            # Python-Paket-Initialisierung
+│   ├── init.py            # Python-Paket-Initialisierung
 │   ├── tcgviert.py            # Spezieller Scraper für tcgviert.com
 │   └── generic.py             # Generischer Scraper für andere Websites
 ├── utils/
-│   ├── __init__.py            # Python-Paket-Initialisierung
+│   ├── init.py            # Python-Paket-Initialisierung
+│   ├── availability.py        # Webseitenspezifische Verfügbarkeitserkennung (NEUSTE FUNKTION)
 │   ├── filetools.py           # Funktionen zum Laden/Speichern von Dateien
 │   ├── matcher.py             # Suchbegriff-Matching-Logik
 │   ├── scheduler.py           # Zeitplanung für Scraping-Intervalle
+│   ├── stock.py               # Funktionen zur Verwaltung des Produktstatus
 │   └── telegram.py            # Telegram-Benachrichtigungsfunktionen
 ├── data/
 │   ├── products.txt           # Suchbegriffe für Produkte
 │   ├── seen.txt               # Liste bereits gefundener Produkte
+│   ├── out_of_stock.txt       # Liste ausverkaufter Produkte zur Überwachung
 │   └── urls.txt               # URLs für den generischen Scraper
 └── config/
-    ├── schedule.json          # Zeitplan für Scraping-Intervalle
-    ├── synonyms.json          # Synonyme für Suchbegriffe
-    └── telegram_config.json   # Telegram-Bot-Token und Chat-ID
-```
+├── schedule.json          # Zeitplan für Scraping-Intervalle
+├── synonyms.json          # Synonyme für Suchbegriffe
+└── telegram_config.json   # Telegram-Bot-Token und Chat-ID
 
-## Hauptmodule und ihre Funktionen
+## Detaillierte Funktionsweise
 
-### main.py
-Enthält die Hauptsteuerlogik und bietet verschiedene Ausführungsmodi:
-- **run_once()**: Führt einen einzelnen Scan-Durchlauf aus
-- **run_loop()**: Startet den Scraper im Dauerbetrieb
-- **test_telegram()**: Testet die Telegram-Benachrichtigung
-- **test_matching()**: Testet die Suchbegriff-Matching-Logik
+### 1. Hauptsteuerung (main.py)
 
-### scrapers/tcgviert.py
-Spezialisierter Scraper für tcgviert.com mit folgenden Funktionen:
-- **scrape_tcgviert()**: Hauptfunktion für tcgviert.com
-- **discover_collection_urls()**: Findet automatisch gültige Collection-URLs
-- **scrape_tcgviert_json()**: Scraper für die JSON-API von tcgviert.com
-- **scrape_tcgviert_html()**: HTML-Scraper für tcgviert.com als Fallback
-- **extract_product_info()**: Extrahiert strukturierte Produktinformationen aus dem Titel
-- **create_product_id()**: Erstellt eine eindeutige, strukturierte Produkt-ID
-- **generic_scrape_product()**: Generische Funktion zur Verarbeitung von Produkten für beliebige Websites
+Die `main.py` bietet verschiedene Ausführungsmodi:
+- **Einmaliger Durchlauf** (`--mode once`): Führt einen einzelnen Scan durch
+- **Dauerbetrieb** (`--mode loop`): Führt kontinuierlich Scans durch
+- **Testmodi**: Zum Testen einzelner Komponenten (Telegram, Matching, Verfügbarkeit)
+- **Filter-Optionen**: `--only-available` zeigt nur verfügbare Produkte an
 
-### scrapers/generic.py
-Flexibler Scraper für beliebige Websites:
-- **scrape_generic()**: Hauptfunktion für das Scrapen von URLs aus urls.txt
+### 2. Scraper-Module
 
-### utils/matcher.py
-Enthält die Logik für das Matching von Suchbegriffen:
-- **clean_text()**: Bereinigt Text für besseres Matching
-- **is_keyword_in_text()**: Prüft, ob alle Suchbegriffe im Text vorkommen
-- **prepare_keywords()**: Bereitet Suchbegriffe aus products.txt vor und fügt Synonyme hinzu
+#### 2.1 Generic Scraper (scrapers/generic.py)
 
-### utils/filetools.py
-Funktionen zum Laden und Speichern von Dateien:
-- **load_list()**: Lädt Textdateien als Listen
-- **load_seen()**: Lädt bereits gesehene Produkte
-- **save_seen()**: Speichert gesehene Produkte
+Der generische Scraper kann auf jeder Webseite nach Produkten suchen:
+- Findet potenzielle Produktlinks auf der Seite
+- Prüft, ob der Linktext mit den Suchbegriffen übereinstimmt
+- Besucht bei Übereinstimmung die Produktdetailseite
+- Analysiert den Verfügbarkeitsstatus mit dem Availability-Modul
+- Sendet bei Bedarf eine Benachrichtigung
 
-### utils/telegram.py
-Funktionen für Telegram-Benachrichtigungen:
-- **load_telegram_config()**: Lädt die Telegram-Konfiguration
-- **send_telegram_message()**: Sendet Benachrichtigungen über Telegram
+#### 2.2 TCGViert Scraper (scrapers/tcgviert.py)
 
-### utils/scheduler.py
-Funktionen für zeitbasierte Steuerung:
-- **get_current_interval()**: Bestimmt das Abrufintervall basierend auf dem aktuellen Datum
+Ein spezialisierter Scraper für tcgviert.com:
+- Verwendet sowohl JSON-API als auch HTML-Scraping
+- Entdeckt automatisch aktuelle Collection-URLs
+- Extrahiert strukturierte Produktinformationen für präzise IDs
+- Integriert die webseitenspezifische Verfügbarkeitserkennung
+
+### 3. Utility-Module
+
+#### 3.1 Verfügbarkeitserkennung (utils/availability.py)
+
+**NEUESTE FUNKTION**: Webseitenspezifische Verfügbarkeitserkennung:
+- Unterstützt 8 verschiedene Webshops mit individuellen Erkennungsmustern
+- Erkennt verschiedene Verfügbarkeitsindikatoren (Buttons, Texte, Badges, Farben)
+- Liefert detaillierte Statustexte für Benachrichtigungen
+- Extrahiert Preise mit verschiedenen Methoden
+
+Unterstützte Webshops:
+- comicplanet.de
+- kofuku.de
+- tcgviert.com
+- card-corner.de
+- sapphire-cards.de
+- mighty-cards.de
+- games-island.eu
+- gameware.at
+
+#### 3.2 Bestandsverwaltung (utils/stock.py)
+
+Verwaltet den Status von Produkten:
+- Speichert ausverkaufte Produkte in einer separaten Liste
+- Verfolgt Statusänderungen (verfügbar → ausverkauft → wieder verfügbar)
+- Ermöglicht spezielles Tracking von ausverkauften Produkten
+- Generiert Statustexte für Benachrichtigungen
+
+#### 3.3 Suchbegriff-Matching (utils/matcher.py)
+
+Intelligentes Matching von Suchbegriffen:
+- Bereinigt Texte für bessere Vergleichbarkeit
+- Unterstützt mehrere Keywords pro Suchbegriff (alle müssen übereinstimmen)
+- Lädt und integriert Synonyme aus synonyms.json
+
+#### 3.4 Dateioperationen (utils/filetools.py)
+
+Handhabt das Laden und Speichern von Dateien:
+- Lädt Konfigurationsdateien und Suchbegriffe
+- Verwaltet die Listen gesehener und ausverkaufter Produkte
+
+#### 3.5 Zeitplanung (utils/scheduler.py)
+
+Bestimmt die Abrufintervalle:
+- Lädt Zeitpläne aus schedule.json
+- Passt die Abrufhäufigkeit basierend auf dem aktuellen Datum an
+
+#### 3.6 Telegram-Integration (utils/telegram.py)
+
+Sendet Benachrichtigungen über Telegram:
+- Lädt Bot-Token und Chat-ID aus telegram_config.json
+- Formatiert Nachrichten mit Produktinformationen
+- Unterstützt Markdown für bessere Lesbarkeit und klickbare Links
+
+## Zuletzt implementierte Funktion: Webseitenspezifische Verfügbarkeitserkennung
+
+Die neueste Ergänzung zum Projekt ist das Modul `utils/availability.py`, das eine spezialisierte Verfügbarkeitserkennung für verschiedene Webshops implementiert. Diese Erweiterung verbessert signifikant die Zuverlässigkeit des Scrapers, indem sie die spezifischen Merkmale jeder Website bei der Bestimmung des Produktstatus berücksichtigt.
+
+Der Entwickler sollte sich zunächst mit dieser Datei vertraut machen, da sie die Kernlogik für die Verfügbarkeitserkennung enthält. Alle webseitenspezifischen Erkennungsmuster basieren auf einer detaillierten Analyse der Webshop-Strukturen und sind in separaten Funktionen implementiert.
+
+Die Integration dieses Moduls in den generischen Scraper (`generic.py`) und den TCGViert-Scraper (`tcgviert.py`) wurde bereits abgeschlossen. Die nächsten potenziellen Erweiterungen könnten umfassen:
+- Caching-Mechanismus zur Reduzierung der HTTP-Anfragen
+- Fehlertolerante Verfügbarkeitserkennung mit maschinellem Lernen
+- Erweiterung um weitere Webshops mit spezialisierten Erkennungsmustern
 
 ## Konfigurationsdateien
 
-### data/products.txt
-Enthält Suchbegriffe für Produkte, z.B.:
-```
-Reisegefährten
-Journey Together
-Piece Royal Blood
-```
+### products.txt
+Enthält Suchbegriffe für das Produkt-Matching:
 
-### config/synonyms.json
+Reisegefährten display
+Journey Together Display
+
+### synonyms.json
 Definiert alternative Begriffe für die Suche:
 ```json
-{ 
-  "sv09": ["reisegefährten", "reisegefährten 36er display"] 
-}
-```
+{ "sv09": ["reisegefährten", "reisegefährten 36er display"] }
 
-### config/schedule.json
-Definiert verschiedene Abrufintervalle für bestimmte Zeiträume:
-```json
-[
-  { "start": "07.04.2025", "end": "31.12.2025", "interval": 300 }
-]
-```
+schedule.json
+Konfiguriert die Abrufintervalle für verschiedene Zeiträume:
 
-### config/telegram_config.json
-Enthält Bot-Token und Chat-ID für Telegram-Benachrichtigungen:
-```json
-{
-  "bot_token": "YOUR_BOT_TOKEN",
-  "chat_id": "YOUR_CHAT_ID"
-}
-```
+[{ "start": "07.04.2025", "end": "31.12.2025", "interval": 600 }]
 
-### data/seen.txt
-Speichert bereits gemeldete Produkt-IDs, um Duplikate zu vermeiden.
+Besondere Funktionen und Verhaltensweisen
 
-### data/urls.txt
-Enthält URLs für den generischen Scraper, z.B.:
-```
-https://tcgviert.com/collections/vorbestellungen
-```
+Intelligente Produkt-IDs: Der Scraper erstellt strukturierte IDs basierend auf Website, Serien-Code, Produkttyp und Sprache
+Filter für verfügbare Produkte: Mit --only-available werden nur verfügbare Produkte angezeigt, aber ausverkaufte Produkte werden weiterhin im Hintergrund überwacht
+"Wieder verfügbar"-Benachrichtigungen: Produkte, die als ausverkauft markiert wurden, lösen eine spezielle Benachrichtigung aus, wenn sie wieder verfügbar werden
+Automatische URL-Entdeckung: Der TCGViert-Scraper findet automatisch relevante Collection-URLs
+Fehlertolerantes Scraping: Beim Ausfall einer Methode werden alternative Ansätze verwendet (z.B. JSON vs. HTML)
 
-## Zuletzt verbesserte Funktionen
+Startanleitung
 
-### Intelligente Produktunterscheidung
-Die neueste Verbesserung ist die intelligente Produktunterscheidung in tcgviert.py, die folgende Funktionen bietet:
+# Installation der Abhängigkeiten
+pip install -r requirements.txt
 
-1. **Strukturierte Produkt-IDs**: Erstellt einzigartige IDs basierend auf:
-   - Serien-Code (z.B. SV09, KP09)
-   - Produkttyp (Display, Booster, Box, Blister)
-   - Sprache (DE, EN, JP)
-   - Zusätzliche Attribute (premium, elite, top)
+# Einmalige Ausführung
+python main.py --mode once
 
-2. **Regex-basierte Informationsextraktion**:
-   - Erkennt verschiedene Schreibweisen und Formate in Produkttiteln
-   - Unterstützt Variationen wie "36er Display", "Display", "sv09", "sv 09", etc.
-   - Identifiziert Sprachen basierend auf Text und Kontext
+# Dauerbetrieb (Standard)
+python main.py
 
-3. **Generische Produktverarbeitung**:
-   - Die Funktion `generic_scrape_product()` ermöglicht eine konsistente Verarbeitung von Produkten über verschiedene Websites hinweg
-   - Kann für neue Websites wiederverwendet werden
+# Nur verfügbare Produkte anzeigen
+python main.py --only-available
 
-### Beispiel für Produkt-IDs
-Diese strukturierten IDs ermöglichen die präzise Unterscheidung ähnlicher Produkte:
+# Tests ausführen
+python main.py --mode test           # Testet Telegram-Benachrichtigungen
+python main.py --mode match_test     # Testet Suchbegriff-Matching
+python main.py --mode availability_test  # Testet Verfügbarkeitserkennung
 
-- `tcgviert_kp09_display_DE` - "Pokémon TCG: Reisegefährten (KP09) - 36er Display (DE)"
-- `tcgviert_kp09_box_DE_top` - "Pokémon TCG: Reisegefährten (KP09) - Top Trainer Box (DE)"
-- `tcgviert_sv09_display_EN` - "Pokémon TCG: Journey Together (SV09) - 36er Display (EN)"
-- `tcgviert_sv09_box_EN_elite` - "Pokémon TCG: Journey Together (SV09) - Elite Trainer Box (EN)"
+# Anzeige überwachter ausverkaufter Produkte
+python main.py --mode show_out_of_stock
 
-## Startoptionen
+Zusammenfassung
+Der Pokémon TCG Web-Scraper ist ein leistungsfähiges Tool zur Überwachung von Produktverfügbarkeiten auf verschiedenen Webshops. Die kürzlich implementierte webseitenspezifische Verfügbarkeitserkennung verbessert die Genauigkeit und Zuverlässigkeit erheblich. Die modulare Struktur und die gute Dokumentation machen das Projekt leicht erweiterbar und wartbar.
 
-Der Scraper kann mit verschiedenen Modi gestartet werden:
 
-- `python main.py --mode once`: Einzelner Durchlauf
-- `python main.py --mode loop`: Kontinuierlicher Betrieb (Standard)
-- `python main.py --mode test`: Testet Telegram-Benachrichtigungen
-- `python main.py --mode match_test`: Testet die Suchlogik
 
-## Deployment
-
-Der Scraper kann sowohl lokal als auch auf Render.com als Worker-Service betrieben werden. Die `render.yaml` enthält alle nötigen Konfigurationen für das Hosting auf Render.com.
-
-## Erweiterung für neue Websites
-
-Um den Scraper für eine neue Website zu erweitern:
-
-1. Füge die Website-URL zu `data/urls.txt` hinzu
-2. Für einfache Websites verwendet der Scraper automatisch den generischen Scraper
-3. Für komplexere Websites kann ein spezialisierter Scraper nach dem Vorbild von `tcgviert.py` erstellt werden, der die Funktion `generic_scrape_product()` verwendet
-
-## Abhängigkeiten
-
-- Python 3.6+
-- requests
-- beautifulsoup4
-
-Die vollständige Liste der Abhängigkeiten befindet sich in `requirements.txt`.

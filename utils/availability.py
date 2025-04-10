@@ -126,40 +126,62 @@ def check_comicplanet(soup):
 
 def check_kofuku(soup):
     """
-    Prüft die Verfügbarkeit auf kofuku.de
+    Verbesserte Prüfung der Verfügbarkeit auf kofuku.de
     
     Verfügbare Produkte:
-    - Dunkelblauer "In den Warenkorb"-Button
+    - "IN DEN WARENKORB"-Button ist aktiv und nicht ausgegraut
+    - Kein Ausverkauft-Text oder -Badge
     
     Nicht verfügbare Produkte:
-    - Schloss-Symbol mit "Ausverkauft"
-    - Grauer Button mit "AUSVERKAUFT"
+    - Ausverkauft-Badge oder ausgegrauer "AUSVERKAUFT"-Button
+    - Schloss-Symbol
     """
-    # Prüfe auf "Ausverkauft"-Text
+    # Extrahiere den Preis
+    price = extract_price(soup, ['.price', '.product-price', '.product__price'])
+    page_text = soup.get_text().lower()
+    
+    # WICHTIG: Prüfe zuerst auf eindeutige Verfügbarkeitsindikatoren
+    
+    # 1. Prüfe auf einen aktiven "In den Warenkorb"-Button
+    # Dies ist ein sehr starker Indikator für Verfügbarkeit bei Kofuku
+    cart_button = soup.find('button', string=re.compile("In den Warenkorb", re.IGNORECASE))
+    if cart_button and 'disabled' not in cart_button.get('class', []) and 'disabled' not in cart_button.attrs:
+        print(f"  🔍 Kofuku: Aktiver 'In den Warenkorb'-Button gefunden", flush=True)
+        return True, price, "✅ Verfügbar (Warenkorb-Button aktiv)"
+    
+    # 2. Prüfe auf "Buy Now"-Button oder ähnliche Kaufoptionen
+    buy_button = soup.select_one('.btn-buy, .buy-now, .add-to-cart:not(.disabled)')
+    if buy_button:
+        print(f"  🔍 Kofuku: Kauf-Button gefunden", flush=True)
+        return True, price, "✅ Verfügbar (Kauf-Button vorhanden)"
+    
+    # Jetzt erst auf Nicht-Verfügbarkeit prüfen
+    
+    # 3. Prüfe auf "Ausverkauft"-Text
     sold_out_text = soup.find(string=re.compile("Ausverkauft", re.IGNORECASE))
     if sold_out_text:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
+        print(f"  🔍 Kofuku: 'Ausverkauft'-Text gefunden", flush=True)
         return False, price, "❌ Ausverkauft (Text gefunden)"
     
-    # Prüfe auf ausgegrauten Button
-    sold_out_button = soup.select_one('button.disabled, button[disabled], .btn--sold-out')
-    if sold_out_button:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
+    # 4. Prüfe auf ausgegraut/deaktivierte Buttons
+    disabled_button = soup.select_one('button.disabled, button[disabled], .btn--sold-out')
+    if disabled_button:
+        print(f"  🔍 Kofuku: Deaktivierter Button gefunden", flush=True)
         return False, price, "❌ Ausverkauft (Button deaktiviert)"
     
-    # Prüfe auf Schloss-Symbol
+    # 5. Prüfe auf Schloss-Symbol (oft bei ausverkauften Produkten)
     lock_icon = soup.select_one('.icon-lock, .sold-out-overlay')
     if lock_icon:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
+        print(f"  🔍 Kofuku: Schloss-Symbol gefunden", flush=True)
         return False, price, "❌ Ausverkauft (Schloss-Symbol vorhanden)"
     
-    # Prüfe auf "In den Warenkorb"-Button
-    cart_button = soup.find('button', string=re.compile("In den Warenkorb", re.IGNORECASE))
-    if cart_button:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
-        return True, price, "✅ Verfügbar (Warenkorb-Button vorhanden)"
+    # 6. Prüfe auf "ausverkauft" im Text der Seite
+    if "ausverkauft" in page_text:
+        print(f"  🔍 Kofuku: 'ausverkauft' im Seitentext gefunden", flush=True)
+        return False, price, "❌ Ausverkauft (Text im Seiteninhalt)"
     
     # Wenn keine der bekannten Muster zutrifft, generische Methode
+    print(f"  🔍 Kofuku: Keine eindeutigen Indikatoren gefunden, verwende generische Methode", flush=True)
     return check_generic(soup)
 
 def check_tcgviert(soup):
@@ -202,61 +224,70 @@ def check_tcgviert(soup):
 
 def check_card_corner(soup):
     """
-    Prüft die Verfügbarkeit auf card-corner.de
+    Verbesserte Prüfung der Verfügbarkeit auf card-corner.de
     
     Verfügbare Produkte:
-    - Grünes Rechteck mit "BESTSELLER" oder "AUF LAGER"
-    - Grüner "Verfügbar"-Text
-    - Gelber runder Button mit Warenkorb-Symbol
+    - Grüner Status "Verfügbar"
+    - Grüner "In den Warenkorb" Button
+    - Produkt mit grüner Umrandung
     
     Nicht verfügbare Produkte:
-    - Rotes Rechteck mit "AUSVERKAUFT"
-    - Roter "Momentan nicht verfügbar"-Text
-    - Gelber Button mit "Zum Artikel" statt Warenkorb-Symbol
+    - AUSVERKAUFT-Badge
+    - Roter Status "Momentan nicht verfügbar"
     """
-    # Prüfe auf "AUSVERKAUFT"-Status
-    sold_out_badge = soup.find(string=re.compile("AUSVERKAUFT", re.IGNORECASE))
-    if sold_out_badge:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
-        return False, price, "❌ Ausverkauft (AUSVERKAUFT-Badge)"
+    # Extrahiere den Preis
+    price = extract_price(soup, ['.price', '.product-price', '.product__price'])
+    page_text = soup.get_text().lower()
     
-    # Prüfe auf "Momentan nicht verfügbar"-Text
-    unavailable_text = soup.find(string=re.compile("Momentan nicht verfügbar", re.IGNORECASE))
-    if unavailable_text:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
-        return False, price, "❌ Ausverkauft (Momentan nicht verfügbar)"
+    # WICHTIG: Prüfe zuerst auf eindeutige Verfügbarkeitsindikatoren
     
-    # Prüfe auf "AUF LAGER"-Status
-    in_stock_badge = soup.find(string=re.compile("AUF LAGER", re.IGNORECASE))
-    if in_stock_badge:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
-        return True, price, "✅ Verfügbar (AUF LAGER-Badge)"
-    
-    # Prüfe auf "BESTSELLER"-Status (typisch für verfügbare Produkte)
-    bestseller_badge = soup.find(string=re.compile("BESTSELLER", re.IGNORECASE))
-    if bestseller_badge:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
-        return True, price, "✅ Verfügbar (BESTSELLER-Badge)"
-    
-    # Prüfe auf "Verfügbar"-Text
+    # 1. Prüfe auf einen grünen "Verfügbar" Status
+    # Dies ist ein sehr starker Indikator für Verfügbarkeit bei Card-Corner
     available_text = soup.find(string=re.compile("Verfügbar", re.IGNORECASE))
     if available_text:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
+        print(f"  🔍 Card-Corner: 'Verfügbar' Text gefunden", flush=True)
         return True, price, "✅ Verfügbar (Verfügbar-Text)"
-    
-    # Prüfe auf Warenkorb-Button
-    cart_button = soup.select_one('.cart-btn, .add-to-cart, button[title*="Warenkorb"]')
-    if cart_button:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
+        
+    # 2. Prüfe auf grüne Warenkorb-Buttons oder grüne Umrandung
+    cart_button = soup.select_one('.cart-btn, .add-to-cart, .btn-cart, .btn-success, .btn-primary')
+    if cart_button and 'disabled' not in cart_button.get('class', []):
+        print(f"  🔍 Card-Corner: Warenkorb-Button gefunden", flush=True)
         return True, price, "✅ Verfügbar (Warenkorb-Button)"
     
-    # Prüfe auf "Zum Artikel"-Button (typisch für nicht verfügbare Produkte)
-    article_button = soup.find('a', string=re.compile("Zum Artikel", re.IGNORECASE))
-    if article_button:
-        price = extract_price(soup, ['.price', '.product-price', '.product__price'])
-        return False, price, "❌ Ausverkauft (Zum Artikel-Button)"
+    # 3. Prüfe auf grüne Elemente oder Status-Indikatoren
+    green_elements = soup.select('.success, .available, .in-stock, .stock-available')
+    if green_elements:
+        print(f"  🔍 Card-Corner: Grünes Verfügbarkeitselement gefunden", flush=True)
+        return True, price, "✅ Verfügbar (Verfügbarkeitselement)"
+    
+    # 4. Prüfe auf "AUF LAGER"-Status (typisch für Card-Corner)
+    in_stock_badge = soup.find(string=re.compile("AUF LAGER", re.IGNORECASE))
+    if in_stock_badge:
+        print(f"  🔍 Card-Corner: 'AUF LAGER' Status gefunden", flush=True)
+        return True, price, "✅ Verfügbar (AUF LAGER-Badge)"
+    
+    # Jetzt erst auf Nicht-Verfügbarkeit prüfen
+    
+    # 5. Eindeutiger Ausverkauft-Badge
+    sold_out_badge = soup.find(string=re.compile("AUSVERKAUFT", re.IGNORECASE))
+    if sold_out_badge:
+        print(f"  🔍 Card-Corner: 'AUSVERKAUFT' Badge gefunden", flush=True)
+        return False, price, "❌ Ausverkauft (AUSVERKAUFT-Badge)"
+    
+    # 6. "Momentan nicht verfügbar" Text
+    unavailable_text = soup.find(string=re.compile("Momentan nicht verfügbar", re.IGNORECASE))
+    if unavailable_text:
+        print(f"  🔍 Card-Corner: 'Momentan nicht verfügbar' Text gefunden", flush=True)
+        return False, price, "❌ Ausverkauft (Momentan nicht verfügbar)"
+    
+    # 7. "Benachrichtigen"-Button (oft bei ausverkauften Produkten)
+    notify_button = soup.find(string=re.compile("Benachrichtigen", re.IGNORECASE))
+    if notify_button:
+        print(f"  🔍 Card-Corner: 'Benachrichtigen'-Button gefunden", flush=True)
+        return False, price, "❌ Ausverkauft (Benachrichtigungsoption)"
     
     # Wenn keine der bekannten Muster zutrifft, generische Methode
+    print(f"  🔍 Card-Corner: Keine eindeutigen Indikatoren gefunden, verwende generische Methode", flush=True)
     return check_generic(soup)
 
 def check_sapphire_cards(soup):
@@ -372,42 +403,73 @@ def check_games_island(soup):
 
 def check_gameware(soup):
     """
-    Prüft die Verfügbarkeit auf gameware.at
+    Verbesserte Prüfung der Verfügbarkeit auf gameware.at
     
     Verfügbare Produkte:
-    - Grüner Punkt mit "lagernd, in 1-3 Werktagen bei dir"
+    - Text "lagernd, in 1-3 Werktagen bei dir"
+    - Grüner Status-Punkt
     - Grüner "IN DEN WARENKORB"-Button
     
     Nicht verfügbare Produkte:
-    - Orangefarbener Punkt mit "Bestellung momentan nicht möglich"
-    - Grauer Button mit grüner rechter Seite
+    - Text "Bestellung momentan nicht möglich"
+    - Grauer "AUSVERKAUFT"-Button
     """
-    # Prüfe auf "Bestellung momentan nicht möglich"-Text
-    unavailable_text = soup.find(string=re.compile("Bestellung momentan nicht möglich", re.IGNORECASE))
-    if unavailable_text:
-        price = extract_price(soup, ['.price', '.product-price', '.price-box'])
-        return False, price, "❌ Ausverkauft (Bestellung nicht möglich)"
+    # Extrahiere den Preis
+    price = extract_price(soup, ['.price', '.product-price', '.price-box'])
+    page_text = soup.get_text().lower()
     
-    # Prüfe auf orangefarbenen Statusindikator
-    orange_status = soup.select_one('.stock-state.warning, .stock-state.unavailable')
-    if orange_status:
-        price = extract_price(soup, ['.price', '.product-price', '.price-box'])
-        return False, price, "❌ Ausverkauft (Orangefarbener Status)"
+    # WICHTIG: Prüfe zuerst auf eindeutige Verfügbarkeitsindikatoren
     
-    # Prüfe auf grünen Statusindikator oder "lagernd"-Text
-    green_status = soup.select_one('.stock-state.success, .stock-state.available')
-    in_stock_text = soup.find(string=re.compile("lagernd", re.IGNORECASE))
-    if green_status or in_stock_text:
-        price = extract_price(soup, ['.price', '.product-price', '.price-box'])
-        return True, price, "✅ Verfügbar (Grüner Status / Lagernd)"
+    # 1. Prüfe auf "lagernd" oder Lieferzeit-Texte
+    # Dies ist ein sehr starker Indikator für Verfügbarkeit bei Gameware
+    if re.search(r"lagernd|in 1-3 werktagen|verfügbar", page_text):
+        print(f"  🔍 Gameware: 'lagernd' oder Lieferzeit-Text gefunden", flush=True)
+        return True, price, "✅ Verfügbar (Lagernd-Text)"
     
-    # Prüfe auf "IN DEN WARENKORB"-Button
-    cart_button = soup.find('button', string=re.compile("IN DEN WARENKORB", re.IGNORECASE))
-    if cart_button and 'disabled' not in cart_button.attrs:
-        price = extract_price(soup, ['.price', '.product-price', '.price-box'])
+    # 2. Prüfe auf grünen Status-Indikator
+    green_status = soup.select_one('.stock-state.success, .stock-state.available, .badge-success')
+    if green_status:
+        print(f"  🔍 Gameware: Grüner Status-Indikator gefunden", flush=True)
+        return True, price, "✅ Verfügbar (Grüner Status)"
+    
+    # 3. Prüfe auf aktiven "IN DEN WARENKORB"-Button
+    cart_button = soup.select_one('button:not(.disabled) .fa-shopping-cart, .btn-add-to-cart:not(.disabled)')
+    if cart_button:
+        print(f"  🔍 Gameware: Aktiver Warenkorb-Button gefunden", flush=True)
         return True, price, "✅ Verfügbar (Warenkorb-Button aktiv)"
     
+    # 4. Explizite Prüfung auf "IN DEN WARENKORB"-Text im Button
+    cart_text_button = soup.find(string=re.compile("IN DEN WARENKORB", re.IGNORECASE))
+    if cart_text_button and not soup.select_one('button.disabled, [disabled]'):
+        print(f"  🔍 Gameware: 'IN DEN WARENKORB'-Text gefunden", flush=True)
+        return True, price, "✅ Verfügbar (Warenkorb-Text vorhanden)"
+    
+    # Jetzt erst auf Nicht-Verfügbarkeit prüfen
+    
+    # 5. Prüfe auf "Bestellung momentan nicht möglich"-Text
+    unavailable_text = soup.find(string=re.compile("Bestellung momentan nicht möglich", re.IGNORECASE))
+    if unavailable_text:
+        print(f"  🔍 Gameware: 'Bestellung momentan nicht möglich'-Text gefunden", flush=True)
+        return False, price, "❌ Ausverkauft (Bestellung nicht möglich)"
+    
+    # 6. Prüfe auf orangefarbenen/roten Status-Indikator
+    warning_status = soup.select_one('.stock-state.warning, .stock-state.unavailable, .badge-danger')
+    if warning_status:
+        print(f"  🔍 Gameware: Warnungs-Status-Indikator gefunden", flush=True)
+        return False, price, "❌ Ausverkauft (Warnungs-Status)"
+    
+    # 7. Prüfe auf "ausverkauft"-Text oder Badge
+    if "ausverkauft" in page_text:
+        print(f"  🔍 Gameware: 'ausverkauft' im Seitentext gefunden", flush=True)
+        return False, price, "❌ Ausverkauft (Text im Seiteninhalt)"
+    
+    # 8. Prüfe auf "nicht verfügbar"-Text
+    if "nicht verfügbar" in page_text:
+        print(f"  🔍 Gameware: 'nicht verfügbar' im Seitentext gefunden", flush=True)
+        return False, price, "❌ Ausverkauft (Nicht verfügbar)"
+    
     # Wenn keine der bekannten Muster zutrifft, generische Methode
+    print(f"  🔍 Gameware: Keine eindeutigen Indikatoren gefunden, verwende generische Methode", flush=True)
     return check_generic(soup)
 
 def check_generic(soup):

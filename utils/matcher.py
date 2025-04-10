@@ -12,19 +12,30 @@ def clean_text(text):
 
 def is_keyword_in_text(keywords, text):
     """
-    Prüft, ob ALLE Wörter im Text vorkommen
-    Flexiblere Version, die einzelne Wörter im Text sucht
+    Prüft auf exakte Übereinstimmung des Suchbegriffs im Text
+    
+    Diese verbesserte Version sucht nach der exakten Phrase, nicht nur nach den einzelnen Wörtern.
+    Keywords werden als zusammenhängende Phrase behandelt.
+    
+    :param keywords: Liste mit einzelnen Wörtern des Suchbegriffs
+    :param text: Zu prüfender Text
+    :return: True, wenn die exakte Phrase gefunden wurde, sonst False
     """
     text = clean_text(text)
     
+    # Konstruiere eine exakte Phrase aus den Keywords
+    phrase = " ".join(keywords)
+    
+    # Prüfe, ob die exakte Phrase im Text vorkommt
+    match = phrase in text
+    
     # Debug-Ausgabe für besseres Verständnis
-    matches = [word for word in keywords if word in text]
-    missing = [word for word in keywords if word not in text]
+    if match:
+        print(f"    ✅ Treffer für exakte Phrase: '{phrase}' in '{text}'", flush=True)
+    else:
+        print(f"    ❌ Keine exakte Übereinstimmung für: '{phrase}' in '{text}'", flush=True)
     
-    if missing:
-        print(f"    Fehlende Wörter: {missing}", flush=True)
-    
-    return len(missing) == 0  # Alle Wörter müssen vorkommen
+    return match
 
 def prepare_keywords(products):
     """
