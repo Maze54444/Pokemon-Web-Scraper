@@ -14,8 +14,7 @@ def is_keyword_in_text(keywords, text):
     """
     Prüft auf exakte Übereinstimmung des Suchbegriffs im Text
     
-    Diese verbesserte Version sucht nach der exakten Phrase, nicht nur nach den einzelnen Wörtern.
-    Keywords werden als zusammenhängende Phrase behandelt.
+    Diese verbesserte Version sucht nach der exakten Phrase als zusammenhängende Wörter im Text.
     
     :param keywords: Liste mit einzelnen Wörtern des Suchbegriffs
     :param text: Zu prüfender Text
@@ -26,16 +25,20 @@ def is_keyword_in_text(keywords, text):
     # Konstruiere eine exakte Phrase aus den Keywords
     phrase = " ".join(keywords)
     
-    # Prüfe, ob die exakte Phrase im Text vorkommt
-    match = phrase in text
+    # Die Phrase muss als eigenständiges Wort oder Teilphrase vorkommen
+    words = text.split()
+    text_length = len(words)
+    phrase_words = phrase.split()
+    phrase_length = len(phrase_words)
     
-    # Debug-Ausgabe für besseres Verständnis
-    if match:
-        print(f"    ✅ Treffer für exakte Phrase: '{phrase}' in '{text}'", flush=True)
-    else:
-        print(f"    ❌ Keine exakte Übereinstimmung für: '{phrase}' in '{text}'", flush=True)
+    # Suche nach der exakten Phrase im Text
+    for i in range(text_length - phrase_length + 1):
+        if " ".join(words[i:i+phrase_length]) == phrase:
+            print(f"    ✅ Treffer für exakte Phrase: '{phrase}' in '{text}'", flush=True)
+            return True
     
-    return match
+    print(f"    ❌ Keine exakte Übereinstimmung für: '{phrase}' in '{text}'", flush=True)
+    return False
 
 def prepare_keywords(products):
     """

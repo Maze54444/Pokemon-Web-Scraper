@@ -8,6 +8,7 @@ from utils.telegram import send_telegram_message
 from utils.matcher import prepare_keywords, is_keyword_in_text, clean_text
 from scrapers.tcgviert import scrape_tcgviert
 from scrapers.generic import scrape_generic
+from scrapers.sapphire_cards import scrape_sapphire_cards  # Neuer Import
 
 def run_once(only_available=False, reset_seen=False):
     """
@@ -42,12 +43,22 @@ def run_once(only_available=False, reset_seen=False):
     if new_matches:
         print(f"✅ {len(new_matches)} neue Treffer bei TCGViert gefunden", flush=True)
     
+    # Sapphire-Cards spezifischer Scraper
+    if any("sapphire-cards.de" in url for url in urls):
+        sapphire_matches = scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available)
+        if sapphire_matches:
+            print(f"✅ {len(sapphire_matches)} neue Treffer bei Sapphire-Cards gefunden", flush=True)
+            new_matches.extend(sapphire_matches)
+        # Entferne sapphire-cards.de aus der URL-Liste für den generischen Scraper
+        urls = [url for url in urls if "sapphire-cards.de" not in url]
+    
     # Generische URL-Scraper
     for url in urls:
         if "tcgviert.com" not in url:  # TCGViert wird bereits separat abgefragt
             new_url_matches = scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=True, only_available=only_available)
             if new_url_matches:
                 print(f"✅ {len(new_url_matches)} neue Treffer bei {url} gefunden", flush=True)
+                new_matches.extend(new_url_matches)
 
     # Speichere aktualisierte Zustände
     save_seen(seen)
@@ -97,8 +108,8 @@ def test_matching():
     ]
     
     test_keywords = [
-        ["journey", "together"],
-        ["reisegefährten"]
+        ["journey", "together", "display"],
+        ["reisegefährten", "display"]
     ]
     
     for title in test_titles:
@@ -114,6 +125,9 @@ def test_availability():
     print("🧪 Teste Verfügbarkeitsprüfung", flush=True)
     
     from scrapers.generic import check_product_availability
+    from utils.availability import detect_availability
+    import requests
+    from bs4 import BeautifulSoup
     
     test_urls = [
         "https://tcgviert.com/products/pokemon-tcg-journey-together-sv09-36er-display-en-max-1-per-person",
@@ -127,9 +141,15 @@ def test_availability():
     for url in test_urls:
         print(f"\nTest für URL: {url}")
         try:
-            _, is_available, price = check_product_availability(url, headers)
-            print(f"  Verfügbar: {is_available}")
-            print(f"  Preis: {price}")
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, "html.parser")
+                is_available, price, status_text = detect_availability(soup, url)
+                print(f"  Verfügbar: {is_available}")
+                print(f"  Preis: {price}")
+                print(f"  Status: {status_text}")
+            else:
+                print(f"  Fehler: HTTP Status {response.status_code}")
         except Exception as e:
             print(f"  Fehler: {e}")
 
