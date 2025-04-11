@@ -1,140 +1,83 @@
-Detaillierte Zusammenstellung der Verfügbarkeitsmerkmale nach Webshops
+Zusammenfassung der Optimierungen am Pokémon TCG Web-Scraper
+Hauptprobleme und implementierte Lösungen
+In dieser Aktualisierung wurden zwei wesentliche Verbesserungen am Pokémon TCG Web-Scraper vorgenommen:
+1. Optimierung der Performance durch intelligentes Caching
+Das erste Hauptproblem war die hohe Rechenintensität aufgrund umfangreicher Scraping-Vorgänge, bei denen jede Kategorie auf jeder Website für jeden Suchbegriff überprüft wurde.
+Implementierte Lösungen:
 
-1. Comicplanet
-URL: https://www.comicplanet.de/search?search=reisegef%C3%A4hrten
-Verfügbare Produkte:
+Einführung eines Produkt-Cache-Systems, das gefundene Produkte und ihre URLs speichert
+Selektives Scannen, das nur geänderte oder neue Inhalte vollständig analysiert
+Fingerprinting von HTML-Inhalten zur effizienten Erkennung von Änderungen
+Zeitbasierte Überprüfungsstrategie (12-Stunden-Intervall für bereits geprüfte Produkte)
+Filterung irrelevanter Kategorien durch vordefinierte Ausschlusslisten
 
-Interaktionselement: Deutlich sichtbare blaue Schaltfläche
-Text auf Schaltfläche: "In den Warenkorb"
-Position: Unter dem Produktpreis
-Beispiel: "Pokemon Karmesin & Purpur Reisegefährten Booster Display" mit blauem "In den Warenkorb"-Button
+2. Verbesserung der Telegram-Benachrichtigungen
+Das zweite Problem waren fehlgeschlagene Telegram-Benachrichtigungen aufgrund von Markdown-Formatierungsfehlern in Produkttiteln oder URLs.
+Implementierte Lösungen:
 
-Nicht verfügbare Produkte:
+Entwicklung einer robusten Escaping-Funktion für Markdown-Sonderzeichen
+Fallback-Mechanismus zum Senden ohne Markdown bei Formatierungsfehlern
+Intelligente Textbereinigung für Benachrichtigungen
 
-In der Produktübersicht: Schwarze Schaltfläche mit "Details" statt Kaufoption
-Auf der Produktdetailseite: Roter Text "Nicht mehr verfügbar" deutlich sichtbar
-Zusatzfunktion: Oranger Benachrichtigungsbereich mit Text "Benachrichtige mich, sobald der Artikel lieferbar ist."
-E-Mail-Eingabefeld: Vorhanden für Verfügbarkeitsbenachrichtigung
-Beispiel: "Pokemon Karmesin & Purpur Reisegefährten 3er Booster Blister - Irokex deutsch"
+3. Kofuku-spezifische Optimierung (bereits vorher implementiert)
+Das zuvor adressierte Problem mit falschen Treffern bei Kofuku wurde beibehalten und in die neue Lösung integriert:
 
-2. Kofuku
-URL: https://kofuku.de/search?options%5Bprefix%5D=last&q=reisegef%C3%A4hrten
-Verfügbare Produkte:
+Produkttyp-basierte Filterung (Display, Blister, Elite Trainer Box, etc.)
+Vergleich zwischen Suchbegriffs-Typ und tatsächlichem Produkttyp
 
-Interaktionselement: Dunkelblauer Button
-Text auf Schaltfläche: "In den Warenkorb"
-Position: Unter der Produktbeschreibung
-Beispiel: "Pokémon Karmesin & Purpur Reisegefährten Booster Display (deutsch)" für €169,99
+Technische Details
+Data Persistence
 
-Nicht verfügbare Produkte:
+Speicherung des Produkt-Caches in data/product_cache.json
+Struktur nach Domains und Produkt-IDs organisiert
+Fingerprints zur Identifikation von Inhaltsänderungen
 
-Statusindikator: Kleines Schloss-Symbol mit Text "Ausverkauft" links oben auf dem Produktbild in der Übersicht
-In der Produktübersicht: Ausgegrauer Button mit Text "In den Warenkorb"
-Auf der Produktdetailseite: Vollständig grauer Button mit Text "AUSVERKAUFT"
-Position des Buttons: An gleicher Stelle wie der Kaufbutton bei verfügbaren Artikeln
-Beispiel: "Pokémon Karmesin & Purpur Reisegefährten Top Trainer Box (deutsch)" für €59,99
+Intelligente Scan-Strategie
 
-3. TCGViert
-URL: https://tcgviert.com/collections/vorbestellungen
-Verfügbare Produkte:
+Vollständiger Scan nur bei neuen Suchbegriffen oder unbekannten Domains
+Erkennung gelöschter Produkte (404/410) und Entfernung aus dem Cache
+Kontinuierliche Entdeckung neuer Produktseiten
 
-Interaktionselement: Schwarze Schaltfläche
-Text auf Schaltfläche: "IN DEN EINKAUFSWAGEN LEGEN"
-Position: Unter der Produktbeschreibung und Mengenauswahl
-Beispiel: "One Piece Card Game: Royal Blood (OP10) - Sleeved Booster (EN)" für €5,99
+Robuste Fehlerbehandlung 11.04
 
-Nicht verfügbare Produkte:
+Behandlung von Netzwerkfehlern und Timeout-Situationen
+Spezieller Umgang mit URL-Änderungen durch Fingerprint-Basiertes Tracking
+Verbesserter Umgang mit Sonderzeichen in Benachrichtigungen
 
-Statusindikator: Auffälliger grauer Kreis mit weißer Schrift "AUSVERKAUFT" mittig über dem Produktbild in der Übersicht
-Auf der Produktdetailseite: Schwarze Schaltfläche mit Text "BEI VERFÜGBARKEIT INFORMIEREN!"
-Funktion: Button dient zur Registrierung für Verfügbarkeitsbenachrichtigung
-Keine Kaufoption: Kein Warenkorb-Button vorhanden
-Beispiel: "Pokémon TCG: Reisegefährten (KP09) - 36er Display (DE) - max. 1 pro Person" für €159,99
+Dateien und ihre Änderungen
+1. utils/telegram.py
+Diese Datei wurde umfassend überarbeitet, um robuste Telegram-Benachrichtigungen zu gewährleisten:
 
-4. Card-Corner
-URL: https://www.card-corner.de/search/?qs=journey+together
-Verfügbare Produkte:
+Neue escape_markdown Funktion
+Verbesserte send_telegram_message Funktion mit Fallback-Mechanismus
+Wechsel zu MarkdownV2-Format für bessere Kompatibilität
 
-Statusindikator Variante 1: Grünes abgerundetes Rechteck oben links mit weißer Schrift "BESTSELLER"
-Statusindikator Variante 2: Grünes abgerundetes Rechteck oben links mit weißer Schrift "AUF LAGER"
-Verfügbarkeitstext: "Verfügbar" in grüner Schrift
-Lieferinformation: "Lieferzeit: 1-2 Werktage" in neutraler Schrift
-Interaktionselement: Auffälliger gelber runder Button mit Warenkorb-Symbol
-Mengenauswahl: Plus/Minus-Buttons zur Mengenanpassung vor dem Kauf
-Beispiel: "Pokemon Reisegefährten..." für €155,99
+2. scrapers/generic.py
+Diese Datei wurde komplett neu geschrieben, um die Performance zu optimieren:
 
-Nicht verfügbare Produkte:
+Hinzufügung von Cache-Verwaltungsfunktionen
+Implementierung selektiver Scanning-Strategien
+Integration von Fingerprinting zur Änderungserkennung
+Optimierte Filterfunktionen für Links
+Verbessertes Produkttyp-Matching für Kofuku
+Verbesserte Debug-Ausgaben
 
-Statusindikator: Rotes abgerundetes Rechteck oben links mit weißer Schrift "AUSVERKAUFT"
-Verfügbarkeitstext: "Momentan nicht verfügbar" in roter Schrift
-Interaktionselement: Gelber Button mit Text "Zum Artikel" statt Warenkorb-Symbol
-Keine Kaufmöglichkeit: Keine direkte Bestellmöglichkeit
-Beispiel: "Pokemon Journey Together - Sleeve..." für €5,99
+Vorteile der neuen Implementierung
 
-5. Sapphire-Cards
-URL: https://sapphire-cards.de/pokemon/paldean-fates-paldeas-schicksale-sv-4-5/
-Verfügbare Produkte:
+Erheblich reduzierte Rechenressourcen: Durch selektives Scannen werden nur relevante Seiten besucht
+Bessere Skalierbarkeit: Effizienter Umgang mit großen Websites und vielen Suchbegriffen
+Zuverlässigere Benachrichtigungen: Robuste Telegram-Integration verhindert verpasste Alarme
+Verbesserte Änderungserkennung: Automatische Anpassung an URL-Änderungen und Website-Updates
+Einfachere Wartung: Bessere Debug-Ausgaben und strukturierte Codeorganisation
 
-Sprachauswahl: Produktsprache wird über Länderflaggen ausgewählt (deutsch/englisch) - die aktive Auswahl wird durch grünen Rahmen um die Flagge angezeigt
-Verfügbarkeitsindikator: Blauer Button mit Text "In den Warenkorb" signalisiert, dass Produkt bestellbar ist
-Mengenauswahl: Minus-Button, Zahleneingabefeld und Plus-Button zur Anpassung der Bestellmenge
-Produktbeispiel: "Pokemon Paldean Fates | Paldeas Schicksale Booster" mit ausgewählter deutscher Version
+Empfehlungen für zukünftige Entwicklungen
 
-Nicht verfügbare Produkte:
+Implementierung einer automatischen Bereinigung des Caches für sehr alte Einträge
+Hinzufügung von mehr shopspezifischen Optimierungen, ähnlich wie für Kofuku
+Einführung einer adaptiven Überprüfungsfrequenz basierend auf der Änderungshäufigkeit von Websites
+Weitere Verbesserung der Suchfunktion durch ML-gestützte Klassifizierung
+Entwicklung eines Admin-Panels zur Überwachung und manuellen Steuerung des Scrapers
 
-Verfügbarkeitsindikator: Roter Button mit Text "In den Warenkorb" signalisiert, dass Produkt ausverkauft ist
-Produktbeispiel: "Pokemon Paldean Fates | Paldeas Schicksale Booster" mit ausgewählter englischer Version"
-
-6. Mighty Cards
-
-URL: https://www.mighty-cards.de/pokemon/figuren-plusch-funko-pop-/
-Verfügbare Produkte:
-
-Statusindikator Variante 1: Blauer Button mit weißer Schrift "NEW" in der oberen rechten Ecke des Produkts
-Statusindikator Variante 2: Orangefarbener Button mit weißer Schrift "SALE" in der oberen rechten Ecke des Produkts
-Statusindikator Variante 3: Grüner Button mit weißer Schrift "EXCLUSIVE" in der oberen rechten Ecke des Produkts
-Kaufmöglichkeit: Roter Button mit weißer Schrift "In den Warenkorb"
-Lieferinformation: Text "Versand: in X Tagen" mit Paket-Icon
-Produktbeispiel: "Squirtle No. 77 amiibo Figur (Super Smash Bros. Collection) - Pokemon" für 24.99€
-
-Nicht verfügbare Produkte:
-
-Statusindikator: Roter Button mit weißer Schrift "AUSVERKAUFT"
-Keine Kaufmöglichkeit: Kein "In den Warenkorb"-Button vorhanden
-Produktbeispiel: "Charizard No. 33 amiibo Figur (Super Smash Bros. Collection) - B-Ware - Pokemon" für 19.99€"
-
-7. Games Island
-URL: https://games-island.eu/Pokemon-Booster-Displays
-Verfügbare Produkte:
-
-Statusindikator Variante 1: Grauer oder schwarzer Balken mit weißer Schrift "AUF LAGER"
-Verfügbarkeitstext: "Sofort verfügbar" in grüner Schrift
-Lieferinformation: "Lieferzeit: 1-2 Werktage (DE - Ausland abweichend)" in grauer Box
-Direktlink: Grüner Button mit weißer Schrift "In den Warenkorb"
-Mengenauswahl: Minus-Button, Zahleneingabefeld und Plus-Button zur Anpassung der Bestellmenge
-Produktbeispiel: "Pokemon TCG - Karmesin & Purpur (KP01) Booster Display (18 Packs) - Deutsch" für 74,99€
-
-Nicht verfügbare Produkte:
-Statusindikator Variante 1: Grauer Balken mit weißer Schrift "BESTSELLER"
-Verfügbarkeitstext: "Momentan nicht verfügbar" in roter Schrift
-Direktlink: Grüner Button mit weißer Schrift "Benachrichtigung anfordern"
-Keine direkte Kaufmöglichkeit: Kein "In den Warenkorb"-Button vorhanden
-Produktbeispiel: "Pokemon TCG - Scarlet & Violet 4: Paradox Rift Booster Display - Englisch" für 149,99€"
-
-8. Gameware
-URL: https://www.gameware.at/info/spaces/gameware/gamewareSearch?query=pok%E9mon+display&actionTag=autocomplete%3Apok%E9mon+display
-Verfügbare Produkte:
-
-Statusindikator: Grüner Punkt mit Text "lagernd, in 1-3 Werktagen bei dir"
-Verfügbarkeitstext: Grüner Punkt mit Angabe der Lieferzeit
-Lieferinformation: "Gratis-Versand!" in grüner Schrift
-Direktlink: Grüner Button mit weißer Schrift "IN DEN WARENKORB"
-Produktbeispiel: "Pokemon Karmesin & Purpur Reisegefährten Display" mit "36 deutsche Booster 9.0" für 169,99€
-
-Nicht verfügbare Produkte:
-Statusindikator: Orangefarbener Punkt mit Text "Bestellung momentan nicht möglich"
-Verfügbarkeitstext: "Bestellung momentan nicht möglich" in orangefarbener Schrift
-Direktlink: Grauer Button mit grüner rechter Seite und weißer Schrift "IN DEN WARENKORB"
-Produktbeispiel: "Pokemon KP 10.0 Ewige Rivalen 3-Pack" mit "3 deutscher Booster 10.0" (kein Preis angegeben)"
+Diese Aktualisierung verbessert sowohl die Effizienz als auch die Zuverlässigkeit des Scrapers erheblich und macht ihn besser geeignet für den Betrieb auf Plattformen mit begrenzten Ressourcen wie Render.com.
 
 
