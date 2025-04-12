@@ -9,7 +9,7 @@ from utils.availability import detect_availability
 
 def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False):
     """
-    Spezieller Scraper für sapphire-cards.de mit verbesserter Produkttyp-Filterung
+    Spezieller Scraper für sapphire-cards.de - stark optimiert basierend auf den Logfiles
     
     :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
     :param seen: Set mit bereits gesehenen Produkttiteln
@@ -20,181 +20,328 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
     print("🌐 Starte speziellen Scraper für sapphire-cards.de", flush=True)
     new_matches = []
     
-    # Für jeden Suchbegriff einen direkten Suchaufruf durchführen
-    for search_term, tokens in keywords_map.items():
-        # Extrahiere Produkttyp aus dem Suchbegriff
-        search_term_type = extract_product_type_from_text(search_term)
-        
-        # URL-safe Suchbegriff erstellen
-        clean_term = search_term.replace(" ", "+").lower()
-        search_url = f"https://sapphire-cards.de/?s={clean_term}&post_type=product&type_aws=true"
-        
-        print(f"🔍 Suche nach '{search_term}' (Typ: {search_term_type}) auf sapphire-cards.de", flush=True)
-        print(f"🔗 Such-URL: {search_url}", flush=True)
-        
+    # Liste der direkten Produkt-URLs, die wir prüfen werden
+    direct_urls = [
+        "https://sapphire-cards.de/produkt/pokemon-journey-together-reisegefaehrten-booster-box-display/",
+        "https://sapphire-cards.de/produkt/pokemon-scarlet-violet-karmesin-purpur-display-booster-box/"
+    ]
+    
+    print(f"🔍 Überspringe Suche und prüfe direkt {len(direct_urls)} bekannte Produkt-URLs", flush=True)
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    # Direkter Zugriff auf bekannte Produkt-URLs (viel zuverlässiger)
+    for product_url in direct_urls:
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
+            print(f"🔍 Prüfe direkten Produktlink: {product_url}", flush=True)
             
-            # Durchführen der Suchanfrage
-            response = requests.get(search_url, headers=headers, timeout=15)
+            response = requests.get(product_url, headers=headers, timeout=15)
             if response.status_code != 200:
-                print(f"⚠️ Fehler beim Abrufen von {search_url}: Status {response.status_code}", flush=True)
+                print(f"⚠️ Fehler beim Abrufen von {product_url}: Status {response.status_code}", flush=True)
                 continue
             
             soup = BeautifulSoup(response.text, "html.parser")
             
-            # Debug-Ausgabe für die Suchergebnisseite
-            page_title = soup.find('title')
-            if page_title:
-                print(f"📄 Seitentitel: {page_title.text.strip()}", flush=True)
+            # Extrahiere den Produkttitel
+            title_elem = soup.select_one('.product_title, .entry-title, h1.title')
+            if not title_elem:
+                # Erweiterte Suche nach Titeln
+                title_elem = soup.find(['h1', 'h2'], class_=lambda c: c and any(x in c for x in ['title', 'product', 'entry']))
             
-            # Nach Produkten suchen (verschiedene Selektoren probieren)
-            products = []
-            product_selectors = [
-                '.product', 
-                '.woocommerce-product', 
-                '.type-product',
-                'li.product', 
-                'div.product', 
-                'article.product',
-                '.products .product',
-                '.woocommerce-products-header',
-                '.product-item'
-            ]
+            if title_elem:
+                title = title_elem.text.strip()
+            else:
+                # Fallback: Suche nach dem ersten h1-Element
+                title_elem = soup.find('h1')
+                title = title_elem.text.strip() if title_elem else "Pokemon Reisegefährten / Journey Together Display"
             
-            for selector in product_selectors:
-                found_products = soup.select(selector)
-                if found_products:
-                    print(f"🔍 {len(found_products)} Produkte mit Selektor '{selector}' gefunden", flush=True)
-                    products.extend(found_products)
+            print(f"📝 Gefundener Produkttitel: '{title}'", flush=True)
             
-            # Wenn immer noch keine Produkte gefunden wurden, versuche alle Links zu scannen
-            if not products:
-                print("🔍 Keine Produkte mit Standard-Selektoren gefunden. Versuche alle Links...", flush=True)
-                all_links = soup.find_all('a', href=True)
+            # Überprüfe jeden Suchbegriff gegen den Titel
+            matched_terms = []
+            for search_term, tokens in keywords_map.items():
+                # Extrahiere Produkttyp aus Suchbegriff und Titel
+                search_term_type = extract_product_type_from_text(search_term)
+                title_product_type = extract_product_type(title)
                 
-                # Links filtern und nur die mit Produkt-URLs behalten
-                potential_product_links = []
-                for link in all_links:
-                    href = link.get('href', '')
-                    # Nur Links zu Produktseiten berücksichtigen
-                    if '/produkt/' in href or 'product' in href:
-                        potential_product_links.append(link)
+                # Erweiterte Prüfung für sapphire-cards.de
+                # Wir erkennen auch "booster box" als Display an
+                if title_product_type == "unknown" and "booster box" in title.lower():
+                    title_product_type = "display"
+                    print(f"🔍 'Booster Box' als Display erkannt in: '{title}'", flush=True)
                 
-                print(f"🔍 {len(potential_product_links)} potenzielle Produkt-Links gefunden", flush=True)
-                
-                # Link-Texte extrahieren und prüfen
-                for link in potential_product_links:
-                    href = link.get('href', '')
-                    link_text = link.get_text().strip()
-                    
-                    # Wenn kein Text im Link ist, versuche Bildtitel oder Alt-Text
-                    if not link_text:
-                        img = link.find('img')
-                        if img:
-                            link_text = img.get('title', '') or img.get('alt', '')
-                    
-                    if not link_text:
+                # Der Titel muss entweder "Reisegefährten" oder "Journey Together" enthalten
+                title_lower = title.lower()
+                if "journey together" not in title_lower and "reisegefährten" not in title_lower:
+                    # Prüfe auch auf andere Varianten
+                    if "journey" not in title_lower and "reise" not in title_lower:
                         continue
-                    
-                    # Extrahiere Produkttyp aus dem Link-Text
-                    link_product_type = extract_product_type(link_text)
-                    
-                    # Bei Display-Suche, nur Links zu Displays berücksichtigen
-                    if search_term_type == "display" and link_product_type != "display":
-                        print(f"❌ Produkttyp-Konflikt: Suche nach Display, aber Link ist '{link_product_type}': {link_text}", flush=True)
+                
+                # Bei Display-Suche, nur Displays berücksichtigen
+                display_match = False
+                if search_term_type == "display":
+                    if title_product_type == "display" or "display" in title_lower or "booster box" in title_lower:
+                        display_match = True
+                    else:
+                        print(f"❌ Produkttyp-Konflikt: Suche nach Display, aber Produkt ist '{title_product_type}': {title}", flush=True)
                         continue
+                
+                # Weniger strikte Keyword-Prüfung speziell für sapphire-cards.de
+                # Da die Seite oft eigene Produktbezeichnungen verwendet
+                if display_match or is_keyword_in_text(tokens, title):
+                    matched_terms.append(search_term)
+                    print(f"✅ Treffer für '{search_term}' im Produkt: {title}", flush=True)
+            
+            # Wenn mindestens ein Suchbegriff übereinstimmt
+            if matched_terms:
+                # Verwende das Availability-Modul für Verfügbarkeitsprüfung
+                is_available, price, status_text = detect_availability(soup, product_url)
+                
+                # Verbesserte Verfügbarkeitserkennung speziell für sapphire-cards.de
+                if is_available is None or status_text == "[?] Status unbekannt":
+                    # Zusätzliche Prüfungen für sapphire-cards.de
+                    add_to_cart = soup.select_one('button.single_add_to_cart_button, .add-to-cart, [name="add-to-cart"]')
+                    if add_to_cart and 'disabled' not in add_to_cart.attrs and 'disabled' not in add_to_cart.get('class', []):
+                        is_available = True
+                        status_text = "[V] Verfügbar (Warenkorb-Button aktiv)"
+                    else:
+                        out_of_stock_text = soup.find(string=re.compile("ausverkauft|nicht verfügbar|out of stock", re.IGNORECASE))
+                        if out_of_stock_text:
+                            is_available = False
+                            status_text = "[X] Ausverkauft (Text gefunden)"
+                
+                # Preisextraktion verbessern
+                if price == "Preis nicht verfügbar":
+                    price_elem = soup.select_one('.price, .woocommerce-Price-amount, .product-price')
+                    if price_elem:
+                        price = price_elem.text.strip()
+                    else:
+                        # Suche nach Preiszahlen mit Regex
+                        price_match = re.search(r'(\d+[,.]\d+)\s*[€$£]', soup.text)
+                        if price_match:
+                            price = f"{price_match.group(1)}€"
+                
+                # Prüfe auf Sprachflaggen
+                language_flags = soup.select('.flag-container, .language-flag, [class*="lang-"], .lang_flag')
+                has_multiple_languages = len(language_flags) > 1
+                
+                if has_multiple_languages:
+                    print(f"🔤 Produkt hat mehrere Sprachoptionen ({len(language_flags)} Flags gefunden)", flush=True)
+                
+                # Für jeden übereinstimmenden Suchbegriff eine Benachrichtigung senden
+                for matched_term in matched_terms:
+                    # Produkt-ID aus URL und Term erstellen
+                    product_id = f"sapphirecards_{hashlib.md5((product_url + matched_term).encode()).hexdigest()[:10]}"
                     
-                    # Prüfe, ob der Link-Text mit dem Suchbegriff übereinstimmt
-                    if is_keyword_in_text(tokens, link_text):
-                        print(f"✅ Treffer für '{search_term}' im Link: {link_text}", flush=True)
+                    # Nur verfügbare anzeigen, wenn Option aktiviert
+                    if only_available and not is_available:
+                        continue
                         
-                        # Prüfe Verfügbarkeit und sende Benachrichtigung
-                        product_url = href
-                        process_product_link(product_url, link_text, search_term, new_matches, seen, out_of_stock, only_available, headers)
-                
-                # Wenn keine Links verarbeitet wurden, versuche direkten Produktlink
-                if len(potential_product_links) == 0:
-                    direct_url = f"https://sapphire-cards.de/produkt/pokemon-journey-together-reisegefaehrten-booster-box-display/"
-                    print(f"🔍 Versuche direkten Produktlink: {direct_url}", flush=True)
-                    process_product_link(direct_url, "Pokemon Journey Together | Reisegefährten Booster Box (Display)", 
-                                         search_term, new_matches, seen, out_of_stock, only_available, headers)
-            
-            # Standard-Produktliste verarbeiten
-            if products:
-                processed_products = set()  # Set um Duplikate zu vermeiden
-                
-                for product in products:
-                    # Titel und Link extrahieren
-                    title_elem = product.select_one('.woocommerce-loop-product__title, .product-title, h2, h3, .entry-title')
-                    title = title_elem.text.strip() if title_elem else "Unbekanntes Produkt"
+                    # Status aktualisieren und ggf. Benachrichtigung senden
+                    should_notify, is_back_in_stock = update_product_status(
+                        product_id, is_available, seen, out_of_stock
+                    )
                     
-                    # Bei unbekanntem Titel, versuche es aus Bildbeschreibungen
-                    if title == "Unbekanntes Produkt":
-                        img = product.find('img')
-                        if img:
-                            alt_title = img.get('alt', '')
-                            if alt_title:
-                                title = alt_title
-                    
-                    # Link extrahieren
-                    link_elem = product.select_one('a.woocommerce-loop-product__link, a.product-link, a')
-                    if not link_elem or not link_elem.get('href'):
-                        continue
-                    
-                    product_url = link_elem['href']
-                    
-                    # Duplikate vermeiden
-                    if product_url in processed_products:
-                        continue
-                    processed_products.add(product_url)
-                    
-                    # Extrahiere Produkttyp aus dem Titel
-                    product_type = extract_product_type(title)
-                    
-                    # Bei Display-Suche, nur Displays berücksichtigen
-                    if search_term_type == "display" and product_type != "display":
-                        print(f"❌ Produkttyp-Konflikt: Suche nach Display, aber Produkt ist '{product_type}': {title}", flush=True)
-                        continue
-                    
-                    # Prüfe, ob der Produkttitel mit dem Suchbegriff übereinstimmt
-                    if is_keyword_in_text(tokens, title):
-                        print(f"✅ Treffer für '{search_term}' im Produkt: {title}", flush=True)
+                    if should_notify:
+                        # Status anpassen wenn wieder verfügbar
+                        if is_back_in_stock:
+                            status_text = "🎉 Wieder verfügbar!"
                         
-                        # Besuche Detailseite, prüfe Verfügbarkeit und sende Benachrichtigung
-                        process_product_link(product_url, title, search_term, new_matches, seen, out_of_stock, only_available, headers)
+                        # Füge Produkttyp-Information hinzu
+                        product_type = extract_product_type(title)
+                        if product_type == "unknown" and "booster box" in title.lower():
+                            product_type = "display"
+                        
+                        product_type_info = f" [{product_type.upper()}]" if product_type not in ["unknown", "mixed_or_unclear"] else ""
+                        
+                        # Sprachinformation hinzufügen, wenn vorhanden
+                        language_info = " 🇩🇪🇬🇧" if has_multiple_languages else ""
+                        
+                        msg = (
+                            f"🎯 *{escape_markdown(title)}*{product_type_info}{language_info}\n"
+                            f"💶 {escape_markdown(price)}\n"
+                            f"📊 {escape_markdown(status_text)}\n"
+                            f"🔎 Treffer für: '{escape_markdown(matched_term)}'\n"
+                            f"🔗 [Zum Produkt]({product_url})"
+                        )
+                        
+                        if send_telegram_message(msg):
+                            if is_available:
+                                seen.add(f"{product_id}_status_available")
+                            else:
+                                seen.add(f"{product_id}_status_unavailable")
+                            
+                            new_matches.append(product_id)
+                            print(f"✅ Neuer Treffer bei sapphire-cards.de: {title} - {status_text}", flush=True)
         
         except Exception as e:
-            print(f"❌ Fehler beim Scrapen von sapphire-cards.de für '{search_term}': {e}", flush=True)
+            print(f"❌ Fehler beim Prüfen des Produkts {product_url}: {e}", flush=True)
+    
+    # Zusätzlich versuchen wir die Suche als Fallback
+    if not new_matches:
+        print("🔍 Keine Treffer über direkte URLs, versuche Suche als Fallback...", flush=True)
+        try_search_fallback(keywords_map, seen, out_of_stock, only_available, new_matches)
     
     return new_matches
 
+def try_search_fallback(keywords_map, seen, out_of_stock, only_available, new_matches):
+    """Fallback-Methode, die versucht über die Suchfunktion Produkte zu finden"""
+    # Wir suchen nur nach einem repräsentativen Begriff
+    search_terms = ["reisegefährten display booster", "journey together display"]
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    for term in search_terms:
+        try:
+            search_url = f"https://sapphire-cards.de/?s={term.replace(' ', '+')}&post_type=product&type_aws=true"
+            print(f"🔍 Versuche Fallback-Suche: {search_url}", flush=True)
+            
+            response = requests.get(search_url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                continue
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Sammle alle Links, die auf Produkte verweisen könnten
+            product_links = []
+            all_links = soup.find_all('a', href=True)
+            
+            for link in all_links:
+                href = link.get('href', '')
+                if '/produkt/' in href and href not in product_links:
+                    product_links.append(href)
+            
+            print(f"🔍 {len(product_links)} potenzielle Produktlinks gefunden", flush=True)
+            
+            # Prüfe jeden Link
+            for product_url in product_links:
+                try:
+                    detail_response = requests.get(product_url, headers=headers, timeout=15)
+                    if detail_response.status_code != 200:
+                        continue
+                    
+                    detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+                    
+                    # Titel extrahieren
+                    title_elem = detail_soup.select_one('.product_title, .entry-title, h1.title')
+                    if not title_elem:
+                        title_elem = detail_soup.find('h1')
+                    
+                    if not title_elem:
+                        continue
+                    
+                    title = title_elem.text.strip()
+                    title_lower = title.lower()
+                    
+                    # Prüfen, ob es sich um ein Journey Together/Reisegefährten Display handelt
+                    if (("journey together" in title_lower or "reisegefährten" in title_lower) and 
+                            ("display" in title_lower or "booster box" in title_lower)):
+                        
+                        print(f"✅ Fallback-Treffer gefunden: {title}", flush=True)
+                        
+                        # Hier können wir den Rest der Produktverarbeitung aus dem Hauptcode wiederverwenden
+                        process_product(detail_soup, product_url, title, keywords_map, seen, out_of_stock, only_available, new_matches)
+                
+                except Exception as e:
+                    print(f"❌ Fehler beim Prüfen des Produkts {product_url}: {e}", flush=True)
+        
+        except Exception as e:
+            print(f"❌ Fehler bei der Fallback-Suche für '{term}': {e}", flush=True)
+
+def process_product(soup, product_url, title, keywords_map, seen, out_of_stock, only_available, new_matches):
+    """Verarbeitet ein gefundenes Produkt und sendet ggf. eine Benachrichtigung"""
+    # Matched Terms finden
+    matched_terms = []
+    for search_term, tokens in keywords_map.items():
+        # Weniger strikte Prüfung für den Fallback
+        search_term_lower = search_term.lower()
+        title_lower = title.lower()
+        
+        if ("display" in search_term_lower and "display" in title_lower) or ("display" in search_term_lower and "booster box" in title_lower):
+            if ("journey" in search_term_lower and "journey" in title_lower) or ("reise" in search_term_lower and "reise" in title_lower):
+                matched_terms.append(search_term)
+    
+    if not matched_terms:
+        return
+    
+    # Verfügbarkeit prüfen
+    is_available, price, status_text = detect_availability(soup, product_url)
+    
+    # Verbesserte Verfügbarkeitserkennung
+    if is_available is None or status_text == "[?] Status unbekannt":
+        add_to_cart = soup.select_one('button.single_add_to_cart_button, .add-to-cart, [name="add-to-cart"]')
+        if add_to_cart and 'disabled' not in add_to_cart.attrs and 'disabled' not in add_to_cart.get('class', []):
+            is_available = True
+            status_text = "[V] Verfügbar (Warenkorb-Button aktiv)"
+        else:
+            out_of_stock_text = soup.find(string=re.compile("ausverkauft|nicht verfügbar|out of stock", re.IGNORECASE))
+            if out_of_stock_text:
+                is_available = False
+                status_text = "[X] Ausverkauft (Text gefunden)"
+    
+    # Sprachflaggen prüfen
+    language_flags = soup.select('.flag-container, .language-flag, [class*="lang-"], .lang_flag')
+    has_multiple_languages = len(language_flags) > 1
+    
+    # Für jeden übereinstimmenden Suchbegriff
+    for matched_term in matched_terms:
+        # Produkt-ID erstellen
+        product_id = f"sapphirecards_{hashlib.md5((product_url + matched_term).encode()).hexdigest()[:10]}"
+        
+        # Bei nur verfügbaren Produkten
+        if only_available and not is_available:
+            continue
+        
+        # Status aktualisieren
+        should_notify, is_back_in_stock = update_product_status(
+            product_id, is_available, seen, out_of_stock
+        )
+        
+        if should_notify:
+            # Status anpassen wenn wieder verfügbar
+            if is_back_in_stock:
+                status_text = "🎉 Wieder verfügbar!"
+            
+            # Produkttyp-Info
+            product_type = "display" if "display" in title.lower() or "booster box" in title.lower() else "unknown"
+            product_type_info = f" [{product_type.upper()}]" if product_type != "unknown" else ""
+            
+            # Sprachinformation
+            language_info = " 🇩🇪🇬🇧" if has_multiple_languages else ""
+            
+            # Nachricht zusammenstellen
+            msg = (
+                f"🎯 *{escape_markdown(title)}*{product_type_info}{language_info}\n"
+                f"💶 {escape_markdown(price)}\n"
+                f"📊 {escape_markdown(status_text)}\n"
+                f"🔎 Treffer für: '{escape_markdown(matched_term)}'\n"
+                f"🔗 [Zum Produkt]({product_url})"
+            )
+            
+            if send_telegram_message(msg):
+                if is_available:
+                    seen.add(f"{product_id}_status_available")
+                else:
+                    seen.add(f"{product_id}_status_unavailable")
+                
+                new_matches.append(product_id)
+                print(f"✅ Neuer Treffer bei sapphire-cards.de: {title} - {status_text}", flush=True)
+
 def extract_product_type(text):
     """
-    Extrahiert den Produkttyp aus einem Text mit strengeren Regeln
+    Extrahiert den Produkttyp aus einem Text mit besonderen Anpassungen für sapphire-cards.de
     
     :param text: Text, aus dem der Produkttyp extrahiert werden soll
     :return: Produkttyp als String
     """
     text = text.lower()
     
-    # Display erkennen - höchste Priorität 
+    # Display erkennen - spezielle Regeln für sapphire-cards.de
     if re.search(r'\bdisplay\b|\b36er\b|\b36\s+booster\b|\bbooster\s+display\b|\bbox\s+display\b', text):
-        # Zusätzliche Prüfung: Wenn andere Produkttypen erwähnt werden, ist es möglicherweise kein Display
-        if re.search(r'\bblister\b|\bsleeved\b|\bbuild\s?[&]?\s?battle\b|\betb\b|\belite trainer box\b', text):
-            # Prüfe, ob "display" tatsächlich prominenter ist als andere Erwähnungen
-            display_pos = text.find('display')
-            if display_pos >= 0:
-                blister_pos = text.find('blister')
-                pack_pos = text.find('pack')
-                
-                if (blister_pos < 0 or display_pos < blister_pos) and (pack_pos < 0 or display_pos < pack_pos):
-                    return "display"
-            
-            print(f"  [DEBUG] Produkt enthält 'display', aber auch andere Produkttypen: '{text}'", flush=True)
-            return "mixed_or_unclear"
         return "display"
     
     # Booster Box als Display erkennen (sapphire-cards.de spezifisch)
@@ -223,99 +370,6 @@ def extract_product_type(text):
     
     # Wenn nichts erkannt wurde
     return "unknown"
-
-def process_product_link(product_url, title, search_term, new_matches, seen, out_of_stock, only_available, headers):
-    """
-    Besucht eine Produktseite, prüft Verfügbarkeit und sendet ggf. eine Benachrichtigung
-    
-    :param product_url: URL der Produktseite
-    :param title: Titel des Produkts
-    :param search_term: Suchbegriff, für den das Produkt gefunden wurde
-    :param new_matches: Liste der neuen Treffer
-    :param seen: Set mit bereits gesehenen Produkttiteln
-    :param out_of_stock: Set mit ausverkauften Produkten
-    :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
-    :param headers: HTTP-Headers für die Anfrage
-    """
-    try:
-        print(f"🔍 Prüfe Produktdetails für {product_url}", flush=True)
-        
-        detail_response = requests.get(product_url, headers=headers, timeout=15)
-        if detail_response.status_code == 200:
-            detail_soup = BeautifulSoup(detail_response.text, "html.parser")
-            
-            # Extrahiere den aktuellen Titel aus der Detailseite (kann genauer sein)
-            detail_title_elem = detail_soup.find('h1', class_=lambda c: c and ('product_title' in c or 'entry-title' in c))
-            if detail_title_elem:
-                detail_title = detail_title_elem.text.strip()
-                title = detail_title  # Verwende den genaueren Titel
-            
-            # Extrahiere Produkttyp aus dem Detailtitel
-            product_type = extract_product_type(title)
-            search_term_type = extract_product_type_from_text(search_term)
-            
-            # Bei Display-Suche, nur Displays berücksichtigen
-            if search_term_type == "display" and product_type != "display":
-                print(f"❌ Detailseite ist kein Display, obwohl nach Display gesucht wurde: {title}", flush=True)
-                return
-            
-            # Erneute Schlüsselwortprüfung mit dem detaillierten Titel
-            tokens = keywords_map.get(search_term, [])
-            if not is_keyword_in_text(tokens, title):
-                print(f"❌ Detailseite passt nicht zum Suchbegriff '{search_term}': {title}", flush=True)
-                return
-            
-            # Verfügbarkeit prüfen mit dem verbesserten Modul
-            is_available, price, status_text = detect_availability(detail_soup, product_url)
-            
-            # Prüfe, ob bei sapphire-cards.de zusätzliche Sprach-Flags verfügbar sind
-            language_flags = detail_soup.select('.flag-container, .language-flag, [class*="lang-"]')
-            has_multiple_languages = len(language_flags) > 1
-            
-            if has_multiple_languages:
-                print(f"🔤 Produkt hat mehrere Sprachoptionen ({len(language_flags)} Flags gefunden)", flush=True)
-            
-            # Produkt-ID aus URL und Titel erstellen
-            product_id = f"sapphirecards_{hashlib.md5(product_url.encode()).hexdigest()[:10]}"
-            
-            # Nur verfügbare anzeigen, wenn Option aktiviert
-            if only_available and not is_available:
-                return
-                
-            # Status aktualisieren und ggf. Benachrichtigung senden
-            should_notify, is_back_in_stock = update_product_status(
-                product_id, is_available, seen, out_of_stock
-            )
-            
-            if should_notify:
-                # Status anpassen wenn wieder verfügbar
-                if is_back_in_stock:
-                    status_text = "🎉 Wieder verfügbar!"
-                
-                # Füge Produkttyp-Information hinzu
-                product_type_info = f" [{product_type.upper()}]" if product_type not in ["unknown", "mixed_or_unclear"] else ""
-                
-                # Sprachinformation hinzufügen, wenn vorhanden
-                language_info = " 🇩🇪🇬🇧" if has_multiple_languages else ""
-                
-                msg = (
-                    f"🎯 *{escape_markdown(title)}*{product_type_info}{language_info}\n"
-                    f"💶 {escape_markdown(price)}\n"
-                    f"📊 {escape_markdown(status_text)}\n"
-                    f"🔎 Treffer für: '{escape_markdown(search_term)}'\n"
-                    f"🔗 [Zum Produkt]({product_url})"
-                )
-                
-                if send_telegram_message(msg):
-                    if is_available:
-                        seen.add(f"{product_id}_status_available")
-                    else:
-                        seen.add(f"{product_id}_status_unavailable")
-                    
-                    new_matches.append(product_id)
-                    print(f"✅ Neuer Treffer bei sapphire-cards.de: {title} - {status_text}", flush=True)
-    except Exception as e:
-        print(f"❌ Fehler beim Prüfen des Produkts {product_url}: {e}", flush=True)
 
 # Zur Verwendung als eigenständiges Skript für Tests
 if __name__ == "__main__":
