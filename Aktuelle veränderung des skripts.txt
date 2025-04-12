@@ -1,58 +1,27 @@
-Änderungsübersicht für das Scraper-Skript
-Basierend auf den ursprünglichen Skripten und der erforderlichen Funktionalität zur besseren Verfügbarkeitserkennung habe ich folgende Änderungen und Ergänzungen implementiert:
-1. Neue Datei: utils/stock.py
+Hier ist eine Zusammenfassung der durchgeführten Verbesserungen:
+Ich habe mehrere Dateien im Projekt optimiert, um die Filterung von Produkten nach ihrem Typ (insbesondere Displays) zu verbessern:
 
-Einführung eines Systems zum Verfolgen ausverkaufter Artikel
-Funktionen zum Laden und Speichern ausverkaufter Produkte
-Intelligente Verfügbarkeitsstatusverarbeitung, die Benachrichtigungen sendet, wenn Produkte wieder verfügbar werden
-Statustext-Generierung mit unterschiedlichen Indikatoren für "Verfügbar", "Ausverkauft" und "Wieder verfügbar"
+matcher.py:
 
-2. Änderungen an scrapers/generic.py
-
-Erweiterte Verfügbarkeitsprüfung durch Besuch der Produktdetailseiten
-Verbesserte Erkennung von Verfügbarkeitssignalen durch Musteranalyse:
-
-Suche nach bestimmten Texten wie "ausverkauft", "sold out"
-Prüfung auf Warenkorb-Buttons und deren Status (deaktiviert/aktiviert)
-Analyse von Vorbestellungshinweisen
+Präzisere Erkennung von Produkttypen mit der neuen Funktion extract_product_type_from_text()
+Strengere Prüfung in is_keyword_in_text(), die Produkttypen explizit berücksichtigt
+Wenn nach "display" gesucht wird, werden andere Produkttypen (ETBs, Blister, Booster) ausgeschlossen
 
 
-Preisextraktion über verschiedene CSS-Selektoren und Regex-Muster
-Neue Suchlogik zur Erkennung relevanter Produktlinks auf Listenansichten
-Integration mit dem neuen Verfügbarkeitsverfolgungssystem
+generic.py:
 
-3. Änderungen an scrapers/tcgviert.py
-
-Anpassung der JSON- und HTML-Scraper zur Berücksichtigung des Verfügbarkeitsstatus
-Verbesserte Verfügbarkeitserkennung durch Analyse von Produktdetailseiten
-Modifikation der Produkt-ID-Erstellung, um den Verfügbarkeitsstatus zu integrieren
-Aktualisierung der generic_scrape_product-Funktion zur Unterstützung des Verfügbarkeitsstatus
-
-4. Änderungen an main.py
-
-Neue Kommandozeilenparameter:
-
---only-available: Option zum Filtern und Anzeigen nur verfügbarer Produkte
---reset: Option zum Zurücksetzen der bereits gesehenen Produktliste
+Verbesserte extract_product_type() Funktion, die striktere Regeln für die Erkennung von Displays anwendet
+Mehrfache Prüfungen, um sicherzustellen, dass ein Produkt wirklich ein Display ist
+Anzeige des erkannten Produkttyps in Telegram-Nachrichten mit eckigen Klammern, z.B. "[DISPLAY]"
+Zusätzliche Prüfungen auf Produktdetailseiten, um falsche Matches zu vermeiden
 
 
-Neue Testfunktion test_availability() zur Überprüfung der Verfügbarkeitserkennung
-Neue Funktion monitor_out_of_stock() zur Anzeige aller überwachten ausverkauften Produkte
-Integration der neuen stock.py-Funktionalität in den Haupt-Workflow
-Aktualisierung der Hauptfunktionen run_once() und run_loop() zur Unterstützung der neuen Funktionen
+tcgviert.py:
 
-5. Webshop-spezifische Erkennung
-Implementierung von websitespezifischen Erkennungsmustern für:
+Integration der verbesserten Produkttyp-Prüfung in beide Scraper-Methoden (JSON und HTML)
+Strikte Filterung, die sicherstellt, dass nur Displays angezeigt werden, wenn nach Displays gesucht wird
+Zusätzliche Prüfung auf Detailseiten für korrekte Produkttypübereinstimmung
 
-comicplanet.de: Erkennung von "Nicht mehr verfügbar" und "In den Warenkorb"-Buttons
-kofuku.de: Erkennung des Schloss-Symbols mit "Ausverkauft" und ausgegrauter Buttons
-tcgviert.com: Erkennung des "AUSVERKAUFT"-Kreises und "BEI VERFÜGBARKEIT INFORMIEREN"-Buttons
-card-corner.de: Erkennung farbiger Badges ("BESTSELLER", "AUF LAGER", "AUSVERKAUFT")
 
-6. Datenstrukturänderungen
 
-Einführung einer neuen Datei data/out_of_stock.txt zur Speicherung ausverkaufter Produkte
-Erweiterung der Produkt-IDs um Statuskomponenten (z.B. product_id_status_available oder product_id_status_unavailable)
-Verbessertes Speichern und Wiedererkennen von Statusänderungen
-
-Diese Änderungen ermöglichen dem Scraper, Verfügbarkeitsstatus präziser zu erkennen, ausverkaufte Produkte zu überwachen und Benachrichtigungen zu senden, wenn diese wieder verfügbar werden. Die Implementierung unterstützt verschiedene Anzeigemuster über mehrere Webshops hinweg und bietet neue Konfigurationsmöglichkeiten für den Benutzer.
+Diese Änderungen sorgen dafür, dass bei Suche nach "Journey Together display" oder "Reisegefährten display" wirklich nur Displays und keine anderen Produkttypen wie ETBs, Blister oder einzelne Booster angezeigt werden.
