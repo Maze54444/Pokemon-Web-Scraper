@@ -12,9 +12,10 @@ def clean_text(text):
 
 def is_keyword_in_text(keywords, text):
     """
-    Prüft auf exakte Übereinstimmung des Suchbegriffs im Text
+    Verbesserte Funktion für exakte Übereinstimmung des Suchbegriffs im Text
     
     Diese verbesserte Version sucht nach der exakten Phrase als zusammenhängende Wörter im Text.
+    Sie ist strenger als die vorherige Version und verhindert falsche Übereinstimmungen.
     
     :param keywords: Liste mit einzelnen Wörtern des Suchbegriffs
     :param text: Zu prüfender Text
@@ -51,16 +52,40 @@ def prepare_keywords(products):
     for line in products:
         keywords_map[line] = clean_text(line).split()
     
-    # Synonyme hinzufügen (falls vorhanden)
-    try:
-        with open("config/synonyms.json", "r", encoding="utf-8") as f:
-            synonyms = json.load(f)
-            
-        for key, synonym_list in synonyms.items():
-            # Füge jeden Synonym-Eintrag als separaten Suchbegriff hinzu
-            for synonym in synonym_list:
-                keywords_map[synonym] = clean_text(synonym).split()
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"ℹ️ Synonyme konnten nicht geladen werden: {e}", flush=True)
+    # Versuche zuerst config/synonyms.json
+    synonyms_file_paths = ["config/synonyms.json", "data/synonyms.json"]
+    synonyms_loaded = False
+    
+    for file_path in synonyms_file_paths:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                synonyms = json.load(f)
+                
+                # Füge jeden Synonym-Eintrag als separaten Suchbegriff hinzu
+                for key, synonym_list in synonyms.items():
+                    # Prüfe, ob der Key selbst ein Suchbegriff ist
+                    if key in keywords_map:
+                        # Füge nur die Synonyme zum Map hinzu
+                        for synonym in synonym_list:
+                            if synonym not in keywords_map:  # Vermeide Duplikate
+                                keywords_map[synonym] = clean_text(synonym).split()
+                    # Andernfalls betrachte alle Einträge als eigenständige Suchbegriffe
+                    else:
+                        # Der Key selbst könnte ein Suchbegriff sein
+                        keywords_map[key] = clean_text(key).split()
+                        # Die Synonyme dazu
+                        for synonym in synonym_list:
+                            if synonym not in keywords_map:  # Vermeide Duplikate
+                                keywords_map[synonym] = clean_text(synonym).split()
+                                
+                synonyms_loaded = True
+                print(f"ℹ️ Synonyme aus {file_path} geladen", flush=True)
+                break  # Wenn erfolgreich geladen, breche die Schleife ab
+                
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"ℹ️ Synonyme aus {file_path} konnten nicht geladen werden: {e}", flush=True)
+    
+    if not synonyms_loaded:
+        print("ℹ️ Keine Synonyme geladen. Nur direkte Suchbegriffe werden verwendet.", flush=True)
     
     return keywords_map
