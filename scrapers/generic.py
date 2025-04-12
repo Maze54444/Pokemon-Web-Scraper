@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from bs4 import BeautifulSoup
 import re
-from utils.matcher import clean_text, is_keyword_in_text
+from utils.matcher import clean_text, is_keyword_in_text, normalize_product_name, extract_product_type_from_text
 from utils.telegram import send_telegram_message, escape_markdown
 from utils.stock import get_status_text, update_product_status
 # Importiere das Modul für webseitenspezifische Verfügbarkeitsprüfung
@@ -39,9 +39,13 @@ def create_fingerprint(html_content):
     # Wir verwenden einen Hash des Inhalts als Fingerprint
     return hashlib.md5(html_content.encode('utf-8')).hexdigest()
 
+def extract_product_type_from_search_term(search_term):
+    """Extrahiert den Produkttyp direkt aus einem Suchbegriff"""
+    return extract_product_type_from_text(search_term)
+
 def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=True, only_available=False):
     """
-    Optimierte generische Scraper-Funktion mit Cache-Unterstützung
+    Optimierte generische Scraper-Funktion mit Cache-Unterstützung und verbesserter Produkttyp-Prüfung
     
     :param url: URL der zu scrapenden Website
     :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
@@ -122,6 +126,23 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     title_elem = soup.find('title')
                     link_text = title_elem.text.strip() if title_elem else ""
                     
+                    # VERBESSERT: Strikte Prüfung auf exakte Übereinstimmung mit dem Suchbegriff
+                    tokens = keywords_map.get(matched_term, [])
+                    
+                    # Extrahiere Produkttyp aus Suchbegriff und Titel
+                    search_term_type = extract_product_type_from_search_term(matched_term)
+                    title_product_type = extract_product_type(link_text)
+                    
+                    # Wenn nach einem Display gesucht wird, aber der Titel etwas anderes enthält, überspringen
+                    if search_term_type == "display" and title_product_type != "display":
+                        print(f"⚠️ Produkttyp-Diskrepanz: Suche nach 'display', aber Produkt ist '{title_product_type}': {link_text}", flush=True)
+                        continue
+                    
+                    # Strengere Keyword-Prüfung mit Berücksichtigung des Produkttyps
+                    if not is_keyword_in_text(tokens, link_text):
+                        print(f"⚠️ Produkt entspricht nicht mehr dem Suchbegriff '{matched_term}': {link_text}", flush=True)
+                        continue
+                    
                     # Aktualisiere die letzte Prüfzeit
                     domain_paths[product_id]["last_checked"] = time.time()
                     
@@ -157,9 +178,12 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             safe_status_text = escape_markdown(status_text)
                             safe_matched_term = escape_markdown(matched_term)
                             
+                            # Füge Produkttyp-Information hinzu
+                            product_type_info = f" [{title_product_type.upper()}]" if title_product_type != "unknown" else ""
+                            
                             # URLs müssen nicht escaped werden, da sie in Klammern stehen
                             msg = (
-                                f"🎯 *{safe_link_text}*\n"
+                                f"🎯 *{safe_link_text}*{product_type_info}\n"
                                 f"💶 {safe_price}\n"
                                 f"📊 {safe_status_text}\n"
                                 f"🔎 Treffer für: '{safe_matched_term}'\n"
@@ -232,14 +256,21 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 
                 # Effizientere Keyword-Prüfung
                 for search_term, tokens in keywords_map.items():
-                    phrase = " ".join(tokens)
-                    if phrase in clean_text(link_text):
+                    # VERBESSERT: Strikte Prüfung auf exakte Übereinstimmung mit der Phrase
+                    # Extrahiere erst Produkttyp aus dem Suchbegriff
+                    search_term_type = extract_product_type_from_search_term(search_term)
+                    
+                    # Bei Display-Suchbegriffen: auch ersten Check machen, ob der Linktext Display enthält
+                    if search_term_type == "display" and "display" not in link_text.lower():
+                        continue
+                    
+                    if is_keyword_in_text(tokens, link_text):
                         potential_product_links.append((href, a_tag.get_text().strip()))
                         break
             
             print(f"🔍 {len(potential_product_links)} potenzielle Produktlinks gefunden auf {url}", flush=True)
             
-            # Rest der Funktion bleibt ähnlich, aber wir aktualisieren den Cache
+            # Rest der Funktion bleibt ähnlich, aber wir aktualisieren die Produkttypprüfung
             for href, link_text in potential_product_links:
                 # Vollständige URL erstellen
                 if href.startswith('http'):
@@ -257,23 +288,38 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 # Prüfe jeden Suchbegriff gegen den Linktext
                 matched_term = None
                 for search_term, tokens in keywords_map.items():
-                    if is_keyword_in_text(tokens, link_text):
+                    # Extrahiere Produkttyp aus dem Suchbegriff und dem Link-Text
+                    search_term_type = extract_product_type_from_search_term(search_term)
+                    link_product_type = extract_product_type(link_text)
+                    
+                    # VERBESSERT: Wenn nach einem Display gesucht wird, aber der Link keins ist, überspringen
+                    if search_term_type == "display" and link_product_type != "display":
+                        print(f"❌ Produkttyp-Konflikt: Suche nach Display, aber Link ist '{link_product_type}': {link_text}", flush=True)
+                        continue
+                    
+                    # VERBESSERT: Strenge Prüfung mit der neuen Funktion
+                    match_result = is_keyword_in_text(tokens, link_text)
+                    
+                    if match_result:
                         matched_term = search_term
                         print(f"🔍 Treffer für '{search_term}' im Link: {link_text}", flush=True)
                         
-                        # Spezialbehandlung für Kofuku
-                        if "kofuku.de" in url:
-                            # Extrahiere Produkttyp aus dem Link-Text
-                            product_type = extract_product_type(link_text)
-                            
-                            # Extrahiere Suchbegriff-Typ
-                            search_type = extract_product_type(search_term)
-                            
-                            # Wenn die Typen nicht übereinstimmen, ist es kein Match
-                            if search_type != "unknown" and product_type != "unknown" and search_type != product_type:
-                                print(f"❌ Produkttyp-Diskrepanz bei Kofuku: Suchtyp '{search_type}' stimmt nicht mit Produkttyp '{product_type}' überein", flush=True)
+                        # WICHTIG: Zusätzliche Prüfung für den genauen Produkttyp
+                        print(f"🔍 Produkttyp-Prüfung für '{site_id}': Link-Text='{link_product_type}', Suchbegriff='{search_term_type}'", flush=True)
+                        
+                        # Wenn der Suchbegriff einen spezifischen Produkttyp enthält, muss exakt dieser Typ übereinstimmen
+                        if search_term_type != "unknown":
+                            # Nur exakte Produkttyp-Übereinstimmungen zulassen
+                            if link_product_type != search_term_type:
+                                print(f"❌ Produkttyp-Diskrepanz bei {site_id}: Suchtyp '{search_term_type}' stimmt nicht mit Produkttyp '{link_product_type}' überein", flush=True)
                                 matched_term = None
                                 continue
+                        
+                        # VERBESSERT: Wenn nach "display" gesucht wird, alle anderen Produkttypen ausschließen
+                        if "display" in search_term.lower() and link_product_type != "display":
+                            print(f"❌ Abgelehnt: Nach Display gesucht, aber Produkt ist '{link_product_type}'", flush=True)
+                            matched_term = None
+                            continue
                         
                         break
                 
@@ -289,6 +335,27 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 if check_availability:
                     try:
                         detail_soup, is_available, price, status_text = check_product_availability(product_url, headers)
+                        
+                        # VERBESSERT: Nochmals prüfen, ob der Produktdetailseiten-Titel dem Suchbegriff entspricht
+                        if detail_soup:
+                            detail_title = detail_soup.find('title')
+                            if detail_title:
+                                detail_title_text = detail_title.text.strip()
+                                tokens = keywords_map.get(matched_term, [])
+                                
+                                # Extrahiere Produkttyp aus dem Detailtitel
+                                detail_product_type = extract_product_type(detail_title_text)
+                                search_term_type = extract_product_type_from_search_term(matched_term)
+                                
+                                # Wenn nach Display gesucht wird, muss der Detailtitel auch Display sein
+                                if search_term_type == "display" and detail_product_type != "display":
+                                    print(f"❌ Detailseite ist kein Display, obwohl nach Display gesucht wurde: {detail_title_text}", flush=True)
+                                    continue
+                                
+                                # Generelle Keyword-Übereinstimmungsprüfung
+                                if not is_keyword_in_text(tokens, detail_title_text):
+                                    print(f"❌ Detailseite passt nicht zum Suchbegriff '{matched_term}': {detail_title_text}", flush=True)
+                                    continue
                         
                         # Für den Cache: Speichere die URL und den erkannten Term
                         if site_id not in product_cache:
@@ -309,7 +376,8 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             "is_available": is_available,
                             "price": price,
                             "last_checked": time.time(),
-                            "fingerprint": fingerprint
+                            "fingerprint": fingerprint,
+                            "product_type": extract_product_type(link_text)  # Speichere auch den Produkttyp
                         })
                         
                     except Exception as e:
@@ -319,7 +387,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 if only_available and not is_available:
                     continue
                 
-                # Benachrichtigungslogik (unverändert)
+                # Benachrichtigungslogik
                 should_notify, is_back_in_stock = update_product_status(
                     product_id, is_available, seen, out_of_stock
                 )
@@ -335,9 +403,13 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     safe_status_text = escape_markdown(status_text)
                     safe_matched_term = escape_markdown(matched_term)
                     
+                    # Füge Produkttyp-Information hinzu
+                    product_type = extract_product_type(link_text)
+                    product_type_info = f" [{product_type.upper()}]" if product_type != "unknown" else ""
+                    
                     # Nachricht zusammenstellen
                     msg = (
-                        f"🎯 *{safe_link_text}*\n"
+                        f"🎯 *{safe_link_text}*{product_type_info}\n"
                         f"💶 {safe_price}\n"
                         f"📊 {safe_status_text}\n"
                         f"🔎 Treffer für: '{safe_matched_term}'\n"
@@ -392,32 +464,43 @@ def check_product_availability(url, headers):
 
 def extract_product_type(text):
     """
-    Extrahiert den Produkttyp aus einem Text
+    Extrahiert den Produkttyp aus einem Text mit strengeren Regeln
     
     :param text: Text, aus dem der Produkttyp extrahiert werden soll
     :return: Produkttyp als String
     """
     text = text.lower()
     
-    # Display erkennen
-    if re.search(r'display|36er|36 booster|booster display', text):
+    # Display erkennen - höchste Priorität und strenge Prüfung
+    if re.search(r'\bdisplay\b|\b36er\b|\b36\s+booster\b|\bbooster\s+display\b', text):
+        # Zusätzliche Prüfung: Wenn andere Produkttypen erwähnt werden, ist es möglicherweise kein Display
+        if re.search(r'\bblister\b|\bpack\b|\bbuilder\b|\bbuild\s?[&]?\s?battle\b|\betb\b|\belite trainer box\b', text):
+            # Prüfe, ob "display" tatsächlich prominenter ist als andere Erwähnungen
+            if text.find('display') < text.find('blister') and text.find('display') < text.find('pack'):
+                return "display"
+            print(f"  [DEBUG] Produkt enthält 'display', aber auch andere Produkttypen: '{text}'", flush=True)
+            return "mixed_or_unclear"
         return "display"
     
-    # Blister erkennen
-    elif re.search(r'\bblister\b|sleeve(d)?\s+booster|check\s?lane', text):
+    # Blister erkennen - klare Abgrenzung
+    elif re.search(r'\bblister\b|\b3er\s+blister\b|\b3-pack\b|\bsleeve(d)?\s+booster\b|\bcheck\s?lane\b', text):
         return "blister"
     
-    # Elite Trainer Box erkennen
-    elif re.search(r'elite trainer box|etb|trainer box', text):
+    # Elite Trainer Box eindeutig erkennen
+    elif re.search(r'\belite trainer box\b|\betb\b|\btrainer box\b', text):
         return "etb"
     
-    # Build & Battle Box erkennen
-    elif re.search(r'build\s?[&]?\s?battle', text):
+    # Build & Battle Box eindeutig erkennen
+    elif re.search(r'\bbuild\s?[&]?\s?battle\b|\bprerelease\b', text):
         return "build_battle"
     
     # Premium Collectionen oder Special Produkte
-    elif re.search(r'premium|collector|collection|special', text):
+    elif re.search(r'\bpremium\b|\bcollector\b|\bcollection\b|\bspecial\b', text):
         return "premium"
+
+    # Einzelne Booster erkennen - aber nur wenn "display" definitiv nicht erwähnt wird
+    elif re.search(r'\bbooster\b|\bpack\b', text) and not re.search(r'display', text):
+        return "single_booster"
     
     # Wenn nichts erkannt wurde
     return "unknown"
@@ -463,16 +546,22 @@ def extract_product_info(title):
     else:
         language = "UNK"
     
-    # Extrahiere Produkttyp
-    product_type = "unknown"
-    if re.search(r'display|36er', title.lower()):
-        product_type = "display"
-    elif re.search(r'booster|pack|sleeve', title.lower()):
-        product_type = "booster"
-    elif re.search(r'trainer box|elite trainer|box|tin', title.lower()):
-        product_type = "box"
-    elif re.search(r'blister|check\s?lane', title.lower()):
-        product_type = "blister"
+    # Extrahiere Produkttyp mit der verbesserten Funktion
+    detected_type = extract_product_type(title)
+    if detected_type != "unknown":
+        product_type = detected_type
+    else:
+        # Fallback zur alten Methode
+        if re.search(r'display|36er', title.lower()):
+            product_type = "display"
+        elif re.search(r'booster|pack|sleeve', title.lower()):
+            product_type = "booster"
+        elif re.search(r'trainer box|elite trainer|box|tin', title.lower()):
+            product_type = "box"
+        elif re.search(r'blister|check\s?lane', title.lower()):
+            product_type = "blister"
+        else:
+            product_type = "unknown"
     
     # Extrahiere Serien-/Set-Code
     series_code = "unknown"
