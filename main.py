@@ -18,12 +18,12 @@ def run_once(only_available=False, reset_seen=False):
     :param reset_seen: Ob die Liste der gesehenen Produkte zurückgesetzt werden soll
     :return: Intervall für den nächsten Durchlauf
     """
-    print("🟢 Einzelscan gestartet", flush=True)
-    print(f"👁️ Modus: {'Nur verfügbare Produkte' if only_available else 'Alle Produkte'}", flush=True)
+    print("[START] Einzelscan gestartet", flush=True)
+    print(f"[MODE] {'Nur verfügbare Produkte' if only_available else 'Alle Produkte'}", flush=True)
     
     # Seen-Liste zurücksetzen, wenn angefordert
     if reset_seen:
-        print("🧹 Setze Liste der gesehenen Produkte zurück", flush=True)
+        print("[RESET] Setze Liste der gesehenen Produkte zurück", flush=True)
         with open("data/seen.txt", "w", encoding="utf-8") as f:
             f.write("")
     
@@ -34,20 +34,20 @@ def run_once(only_available=False, reset_seen=False):
     urls = load_list("data/urls.txt")
     keywords_map = prepare_keywords(products)
     
-    print(f"🔄 Durchlauf: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
-    print(f"🔍 Suchbegriffe: {list(keywords_map.keys())}", flush=True)
-    print(f"📋 {len(out_of_stock)} ausverkaufte Produkte werden überwacht", flush=True)
+    print(f"[INFO] Durchlauf: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"[INFO] Suchbegriffe: {list(keywords_map.keys())}", flush=True)
+    print(f"[INFO] {len(out_of_stock)} ausverkaufte Produkte werden überwacht", flush=True)
     
     # TCGViert-spezifischer Scraper
     new_matches = scrape_tcgviert(keywords_map, seen, out_of_stock, only_available)
     if new_matches:
-        print(f"✅ {len(new_matches)} neue Treffer bei TCGViert gefunden", flush=True)
+        print(f"[SUCCESS] {len(new_matches)} neue Treffer bei TCGViert gefunden", flush=True)
     
     # Sapphire-Cards spezifischer Scraper
     if any("sapphire-cards.de" in url for url in urls):
         sapphire_matches = scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available)
         if sapphire_matches:
-            print(f"✅ {len(sapphire_matches)} neue Treffer bei Sapphire-Cards gefunden", flush=True)
+            print(f"[SUCCESS] {len(sapphire_matches)} neue Treffer bei Sapphire-Cards gefunden", flush=True)
             new_matches.extend(sapphire_matches)
         # Entferne sapphire-cards.de aus der URL-Liste für den generischen Scraper
         urls = [url for url in urls if "sapphire-cards.de" not in url]
@@ -57,7 +57,7 @@ def run_once(only_available=False, reset_seen=False):
         if "tcgviert.com" not in url:  # TCGViert wird bereits separat abgefragt
             new_url_matches = scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=True, only_available=only_available)
             if new_url_matches:
-                print(f"✅ {len(new_url_matches)} neue Treffer bei {url} gefunden", flush=True)
+                print(f"[SUCCESS] {len(new_url_matches)} neue Treffer bei {url} gefunden", flush=True)
                 new_matches.extend(new_url_matches)
 
     # Speichere aktualisierte Zustände
@@ -65,7 +65,7 @@ def run_once(only_available=False, reset_seen=False):
     save_out_of_stock(out_of_stock)
     
     interval = get_current_interval("config/schedule.json")
-    print(f"⏳ Fertig. Nächster Durchlauf in {interval} Sekunden", flush=True)
+    print(f"[DONE] Fertig. Nächster Durchlauf in {interval} Sekunden", flush=True)
     return interval
 
 def run_loop(only_available=False):
@@ -74,28 +74,28 @@ def run_loop(only_available=False):
     
     :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
     """
-    print("🌀 Dauerbetrieb gestartet", flush=True)
+    print("[START] Dauerbetrieb gestartet", flush=True)
     while True:
         try:
             interval = run_once(only_available=only_available)
             time.sleep(interval)
         except Exception as e:
-            print(f"❌ Fehler im Hauptloop: {e}", flush=True)
-            print("🔄 Neustart in 60 Sekunden...", flush=True)
+            print(f"[ERROR] Fehler im Hauptloop: {e}", flush=True)
+            print("[RETRY] Neustart in 60 Sekunden...", flush=True)
             time.sleep(60)
 
 def test_telegram():
     """Testet die Telegram-Benachrichtigungsfunktion"""
-    print("🧪 Starte Telegram-Test", flush=True)
-    result = send_telegram_message("🧪 Test-Nachricht vom TCG-Scraper")
+    print("[TEST] Starte Telegram-Test", flush=True)
+    result = send_telegram_message("[TEST] Test-Nachricht vom TCG-Scraper")
     if result:
-        print("✅ Telegram-Test erfolgreich", flush=True)
+        print("[SUCCESS] Telegram-Test erfolgreich", flush=True)
     else:
-        print("❌ Telegram-Test fehlgeschlagen", flush=True)
+        print("[ERROR] Telegram-Test fehlgeschlagen", flush=True)
 
 def test_matching():
     """Testet das Matching für bekannte Produktnamen"""
-    print("🧪 Teste Matching-Funktion", flush=True)
+    print("[TEST] Teste Matching-Funktion", flush=True)
     
     test_titles = [
         "Pokémon TCG: Journey Together (SV09) - 36er Display (EN) - max. 1 per person",
@@ -122,7 +122,7 @@ def test_matching():
 
 def test_availability():
     """Testet die Verfügbarkeitsprüfung für bekannte URLs"""
-    print("🧪 Teste Verfügbarkeitsprüfung", flush=True)
+    print("[TEST] Teste Verfügbarkeitsprüfung", flush=True)
     
     from scrapers.generic import check_product_availability
     from utils.availability import detect_availability
@@ -161,7 +161,7 @@ def monitor_out_of_stock():
         print("Keine ausverkauften Produkte werden aktuell überwacht.", flush=True)
         return
     
-    print(f"Aktuell werden {len(out_of_stock)} ausverkaufte Produkte überwacht:", flush=True)
+    print(f"[INFO] Aktuell werden {len(out_of_stock)} ausverkaufte Produkte überwacht:", flush=True)
     for product_id in sorted(out_of_stock):
         parts = product_id.split('_')
         site = parts[0]
@@ -181,7 +181,7 @@ if __name__ == "__main__":
                         help="Liste der gesehenen Produkte zurücksetzen")
     args = parser.parse_args()
 
-    print(f"📦 Modus gewählt: {args.mode}", flush=True)
+    print(f"[START] Modus gewählt: {args.mode}", flush=True)
     
     if args.mode == "once":
         run_once(only_available=args.only_available, reset_seen=args.reset)

@@ -17,7 +17,7 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
     :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
     :return: Liste der neuen Treffer
     """
-    print("🌐 Starte speziellen Scraper für sapphire-cards.de", flush=True)
+    print("[INFO] Starte speziellen Scraper für sapphire-cards.de", flush=True)
     new_matches = []
     
     # Für jeden Suchbegriff einen direkten Suchaufruf durchführen
@@ -33,7 +33,7 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
             # Durchführen der Suchanfrage
             response = requests.get(search_url, headers=headers, timeout=15)
             if response.status_code != 200:
-                print(f⚠️ Fehler beim Abrufen von {search_url}: Status {response.status_code}", flush=True)
+                print(f"[WARN] Fehler beim Abrufen von {search_url}: Status {response.status_code}", flush=True)
                 continue
             
             soup = BeautifulSoup(response.text, "html.parser")
@@ -45,12 +45,12 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
                 # Alternative Selektoren versuchen
                 products = soup.select('li.product, div.product, article.product')
             
-            print(f"🔍 {len(products)} Produkte bei der Suche nach '{search_term}' gefunden", flush=True)
+            print(f"[INFO] {len(products)} Produkte bei der Suche nach '{search_term}' gefunden", flush=True)
             
             # Wenn keine Produkte gefunden wurden, versuche generischen Link-Scan
             if not products:
                 all_links = soup.select('a[href*="product"]')
-                print(f"🔍 {len(all_links)} potenzielle Produkt-Links gefunden", flush=True)
+                print(f"[INFO] {len(all_links)} potenzielle Produkt-Links gefunden", flush=True)
                 
                 for link in all_links:
                     href = link.get('href', '')
@@ -58,7 +58,7 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
                     
                     # Prüfe, ob der Link-Text mit dem Suchbegriff übereinstimmt
                     if is_keyword_in_text(tokens, link_text):
-                        print(f"🔍 Treffer für '{search_term}' im Link: {link_text}", flush=True)
+                        print(f"[INFO] Treffer für '{search_term}' im Link: {link_text}", flush=True)
                         
                         # Prüfe Verfügbarkeit und sende Benachrichtigung
                         product_url = href
@@ -83,7 +83,7 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
                                 if should_notify:
                                     # Status anpassen wenn wieder verfügbar
                                     if is_back_in_stock:
-                                        status_text = "🎉 Wieder verfügbar!"
+                                        status_text = "[GOOD] Wieder verfügbar!"
                                         
                                     # Escape special characters for Markdown
                                     safe_link_text = escape_markdown(link_text)
@@ -92,11 +92,11 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
                                     safe_search_term = escape_markdown(search_term)
                                     
                                     msg = (
-                                        f"🎯 *{safe_link_text}*\n"
-                                        f"💶 {safe_price}\n"
-                                        f"📊 {safe_status_text}\n"
-                                        f"🔎 Treffer für: '{safe_search_term}'\n"
-                                        f"🔗 [Zum Produkt]({product_url})"
+                                        f"[MATCH] *{safe_link_text}*\n"
+                                        f"[PRICE] {safe_price}\n"
+                                        f"[STATUS] {safe_status_text}\n"
+                                        f"[SEARCH] Treffer für: '{safe_search_term}'\n"
+                                        f"[LINK] [Zum Produkt]({product_url})"
                                     )
                                     
                                     if send_telegram_message(msg):
@@ -106,9 +106,9 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
                                             seen.add(f"{product_id}_status_unavailable")
                                         
                                         new_matches.append(product_id)
-                                        print(f"✅ Neuer Treffer bei sapphire-cards.de: {link_text} - {status_text}", flush=True)
+                                        print(f"[SUCCESS] Neuer Treffer bei sapphire-cards.de: {link_text} - {status_text}", flush=True)
                         except Exception as e:
-                            print(f"⚠️ Fehler beim Prüfen des Produkts {product_url}: {e}", flush=True)
+                            print(f"[WARN] Fehler beim Prüfen des Produkts {product_url}: {e}", flush=True)
             
             # Normale Produktliste verarbeiten
             for product in products:
@@ -124,7 +124,7 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
                 
                 # Prüfe, ob der Produkttitel mit dem Suchbegriff übereinstimmt
                 if is_keyword_in_text(tokens, title):
-                    print(f"🔍 Treffer für '{search_term}' im Produkt: {title}", flush=True)
+                    print(f"[INFO] Treffer für '{search_term}' im Produkt: {title}", flush=True)
                     
                     # Prüfe Verfügbarkeit und sende Benachrichtigung
                     try:
@@ -148,7 +148,7 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
                             if should_notify:
                                 # Status anpassen wenn wieder verfügbar
                                 if is_back_in_stock:
-                                    status_text = "🎉 Wieder verfügbar!"
+                                    status_text = "[GOOD] Wieder verfügbar!"
                                     
                                 # Escape special characters for Markdown
                                 safe_title = escape_markdown(title)
@@ -157,11 +157,11 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
                                 safe_search_term = escape_markdown(search_term)
                                 
                                 msg = (
-                                    f"🎯 *{safe_title}*\n"
-                                    f"💶 {safe_price}\n"
-                                    f"📊 {safe_status_text}\n"
-                                    f"🔎 Treffer für: '{safe_search_term}'\n"
-                                    f"🔗 [Zum Produkt]({product_url})"
+                                    f"[MATCH] *{safe_title}*\n"
+                                    f"[PRICE] {safe_price}\n"
+                                    f"[STATUS] {safe_status_text}\n"
+                                    f"[SEARCH] Treffer für: '{safe_search_term}'\n"
+                                    f"[LINK] [Zum Produkt]({product_url})"
                                 )
                                 
                                 if send_telegram_message(msg):
@@ -171,12 +171,12 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
                                         seen.add(f"{product_id}_status_unavailable")
                                     
                                     new_matches.append(product_id)
-                                    print(f"✅ Neuer Treffer bei sapphire-cards.de: {title} - {status_text}", flush=True)
+                                    print(f"[SUCCESS] Neuer Treffer bei sapphire-cards.de: {title} - {status_text}", flush=True)
                     except Exception as e:
-                        print(f"⚠️ Fehler beim Prüfen des Produkts {product_url}: {e}", flush=True)
+                        print(f"[WARN] Fehler beim Prüfen des Produkts {product_url}: {e}", flush=True)
         
         except Exception as e:
-            print(f"❌ Fehler beim Scrapen von sapphire-cards.de für '{search_term}': {e}", flush=True)
+            print(f"[ERROR] Fehler beim Scrapen von sapphire-cards.de für '{search_term}': {e}", flush=True)
     
     return new_matches
 
