@@ -11,8 +11,6 @@ from utils.telegram import send_telegram_message, escape_markdown
 from utils.stock import get_status_text, update_product_status
 # Importiere das Modul für webseitenspezifische Verfügbarkeitsprüfung
 from utils.availability import detect_availability, extract_price
-# Import der Filter-Funktionen
-from utils.filters import should_skip_url, filter_links, log_filter_stats
 
 def load_product_cache(cache_file="data/product_cache.json"):
     """Lädt das Cache-Dictionary mit bekannten Produkten und ihren URLs"""
@@ -132,11 +130,11 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     tokens = keywords_map.get(matched_term, [])
                     
                     # Extrahiere Produkttyp aus Suchbegriff und Titel
-                    search_term_type = extract_product_type_from_text(matched_term)
+                    search_term_type = extract_product_type_from_search_term(matched_term)
                     title_product_type = extract_product_type(link_text)
                     
                     # Wenn nach einem Display gesucht wird, aber der Titel etwas anderes enthält, überspringen
-                    if search_term_type == "display" and title_product_type and title_product_type != "display":
+                    if search_term_type == "display" and title_product_type != "display":
                         print(f"⚠️ Produkttyp-Diskrepanz: Suche nach 'display', aber Produkt ist '{title_product_type}': {link_text}", flush=True)
                         continue
                     
@@ -226,25 +224,72 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
             # Titel der Seite extrahieren
             page_title = soup.title.text.strip() if soup.title else url
             
-            # Extrahiere den ersten Suchbegriff für die Produkttypbestimmung
-            first_search_term = next(iter(keywords_map.keys())) if keywords_map else None
-            search_product_type = extract_product_type_from_text(first_search_term) if first_search_term else None
+            # Effizienter: Erst alle Links sammeln, dann Kategoriefilter anwenden
+            all_links = soup.find_all('a', href=True)
             
-            # Gefilterte Links abrufen
-            filtered_links = filter_links(soup, url, search_product_type)
+            # Ignoriere bekannte irrelevante Kategorien (optimierte Performance)
+            ignored_categories = [
+                'magic', 'yugioh', 'digimon', 'flesh', 'lorcana', 'metazoo', 
+                'one piece', 'star wars', 'grand archive', 'sorcery', 'zubehör',
+                'login', 'register', 'contact', 'impressum', 'datenschutz',
+                'agb', 'faq', 'hilfe', 'versand', 'newsletter'
+            ]
             
-            print(f"🔍 {len(filtered_links)} potenzielle Produktlinks nach Filterung gefunden auf {url}", flush=True)
+            potential_product_links = []
             
-            # Rest der Funktion bleibt ähnlich, aber wir verwenden die gefilterten Links
-            for href, link_text in filtered_links:
+            # Schnellerer Filter für Links
+            for a_tag in all_links:
+                href = a_tag.get('href', '')
+                if not href or href.startswith('#') or href.startswith('javascript:'):
+                    continue
+                
+                link_text = a_tag.get_text().strip().lower()
+                
+                # Ignoriere bekannte irrelevante Kategorien
+                if any(cat in link_text for cat in ignored_categories):
+                    continue
+                
+                # Nur Links mit Produktnamen-ähnlichem Text oder Produkt-Pfad verfolgen
+                if '/product/' in href or '/products/' in href or 'detail' in href:
+                    potential_product_links.append((href, a_tag.get_text().strip()))
+                    continue
+                
+                # Effizientere Keyword-Prüfung
+                for search_term, tokens in keywords_map.items():
+                    # VERBESSERT: Strikte Prüfung auf exakte Übereinstimmung mit der Phrase
+                    # Extrahiere erst Produkttyp aus dem Suchbegriff
+                    search_term_type = extract_product_type_from_search_term(search_term)
+                    
+                    # Bei Display-Suchbegriffen: auch ersten Check machen, ob der Linktext Display enthält
+                    if search_term_type == "display" and "display" not in link_text.lower():
+                        continue
+                    
+                    if is_keyword_in_text(tokens, link_text):
+                        potential_product_links.append((href, a_tag.get_text().strip()))
+                        break
+            
+            print(f"🔍 {len(potential_product_links)} potenzielle Produktlinks gefunden auf {url}", flush=True)
+            
+            # Rest der Funktion bleibt ähnlich, aber wir aktualisieren die Produkttypprüfung
+            for href, link_text in potential_product_links:
+                # Vollständige URL erstellen
+                if href.startswith('http'):
+                    product_url = href
+                elif href.startswith('/'):
+                    base_url = '/'.join(url.split('/')[:3])  # http(s)://domain.com
+                    product_url = f"{base_url}{href}"
+                else:
+                    # Relativer Pfad
+                    product_url = f"{url.rstrip('/')}/{href.lstrip('/')}"
+                
                 # Eindeutige ID für diesen Fund erstellen
                 product_id = create_product_id(link_text, site_id=site_id)
                 
                 # Prüfe jeden Suchbegriff gegen den Linktext
                 matched_term = None
                 for search_term, tokens in keywords_map.items():
-                    # Extrahiere Produkttyp aus Suchbegriff und dem Link-Text
-                    search_term_type = extract_product_type_from_text(search_term)
+                    # Extrahiere Produkttyp aus dem Suchbegriff und dem Link-Text
+                    search_term_type = extract_product_type_from_search_term(search_term)
                     link_product_type = extract_product_type(link_text)
                     
                     # VERBESSERT: Wenn nach einem Display gesucht wird, aber der Link keins ist, überspringen
@@ -289,7 +334,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 
                 if check_availability:
                     try:
-                        detail_soup, is_available, price, status_text = check_product_availability(href, headers)
+                        detail_soup, is_available, price, status_text = check_product_availability(product_url, headers)
                         
                         # VERBESSERT: Nochmals prüfen, ob der Produktdetailseiten-Titel dem Suchbegriff entspricht
                         if detail_soup:
@@ -300,7 +345,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                                 
                                 # Extrahiere Produkttyp aus dem Detailtitel
                                 detail_product_type = extract_product_type(detail_title_text)
-                                search_term_type = extract_product_type_from_text(matched_term)
+                                search_term_type = extract_product_type_from_search_term(matched_term)
                                 
                                 # Wenn nach Display gesucht wird, muss der Detailtitel auch Display sein
                                 if search_term_type == "display" and detail_product_type != "display":
@@ -326,7 +371,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             fingerprint = create_fingerprint(html_content)
                             
                         product_cache[site_id][product_id].update({
-                            "url": href,
+                            "url": product_url,
                             "term": matched_term,
                             "is_available": is_available,
                             "price": price,
@@ -336,7 +381,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                         })
                         
                     except Exception as e:
-                        print(f"⚠️ Fehler beim Prüfen der Verfügbarkeit für {href}: {e}", flush=True)
+                        print(f"⚠️ Fehler beim Prüfen der Verfügbarkeit für {product_url}: {e}", flush=True)
                 
                 # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
                 if only_available and not is_available:
@@ -368,7 +413,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                         f"💶 {safe_price}\n"
                         f"📊 {safe_status_text}\n"
                         f"🔎 Treffer für: '{safe_matched_term}'\n"
-                        f"🔗 [Zum Produkt]({href})"
+                        f"🔗 [Zum Produkt]({product_url})"
                     )
                     
                     # Telegram-Nachricht senden
