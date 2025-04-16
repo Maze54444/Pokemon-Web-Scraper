@@ -1,11 +1,15 @@
 import requests
 import re
+import logging
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 from utils.telegram import send_telegram_message, escape_markdown
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text
 from utils.stock import get_status_text, update_product_status
-# Importiere das neue Modul für webseitenspezifische Verfügbarkeitsprüfung
 from utils.availability import detect_availability
+
+# Logger konfigurieren
+logger = logging.getLogger(__name__)
 
 def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
     """
@@ -17,8 +21,8 @@ def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
     :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
     :return: Liste der neuen Treffer
     """
-    print("🌐 Starte Scraper für tcgviert.com", flush=True)
-    print(f"🔍 Suche nach folgenden Begriffen: {list(keywords_map.keys())}", flush=True)
+    logger.info("🌐 Starte Scraper für tcgviert.com")
+    logger.debug(f"🔍 Suche nach folgenden Begriffen: {list(keywords_map.keys())}")
     
     json_matches = []
     html_matches = []
@@ -27,19 +31,21 @@ def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
     try:
         json_matches = scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available)
     except Exception as e:
-        print(f"❌ Fehler beim JSON-Scraping: {e}", flush=True)
+        logger.error(f"❌ Fehler beim JSON-Scraping: {e}", exc_info=True)
     
-    try:
-        # Hauptseite scrapen, um die richtigen Collection-URLs zu finden
-        main_page_urls = discover_collection_urls()
-        if main_page_urls:
-            html_matches = scrape_tcgviert_html(main_page_urls, keywords_map, seen, out_of_stock, only_available)
-    except Exception as e:
-        print(f"❌ Fehler beim HTML-Scraping: {e}", flush=True)
+    # Nur HTML-Scraping durchführen, wenn JSON-Scraping keine Treffer liefert
+    if not json_matches:
+        try:
+            # Hauptseite scrapen, um die richtigen Collection-URLs zu finden
+            main_page_urls = discover_collection_urls()
+            if main_page_urls:
+                html_matches = scrape_tcgviert_html(main_page_urls, keywords_map, seen, out_of_stock, only_available)
+        except Exception as e:
+            logger.error(f"❌ Fehler beim HTML-Scraping: {e}", exc_info=True)
     
     # Kombiniere eindeutige Ergebnisse
     all_matches = list(set(json_matches + html_matches))
-    print(f"✅ Insgesamt {len(all_matches)} einzigartige Treffer gefunden", flush=True)
+    logger.info(f"✅ Insgesamt {len(all_matches)} einzigartige Treffer gefunden")
     return all_matches
 
 def extract_product_info(title):
@@ -119,6 +125,9 @@ def extract_product_type(text):
     :param text: Text, aus dem der Produkttyp extrahiert werden soll
     :return: Produkttyp als String
     """
+    if not text:
+        return "unknown"
+        
     text = text.lower()
     
     # Display erkennen - höchste Priorität und strenge Prüfung
@@ -134,7 +143,7 @@ def extract_product_type(text):
                 if (blister_pos < 0 or display_pos < blister_pos) and (pack_pos < 0 or display_pos < pack_pos):
                     return "display"
             
-            print(f"  [DEBUG] Produkt enthält 'display', aber auch andere Produkttypen: '{text}'", flush=True)
+            logger.debug(f"Produkt enthält 'display', aber auch andere Produkttypen: '{text}'")
             return "mixed_or_unclear"
         return "display"
     
@@ -162,137 +171,158 @@ def extract_product_type(text):
     return "unknown"
 
 def discover_collection_urls():
-    """Entdeckt aktuelle Collection-URLs durch Scraping der Hauptseite"""
-    print("🔍 Suche nach gültigen Collection-URLs auf der Hauptseite", flush=True)
+    """
+    Entdeckt aktuelle Collection-URLs durch Scraping der Hauptseite,
+    mit Optimierung für schnelleren Abbruch und bessere Priorisierung
+    """
+    logger.info("🔍 Suche nach gültigen Collection-URLs auf der Hauptseite")
     valid_urls = []
     
     try:
-        # Starte mit der Hauptseite
-        main_url = "https://tcgviert.com"
+        # Starte mit den wichtigsten URLs (direkt)
+        priority_urls = [
+            "https://tcgviert.com/collections/vorbestellungen",
+            "https://tcgviert.com/collections/pokemon",
+            "https://tcgviert.com/collections/all",
+        ]
+        
+        # Bei Fehlern direkt zu diesen URLs wechseln
+        fallback_urls = ["https://tcgviert.com/collections/all"]
+        
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         
-        response = requests.get(main_url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            print(f"⚠️ Fehler beim Abrufen der Hauptseite: Status {response.status_code}", flush=True)
-            return []
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Finde alle Links auf der Seite
-        links = soup.find_all("a", href=True)
-        
-        # Filtern nach Collection-Links
-        collection_urls = []
-        for link in links:
-            href = link["href"]
-            if "/collections/" in href and "tcgviert.com" not in href:
-                # Vollständige URL erstellen, wenn nötig
-                full_url = f"{main_url}{href}" if href.startswith("/") else href
-                collection_urls.append(full_url)
-        
-        # Duplikate entfernen
-        collection_urls = list(set(collection_urls))
-        print(f"🔍 {len(collection_urls)} mögliche Collection-URLs gefunden", flush=True)
-        
-        # Prüfe, welche URLs tatsächlich existieren
-        for url in collection_urls:
+        # Prüfe zuerst die Prioritäts-URLs (schneller Weg)
+        for url in priority_urls:
             try:
-                test_response = requests.get(url, headers=headers, timeout=10)
-                if test_response.status_code == 200:
+                logger.debug(f"Teste Prioritäts-URL: {url}")
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code == 200:
                     valid_urls.append(url)
-                    print(f"✅ Gültige Collection-URL gefunden: {url}", flush=True)
+                    logger.info(f"✅ Prioritäts-URL gefunden: {url}")
             except Exception:
+                logger.warning(f"Konnte nicht auf Prioritäts-URL zugreifen: {url}")
                 pass
         
-        # Gib immer die URL für "alle Produkte" mit zurück
-        all_products_url = f"{main_url}/collections/all"
-        if all_products_url not in valid_urls:
-            valid_urls.append(all_products_url)
-            print(f"✅ Füge Standard-URL hinzu: {all_products_url}", flush=True)
+        # Wenn wir bereits Prioritäts-URLs haben, können wir die aufwendigere Suche überspringen
+        if len(valid_urls) >= 2:
+            logger.info(f"🔍 {len(valid_urls)} Prioritäts-URLs gefunden, überspringe weitere Suche")
+            return valid_urls
         
-        print(f"🔍 Insgesamt {len(valid_urls)} gültige Collection-URLs gefunden", flush=True)
+        # Wenn keine Prioritäts-URLs funktionieren, Fallbacks verwenden
+        if not valid_urls:
+            logger.warning("Keine Prioritäts-URLs funktionieren, verwende Fallbacks")
+            return fallback_urls
         
-        # Beschränke auf eine kleinere Anzahl relevanter URLs, um Duplikate zu vermeiden
-        # Priorisiere spezifische URLs, die mit den Suchbegriffen zu tun haben
-        priority_urls = []
-        for url in valid_urls:
-            if any(term in url.lower() for term in ["journey", "together", "sv09", "reise", "kp09", "royal", "blood", "vorbestellungen"]):
-                priority_urls.append(url)
+        # Hauptseiten-Scan nur durchführen, wenn wir noch nicht genug URLs haben
+        main_url = "https://tcgviert.com"
         
-        # Füge die Standard-URLs hinzu
-        for url in ["https://tcgviert.com/collections/all", "https://tcgviert.com/collections/vorbestellungen"]:
-            if url in valid_urls and url not in priority_urls:
-                priority_urls.append(url)
-        
-        # Wenn wir priorisierte URLs haben, verwende nur diese
-        if priority_urls:
-            print(f"🔍 Verwende {len(priority_urls)} priorisierte URLs: {priority_urls}", flush=True)
-            return priority_urls
+        try:
+            response = requests.get(main_url, headers=headers, timeout=10)
+            if response.status_code != 200:
+                logger.warning(f"⚠️ Fehler beim Abrufen der Hauptseite: Status {response.status_code}")
+                if valid_urls:
+                    return valid_urls
+                return fallback_urls
+                
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Finde alle Links
+            collection_urls = []
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                if "/collections/" in href and "product" not in href:
+                    # Vollständige URL erstellen
+                    full_url = f"{main_url}{href}" if href.startswith("/") else href
+                    
+                    # Priorisiere relevante URLs
+                    if any(term in href.lower() for term in ["journey", "together", "reise", "pokemon", "vorbestell"]):
+                        if full_url not in valid_urls:
+                            valid_urls.append(full_url)
+                    else:
+                        collection_urls.append(full_url)
+            
+            # Füge Haupt-Collection-URL immer hinzu (alle Produkte)
+            all_products_url = f"{main_url}/collections/all"
+            if all_products_url not in valid_urls:
+                valid_urls.append(all_products_url)
+                
+            # Begrenze die Anzahl der URLs auf max. 3
+            if len(valid_urls) > 3:
+                logger.info(f"⚙️ Begrenze URLs auf 3 (von {len(valid_urls)})")
+                valid_urls = valid_urls[:3]
+                
+        except Exception as e:
+            logger.error(f"Fehler beim Abrufen der Hauptseite: {e}")
+            if valid_urls:
+                return valid_urls
+            return fallback_urls
         
         return valid_urls
         
     except Exception as e:
-        print(f"❌ Fehler bei der Collection-URL-Entdeckung: {e}", flush=True)
+        logger.error(f"❌ Fehler bei der Collection-URL-Entdeckung: {e}", exc_info=True)
         return ["https://tcgviert.com/collections/all"]  # Fallback zur Alle-Produkte-Seite
 
 def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False):
-    """JSON-Scraper für tcgviert.com mit verbesserter Produkttyp-Filterung"""
+    """
+    JSON-Scraper für tcgviert.com mit verbesserter Produkttyp-Filterung und Effizienz
+    """
     new_matches = []
     
     try:
-        # Versuche zuerst den JSON-Endpunkt
-        response = requests.get("https://tcgviert.com/products.json", timeout=10)
+        # Versuche zuerst den JSON-Endpunkt mit kürzerem Timeout
+        response = requests.get("https://tcgviert.com/products.json", timeout=8)
         if response.status_code != 200:
-            print("⚠️ API antwortet nicht mit Status 200", flush=True)
+            logger.warning("⚠️ API antwortet nicht mit Status 200")
             return []
         
         data = response.json()
         if "products" not in data or not data["products"]:
-            print("⚠️ Keine Produkte im JSON gefunden", flush=True)
+            logger.warning("⚠️ Keine Produkte im JSON gefunden")
             return []
         
         products = data["products"]
-        print(f"🔍 {len(products)} Produkte zum Prüfen gefunden (JSON)", flush=True)
+        logger.info(f"🔍 {len(products)} Produkte zum Prüfen gefunden (JSON)")
         
-        # Debug-Ausgabe für alle Produkte mit bestimmten Keywords
-        print("🔍 Alle Produkte mit Journey Together oder Reisegefährten im Titel:", flush=True)
-        journey_products = []
+        # Relevante Produkte filtern (für Journey Together/Reisegefährten)
+        # Optimiert: Nur filtern, nicht alles ausgeben
+        relevant_products = []
         for product in products:
             title = product["title"]
-            if "journey together" in title.lower() or "reisegefährten" in title.lower():
-                print(f"  - {title}", flush=True)
-                journey_products.append(product)
+            if ("journey together" in title.lower() or 
+                "reisegefährten" in title.lower() or 
+                "sv09" in title.lower() or 
+                "kp09" in title.lower()):
+                relevant_products.append(product)
         
-        print(f"🔍 {len(journey_products)} Produkte mit gesuchten Keywords gefunden", flush=True)
+        logger.info(f"🔍 {len(relevant_products)} relevante Produkte gefunden")
         
-        for product in products:
+        # Falls keine relevanten Produkte direkt gefunden wurden, prüfe alle
+        if not relevant_products:
+            relevant_products = products
+        
+        for product in relevant_products:
             title = product["title"]
             handle = product["handle"]
-            
-            print(f"🔍 Prüfe Produkt: '{title}'", flush=True)
             
             # Erstelle eine eindeutige ID basierend auf den Produktinformationen
             product_id = create_product_id(title)
             
-            # Prüfe jeden Suchbegriff gegen den Produkttitel
+            # Prüfe jeden Suchbegriff gegen den Produkttitel mit reduziertem Logging
             matched_term = None
             for search_term, tokens in keywords_map.items():
                 # Extrahiere Produkttyp aus Suchbegriff und Titel
                 search_term_type = extract_product_type_from_text(search_term)
                 title_product_type = extract_product_type(title)
                 
-                # VERBESSERT: Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
+                # Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
                 if search_term_type == "display" and title_product_type != "display":
-                    print(f"  ❌ Produkttyp-Konflikt: Suche nach 'display', aber Produkt ist '{title_product_type}'", flush=True)
                     continue
                 
-                # Strikte Keyword-Prüfung
-                match_result = is_keyword_in_text(tokens, title)
-                print(f"  - Vergleiche mit '{search_term}' (Tokens: {tokens}): {match_result}", flush=True)
-                
-                if match_result:
+                # Strikte Keyword-Prüfung ohne übermäßiges Logging
+                if is_keyword_in_text(tokens, title, log_level='None'):
                     matched_term = search_term
                     break
             
@@ -347,27 +377,43 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
                             seen.add(f"{product_id}_status_unavailable")
                         
                         new_matches.append(product_id)
-                        print(f"✅ Neuer Treffer gemeldet: {title} - {status_text}", flush=True)
+                        logger.info(f"✅ Neuer Treffer gemeldet: {title} - {status_text}")
         
     except Exception as e:
-        print(f"❌ Fehler beim TCGViert JSON-Scraping: {e}", flush=True)
+        logger.error(f"❌ Fehler beim TCGViert JSON-Scraping: {e}", exc_info=True)
     
     return new_matches
 
 def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=False):
-    """HTML-Scraper für tcgviert.com mit verbesserter Produkttyp-Prüfung"""
-    print("🔄 Starte HTML-Scraping für tcgviert.com", flush=True)
+    """
+    HTML-Scraper für tcgviert.com mit verbesserter Produkttyp-Prüfung und Effizienz
+    """
+    logger.info("🔄 Starte HTML-Scraping für tcgviert.com")
     new_matches = []
+    
+    # Maximale Anzahl zu prüfender URLs
+    max_urls = 3
+    if len(urls) > max_urls:
+        logger.info(f"⚙️ Begrenze URLs auf {max_urls} (von {len(urls)})")
+        urls = urls[:max_urls]
+    
+    # Cache für bereits verarbeitete Links
+    processed_links = set()
     
     for url in urls:
         try:
-            print(f"🔍 Durchsuche {url}", flush=True)
+            logger.info(f"🔍 Durchsuche {url}")
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
-            response = requests.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                print(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}", flush=True)
+            
+            try:
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code != 200:
+                    logger.warning(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}")
+                    continue
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"⚠️ Fehler beim Abrufen von {url}: {e}")
                 continue
             
             soup = BeautifulSoup(response.text, "html.parser")
@@ -385,13 +431,16 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
             for selector in product_selectors:
                 products = soup.select(selector)
                 if products:
-                    print(f"🔍 {len(products)} Produkte mit Selektor '{selector}' gefunden", flush=True)
+                    logger.debug(f"🔍 {len(products)} Produkte mit Selektor '{selector}' gefunden")
                     break
             
+            # Wenn keine Produkte gefunden wurden, versuche Link-basiertes Scraping
             if not products:
-                print(f"⚠️ Keine Produktkarten auf {url} gefunden. Versuche alle Links...", flush=True)
-                # Fallback: Suche alle Links und analysiere Text
+                logger.warning(f"⚠️ Keine Produktkarten auf {url} gefunden. Versuche alle Links...")
+                
                 all_links = soup.find_all("a", href=True)
+                relevant_links = []
+                
                 for link in all_links:
                     href = link.get("href", "")
                     text = link.get_text().strip()
@@ -399,7 +448,34 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                     if not text or "products/" not in href:
                         continue
                     
-                    # Erstelle eine eindeutige ID basierend auf den Produktinformationen
+                    # Vollständige URL erstellen
+                    if not href.startswith('http'):
+                        product_url = urljoin(url, href)
+                    else:
+                        product_url = href
+                    
+                    # Duplikate vermeiden
+                    if product_url in processed_links:
+                        continue
+                    
+                    processed_links.add(product_url)
+                    
+                    # Prüfe, ob der Link relevant für Suchbegriffe ist
+                    link_text = text.lower()
+                    if ("journey" in link_text or "reise" in link_text or 
+                        "gefährten" in link_text or "sv09" in link_text or 
+                        "kp09" in link_text):
+                        relevant_links.append((product_url, text))
+                
+                # Begrenze die Anzahl der zu prüfenden Links
+                max_relevant_links = 5
+                if len(relevant_links) > max_relevant_links:
+                    logger.info(f"⚙️ Begrenze relevante Links auf {max_relevant_links} (von {len(relevant_links)})")
+                    relevant_links = relevant_links[:max_relevant_links]
+                
+                # Verarbeite relevante Links
+                for product_url, text in relevant_links:
+                    # Erstelle eine eindeutige ID
                     product_id = create_product_id(text)
                     
                     # Prüfe jeden Suchbegriff gegen den Linktext
@@ -411,38 +487,38 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                         
                         # Wenn nach einem Display gesucht wird, aber der Link keins ist, überspringen
                         if search_term_type == "display" and link_product_type != "display":
-                            print(f"  ❌ Produkttyp-Konflikt: Suche nach 'display', aber Link ist '{link_product_type}'", flush=True)
                             continue
                         
                         # Strikte Keyword-Prüfung
-                        if is_keyword_in_text(tokens, text):
+                        if is_keyword_in_text(tokens, text, log_level='None'):
                             matched_term = search_term
                             break
                     
                     if matched_term:
-                        # Vollständige URL erstellen
-                        product_url = f"https://tcgviert.com{href}" if href.startswith("/") else href
-                        
-                        # Produktdetailseite besuchen, um Verfügbarkeit zu prüfen
                         try:
-                            detail_response = requests.get(product_url, headers=headers, timeout=10)
-                            detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+                            # Verfügbarkeit prüfen
+                            try:
+                                detail_response = requests.get(product_url, headers=headers, timeout=8)
+                                if detail_response.status_code != 200:
+                                    continue
+                                detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+                            except requests.exceptions.RequestException:
+                                continue
                             
-                            # Verwende das neue Modul zur Verfügbarkeitsprüfung
-                            is_available, price, status_text = detect_availability(detail_soup, product_url)
-                            
-                            # Nochmal den Titel aus der Detailseite extrahieren (ist oft genauer)
+                            # Wenn Detailseite geladen werden konnte, Titel aus der Detailseite extrahieren
                             detail_title = detail_soup.find("title")
                             if detail_title:
                                 detail_title_text = detail_title.text.strip()
                                 # Erneute Prüfung auf korrekte Produkttypübereinstimmung
                                 detail_product_type = extract_product_type(detail_title_text)
                                 if search_term_type == "display" and detail_product_type != "display":
-                                    print(f"  ❌ Detailseite ist kein Display, obwohl nach Display gesucht wurde: {detail_title_text}", flush=True)
                                     continue
                                 
                                 # Wenn Titel verfügbar ist, verwende diesen für die Nachricht
                                 text = detail_title_text
+                            
+                            # Verfügbarkeit prüfen
+                            is_available, price, status_text = detect_availability(detail_soup, product_url)
                             
                             # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
                             if only_available and not is_available:
@@ -478,40 +554,18 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                                         seen.add(f"{product_id}_status_unavailable")
                                     
                                     new_matches.append(product_id)
-                                    print(f"✅ Neuer Treffer gefunden (HTML-Link): {text} - {status_text}", flush=True)
+                                    logger.info(f"✅ Neuer Treffer gefunden (HTML-Link): {text} - {status_text}")
+                                    
+                                    # Nach erstem Treffer abbrechen
+                                    if len(new_matches) >= 1:
+                                        return new_matches
                         except Exception as e:
-                            print(f"❌ Fehler beim Prüfen der Produktdetails: {e}", flush=True)
+                            logger.warning(f"Fehler beim Prüfen der Produktdetails: {e}")
+                
+                # Nächste URL
                 continue
             
-            # Debug-Ausgabe für Journey Together oder Reisegefährten Produkte
-            journey_products = []
-            for product in products:
-                # Verschiedene Selektoren für Produkttitel versuchen
-                title_selectors = [
-                    ".product-card__title", 
-                    ".grid-product__title", 
-                    ".product-title", 
-                    ".product-item__title", 
-                    "h3", "h2"
-                ]
-                
-                title_elem = None
-                for selector in title_selectors:
-                    title_elem = product.select_one(selector)
-                    if title_elem:
-                        break
-                
-                if not title_elem:
-                    continue
-                
-                title = title_elem.text.strip()
-                
-                if "journey together" in title.lower() or "reisegefährten" in title.lower():
-                    print(f"  - HTML-Produkt: {title}", flush=True)
-                    journey_products.append(title)
-            
-            print(f"🔍 {len(journey_products)} HTML-Produkte mit gesuchten Keywords gefunden", flush=True)
-            
+            # Verarbeite die gefundenen Produktkarten
             for product in products:
                 # Extrahiere Titel mit verschiedenen Selektoren
                 title_selectors = [
@@ -532,7 +586,13 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                     continue
                 
                 title = title_elem.text.strip()
-                print(f"🔍 Prüfe HTML-Produkt: '{title}'", flush=True)
+                
+                # Prüfe, ob das Produkt relevant ist
+                title_lower = title.lower()
+                if not ("journey" in title_lower or "reise" in title_lower or 
+                        "gefährten" in title_lower or "sv09" in title_lower or 
+                        "kp09" in title_lower):
+                    continue
                 
                 # Link extrahieren
                 link_elem = product.find("a", href=True)
@@ -540,7 +600,13 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                     continue
                 
                 relative_url = link_elem.get("href", "")
-                product_url = f"https://tcgviert.com{relative_url}" if relative_url.startswith("/") else relative_url
+                product_url = urljoin("https://tcgviert.com", relative_url)
+                
+                # Duplikate vermeiden
+                if product_url in processed_links:
+                    continue
+                    
+                processed_links.add(product_url)
                 
                 # Erstelle eine eindeutige ID basierend auf den Produktinformationen
                 product_id = create_product_id(title)
@@ -554,14 +620,10 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                     
                     # Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
                     if search_term_type == "display" and title_product_type != "display":
-                        print(f"  ❌ Produkttyp-Konflikt: Suche nach 'display', aber Produkt ist '{title_product_type}'", flush=True)
                         continue
                     
                     # Strikte Keyword-Prüfung
-                    match_result = is_keyword_in_text(tokens, title)
-                    print(f"  - Vergleiche mit '{search_term}' (Tokens: {tokens}): {match_result}", flush=True)
-                    
-                    if match_result:
+                    if is_keyword_in_text(tokens, title, log_level='None'):
                         matched_term = search_term
                         break
                 
@@ -569,8 +631,13 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                     # Verwende webseitenspezifische Verfügbarkeitsprüfung für tcgviert.com
                     try:
                         # Besuche Produktdetailseite für genaue Verfügbarkeitsprüfung
-                        detail_response = requests.get(product_url, headers=headers, timeout=10)
-                        detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+                        try:
+                            detail_response = requests.get(product_url, headers=headers, timeout=8)
+                            if detail_response.status_code != 200:
+                                continue
+                            detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+                        except requests.exceptions.RequestException:
+                            continue
                         
                         # Nochmal den Titel aus der Detailseite extrahieren (ist oft genauer)
                         detail_title = detail_soup.find("title")
@@ -579,7 +646,6 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                             # Erneute Prüfung auf korrekte Produkttypübereinstimmung
                             detail_product_type = extract_product_type(detail_title_text)
                             if search_term_type == "display" and detail_product_type != "display":
-                                print(f"  ❌ Detailseite ist kein Display, obwohl nach Display gesucht wurde: {detail_title_text}", flush=True)
                                 continue
                             
                             # Wenn Titel verfügbar ist, verwende diesen für die Nachricht
@@ -622,12 +688,16 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                                     seen.add(f"{product_id}_status_unavailable")
                                 
                                 new_matches.append(product_id)
-                                print(f"✅ Neuer Treffer gefunden (HTML): {title} - {status_text}", flush=True)
+                                logger.info(f"✅ Neuer Treffer gefunden (HTML): {title} - {status_text}")
+                                
+                                # Nach erstem Treffer abbrechen
+                                if len(new_matches) >= 1:
+                                    return new_matches
                     except Exception as e:
-                        print(f"❌ Fehler beim Prüfen der Verfügbarkeit: {e}", flush=True)
+                        logger.warning(f"Fehler beim Prüfen der Verfügbarkeit: {e}")
             
         except Exception as e:
-            print(f"❌ Fehler beim Scrapen von {url}: {e}", flush=True)
+            logger.error(f"❌ Fehler beim Scrapen von {url}: {e}", exc_info=True)
     
     return new_matches
 
@@ -658,7 +728,7 @@ def generic_scrape_product(url, product_title, product_url, price, status, match
     
     # Wenn nach einem Display gesucht wird, aber das Produkt keins ist, überspringen
     if search_term_type == "display" and product_type != "display":
-        print(f"❌ Produkttyp-Konflikt: Suche nach Display, aber Produkt ist '{product_type}': {product_title}", flush=True)
+        logger.debug(f"Produkttyp-Konflikt: Suche nach Display, aber Produkt ist '{product_type}': {product_title}")
         return
     
     # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
@@ -690,4 +760,4 @@ def generic_scrape_product(url, product_title, product_url, price, status, match
                 seen.add(f"{product_id}_status_unavailable")
             
             new_matches.append(product_id)
-            print(f"✅ Neuer Treffer gefunden ({site_id}): {product_title} - {status}", flush=True)
+            logger.info(f"✅ Neuer Treffer gefunden ({site_id}): {product_title} - {status}")

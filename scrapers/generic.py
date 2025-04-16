@@ -4,6 +4,7 @@ import os
 import json
 import time
 import re
+import logging
 from pathlib import Path
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
@@ -11,8 +12,10 @@ from urllib.parse import urlparse, urljoin
 from utils.matcher import clean_text, is_keyword_in_text, normalize_product_name, extract_product_type_from_text
 from utils.telegram import send_telegram_message, escape_markdown
 from utils.stock import get_status_text, update_product_status
-# Importiere das Modul für webseitenspezifische Verfügbarkeitsprüfung
 from utils.availability import detect_availability, extract_price
+
+# Logger konfigurieren
+logger = logging.getLogger(__name__)
 
 # URL-Filterliste für allgemeine Filter, die auf alle Webseiten angewendet werden sollen
 GLOBAL_URL_FILTERS = [
@@ -112,7 +115,7 @@ def load_product_cache(cache_file="data/product_cache.json"):
                 return json.load(f)
         return {}
     except Exception as e:
-        print(f"⚠️ Fehler beim Laden des Produkt-Caches: {e}", flush=True)
+        logger.error(f"⚠️ Fehler beim Laden des Produkt-Caches: {e}")
         return {}
 
 def save_product_cache(cache, cache_file="data/product_cache.json"):
@@ -124,7 +127,7 @@ def save_product_cache(cache, cache_file="data/product_cache.json"):
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"⚠️ Fehler beim Speichern des Produkt-Caches: {e}", flush=True)
+        logger.error(f"⚠️ Fehler beim Speichern des Produkt-Caches: {e}")
 
 def create_fingerprint(html_content):
     """Erstellt einen Fingerprint vom HTML-Inhalt, um Änderungen zu erkennen"""
@@ -170,7 +173,6 @@ def should_filter_url(url, link_text=""):
     # 1. Prüfe globale URL-Filter
     for filter_term in GLOBAL_URL_FILTERS:
         if filter_term in normalized_url:
-            # print(f"  [Filter] URL enthält globalen Filter-Term: '{filter_term}'", flush=True)
             return True
             
     # 2. Prüfe domainspezifische Filter
@@ -178,7 +180,6 @@ def should_filter_url(url, link_text=""):
         if site in domain:
             for filter_term in filters:
                 if filter_term in normalized_url or (normalized_text and filter_term in normalized_text):
-                    # print(f"  [Filter] URL enthält domainspezifischen Filter-Term: '{filter_term}'", flush=True)
                     return True
                     
     # 3. Zusätzliche Heuristiken für Produktlinks vs. andere Seiten
@@ -202,7 +203,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
     :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
     :return: Liste der neuen Treffer
     """
-    print(f"🌐 Starte generischen Scraper für {url}", flush=True)
+    logger.info(f"🌐 Starte generischen Scraper für {url}")
     new_matches = []
     
     # Cache laden oder neu erstellen
@@ -216,7 +217,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
     
     new_keywords = [k for k in current_keywords if k not in cached_keywords]
     if new_keywords:
-        print(f"🔍 Neue Suchbegriffe gefunden: {new_keywords}", flush=True)
+        logger.info(f"🔍 Neue Suchbegriffe gefunden: {new_keywords}")
         # Wir werden die Seite vollständig scannen, da wir neue Keywords haben
         full_scan_needed = True
     else:
@@ -233,10 +234,20 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
         domain_paths = product_cache.get(site_id, {})
         
         if domain_paths and not full_scan_needed:
-            print(f"🔍 Nutze {len(domain_paths)} gecachte Produktpfade für {site_id}", flush=True)
+            logger.info(f"🔍 Nutze {len(domain_paths)} gecachte Produktpfade für {site_id}")
+            
+            # Limitiere die Anzahl zu prüfender Produkte für Effizienz
+            max_products_to_check = 5
+            products_checked = 0
             
             # Nur die bereits bekannten Produktseiten prüfen
             for product_id, product_info in list(domain_paths.items()):  # list() erstellen um während Iteration zu löschen
+                # Limitierung der Produktprüfungen
+                products_checked += 1
+                if products_checked > max_products_to_check:
+                    logger.info(f"⚙️ Maximale Anzahl an Produktprüfungen erreicht ({max_products_to_check})")
+                    break
+                
                 product_url = product_info.get("url", "")
                 matched_term = product_info.get("term", "")
                 last_checked = product_info.get("last_checked", 0)
@@ -247,18 +258,18 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 
                 # Prüfen, ob die Seite vor kurzem überprüft wurde (z.B. in den letzten 12 Stunden)
                 if time.time() - last_checked < 43200:  # 12 Stunden in Sekunden
-                    print(f"⏱️ Überspringe kürzlich geprüftes Produkt: {product_url}", flush=True)
+                    logger.debug(f"⏱️ Überspringe kürzlich geprüftes Produkt: {product_url}")
                     continue
                 
                 # Produktseite direkt besuchen
                 try:
                     response = requests.get(product_url, headers=headers, timeout=10)
                     if response.status_code != 200:
-                        print(f"⚠️ Fehler beim Abrufen von {product_url}: Status {response.status_code}", flush=True)
+                        logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: Status {response.status_code}")
                         
                         # Wenn Seite nicht mehr erreichbar, aus Cache entfernen
                         if response.status_code in (404, 410):
-                            print(f"🗑️ Entferne nicht mehr verfügbaren Produktpfad: {product_url}", flush=True)
+                            logger.info(f"🗑️ Entferne nicht mehr verfügbare Produktpfad: {product_url}")
                             domain_paths.pop(product_id, None)
                         continue
                     
@@ -282,12 +293,12 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     
                     # Wenn nach einem Display gesucht wird, aber der Titel etwas anderes enthält, überspringen
                     if search_term_type == "display" and title_product_type != "display":
-                        print(f"⚠️ Produkttyp-Diskrepanz: Suche nach 'display', aber Produkt ist '{title_product_type}': {link_text}", flush=True)
+                        logger.debug(f"⚠️ Produkttyp-Diskrepanz: Suche nach 'display', aber Produkt ist '{title_product_type}': {link_text}")
                         continue
                     
                     # Strengere Keyword-Prüfung mit Berücksichtigung des Produkttyps
-                    if not is_keyword_in_text(tokens, link_text):
-                        print(f"⚠️ Produkt entspricht nicht mehr dem Suchbegriff '{matched_term}': {link_text}", flush=True)
+                    if not is_keyword_in_text(tokens, link_text, log_level='None'):
+                        logger.debug(f"⚠️ Produkt entspricht nicht mehr dem Suchbegriff '{matched_term}': {link_text}")
                         continue
                     
                     # Aktualisiere die letzte Prüfzeit
@@ -295,11 +306,11 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     
                     # Wenn der Fingerprint sich geändert hat oder wir keinen haben, führe vollständige Verfügbarkeitsprüfung durch
                     if current_fingerprint != stored_fingerprint or not stored_fingerprint:
-                        print(f"🔄 Änderung erkannt oder erste Prüfung: {product_url}", flush=True)
+                        logger.info(f"🔄 Änderung erkannt oder erste Prüfung: {product_url}")
                         domain_paths[product_id]["fingerprint"] = current_fingerprint
                         
                         # Prüfe Verfügbarkeit und sende Benachrichtigung
-                        soup, is_available, price, status_text = check_product_availability(product_url, headers)
+                        is_available, price, status_text = detect_availability(soup, product_url)
                         
                         # Aktualisiere Cache-Eintrag
                         domain_paths[product_id]["is_available"] = is_available
@@ -315,8 +326,11 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                         )
                         
                         if should_notify:
-                            # Nachricht senden
-                            if not status_text:
+                            # Wenn Produkt wieder verfügbar ist, anpassen
+                            if is_back_in_stock:
+                                status_text = "🎉 Wieder verfügbar!"
+                            # Wenn kein Status-Text vorhanden ist, erstellen
+                            elif not status_text:
                                 status_text = get_status_text(is_available, is_back_in_stock)
                             
                             # Escape special characters for Markdown
@@ -344,25 +358,32 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                                     seen.add(f"{product_id}_status_unavailable")
                                 
                                 new_matches.append(product_id)
-                                print(f"✅ Cache-Treffer gemeldet: {link_text} - {status_text}", flush=True)
+                                logger.info(f"✅ Cache-Treffer gemeldet: {link_text} - {status_text}")
+                                
+                                # Nach dem ersten Treffer abbrechen
+                                if len(new_matches) >= 1:
+                                    break
                     else:
-                        print(f"✓ Keine Änderung für {product_url}", flush=True)
+                        logger.debug(f"✓ Keine Änderung für {product_url}")
                         
                 except Exception as e:
-                    print(f"⚠️ Fehler bei der Verarbeitung von {product_url}: {e}", flush=True)
+                    logger.warning(f"⚠️ Fehler bei der Verarbeitung von {product_url}: {e}")
             
             # Cache mit den aktualisierten Zeitstempeln speichern
             product_cache[site_id] = domain_paths
             save_product_cache(product_cache)
         
         # Wenn neue Keywords oder ein vollständiger Scan erforderlich ist
-        if full_scan_needed or not domain_paths:
-            print(f"🔍 Durchführung eines vollständigen Scans für {url}", flush=True)
+        if (full_scan_needed or not domain_paths) and len(new_matches) == 0:
+            logger.info(f"🔍 Durchführung eines vollständigen Scans für {url}")
             
-            # Hier kommt der Code aus der ursprünglichen Funktion, aber optimiert
-            response = requests.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                print(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}", flush=True)
+            try:
+                response = requests.get(url, headers=headers, timeout=15)
+                if response.status_code != 200:
+                    logger.warning(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}")
+                    return new_matches
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"⚠️ Netzwerkfehler beim Abrufen von {url}: {e}")
                 return new_matches
             
             # HTML parsen
@@ -395,21 +416,26 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 
                 # Effizientere Keyword-Prüfung
                 for search_term, tokens in keywords_map.items():
-                    # VERBESSERT: Strikte Prüfung auf exakte Übereinstimmung mit der Phrase
-                    # Extrahiere erst Produkttyp aus dem Suchbegriff
+                    # Extrahiere Produkttyp aus dem Suchbegriff
                     search_term_type = extract_product_type_from_search_term(search_term)
                     
                     # Bei Display-Suchbegriffen: auch ersten Check machen, ob der Linktext Display enthält
                     if search_term_type == "display" and "display" not in link_text.lower():
                         continue
                     
-                    if is_keyword_in_text(tokens, link_text):
+                    if is_keyword_in_text(tokens, link_text, log_level='None'):
                         potential_product_links.append((href, a_tag.get_text().strip()))
                         break
             
-            print(f"🔍 {len(potential_product_links)} potenzielle Produktlinks gefunden auf {url}", flush=True)
+            logger.info(f"🔍 {len(potential_product_links)} potenzielle Produktlinks gefunden auf {url}")
             
-            # Rest der Funktion bleibt ähnlich, aber wir aktualisieren die Produkttypprüfung
+            # Begrenze die Anzahl zu prüfender Links
+            max_links_to_check = 5
+            if len(potential_product_links) > max_links_to_check:
+                logger.info(f"⚙️ Begrenze die Anzahl zu prüfender Links auf {max_links_to_check} (von {len(potential_product_links)})")
+                potential_product_links = potential_product_links[:max_links_to_check]
+            
+            # Verarbeite die potenziellen Produktlinks
             for href, link_text in potential_product_links:
                 # Vollständige URL erstellen
                 if href.startswith('http'):
@@ -433,33 +459,15 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     
                     # VERBESSERT: Wenn nach einem Display gesucht wird, aber der Link keins ist, überspringen
                     if search_term_type == "display" and link_product_type != "display":
-                        print(f"❌ Produkttyp-Konflikt: Suche nach Display, aber Link ist '{link_product_type}': {link_text}", flush=True)
+                        logger.debug(f"❌ Produkttyp-Konflikt: Suche nach Display, aber Link ist '{link_product_type}': {link_text}")
                         continue
                     
                     # VERBESSERT: Strenge Prüfung mit der neuen Funktion
-                    match_result = is_keyword_in_text(tokens, link_text)
+                    match_result = is_keyword_in_text(tokens, link_text, log_level='None')
                     
                     if match_result:
                         matched_term = search_term
-                        print(f"🔍 Treffer für '{search_term}' im Link: {link_text}", flush=True)
-                        
-                        # WICHTIG: Zusätzliche Prüfung für den genauen Produkttyp
-                        print(f"🔍 Produkttyp-Prüfung für '{site_id}': Link-Text='{link_product_type}', Suchbegriff='{search_term_type}'", flush=True)
-                        
-                        # Wenn der Suchbegriff einen spezifischen Produkttyp enthält, muss exakt dieser Typ übereinstimmen
-                        if search_term_type != "unknown":
-                            # Nur exakte Produkttyp-Übereinstimmungen zulassen
-                            if link_product_type != search_term_type:
-                                print(f"❌ Produkttyp-Diskrepanz bei {site_id}: Suchtyp '{search_term_type}' stimmt nicht mit Produkttyp '{link_product_type}' überein", flush=True)
-                                matched_term = None
-                                continue
-                        
-                        # VERBESSERT: Wenn nach "display" gesucht wird, alle anderen Produkttypen ausschließen
-                        if "display" in search_term.lower() and link_product_type != "display":
-                            print(f"❌ Abgelehnt: Nach Display gesucht, aber Produkt ist '{link_product_type}'", flush=True)
-                            matched_term = None
-                            continue
-                        
+                        logger.debug(f"🔍 Treffer für '{search_term}' im Link: {link_text}")
                         break
                 
                 if not matched_term:
@@ -473,35 +481,46 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 
                 if check_availability:
                     try:
-                        detail_soup, is_available, price, status_text = check_product_availability(product_url, headers)
+                        # Produktdetails abrufen
+                        detail_response = requests.get(product_url, headers=headers, timeout=10)
+                        if detail_response.status_code != 200:
+                            logger.warning(f"⚠️ Fehler beim Abrufen der Produktdetails: Status {detail_response.status_code}")
+                            continue
+                            
+                        detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+                        
+                        # Verwende das Availability-Modul für die Verfügbarkeitsprüfung
+                        is_available, price, status_text = detect_availability(detail_soup, product_url)
                         
                         # VERBESSERT: Nochmals prüfen, ob der Produktdetailseiten-Titel dem Suchbegriff entspricht
-                        if detail_soup:
-                            detail_title = detail_soup.find('title')
-                            if detail_title:
-                                detail_title_text = detail_title.text.strip()
-                                tokens = keywords_map.get(matched_term, [])
-                                
-                                # Extrahiere Produkttyp aus dem Detailtitel
-                                detail_product_type = extract_product_type(detail_title_text)
-                                search_term_type = extract_product_type_from_search_term(matched_term)
-                                
-                                # Wenn nach Display gesucht wird, muss der Detailtitel auch Display sein
-                                if search_term_type == "display" and detail_product_type != "display":
-                                    print(f"❌ Detailseite ist kein Display, obwohl nach Display gesucht wurde: {detail_title_text}", flush=True)
-                                    continue
-                                
-                                # Generelle Keyword-Übereinstimmungsprüfung
-                                if not is_keyword_in_text(tokens, detail_title_text):
-                                    print(f"❌ Detailseite passt nicht zum Suchbegriff '{matched_term}': {detail_title_text}", flush=True)
-                                    continue
+                        detail_title = detail_soup.find('title')
+                        if detail_title:
+                            detail_title_text = detail_title.text.strip()
+                            tokens = keywords_map.get(matched_term, [])
+                            
+                            # Extrahiere Produkttyp aus dem Detailtitel
+                            detail_product_type = extract_product_type(detail_title_text)
+                            search_term_type = extract_product_type_from_search_term(matched_term)
+                            
+                            # Wenn nach Display gesucht wird, muss der Detailtitel auch Display sein
+                            if search_term_type == "display" and detail_product_type != "display":
+                                logger.debug(f"❌ Detailseite ist kein Display, obwohl nach Display gesucht wurde: {detail_title_text}")
+                                continue
+                            
+                            # Generelle Keyword-Übereinstimmungsprüfung
+                            if not is_keyword_in_text(tokens, detail_title_text, log_level='None'):
+                                logger.debug(f"❌ Detailseite passt nicht zum Suchbegriff '{matched_term}': {detail_title_text}")
+                                continue
+                            
+                            # Wenn Detailtitel verfügbar ist, verwende ihn für die Nachricht
+                            link_text = detail_title_text
                         
                         # Für den Cache: Speichere die URL und den erkannten Term
                         if site_id not in product_cache:
                             product_cache[site_id] = {}
                         
                         if product_id not in product_cache[site_id]:
-                            product_cache[site_id][product_id] = {}
+                            product_cache[site_id] = {}
                         
                         # Speichere Produktinfos im Cache
                         fingerprint = ""
@@ -509,7 +528,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             html_content = str(detail_soup)
                             fingerprint = create_fingerprint(html_content)
                             
-                        product_cache[site_id][product_id].update({
+                        product_cache[site_id][product_id] = {
                             "url": product_url,
                             "term": matched_term,
                             "is_available": is_available,
@@ -517,10 +536,10 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             "last_checked": time.time(),
                             "fingerprint": fingerprint,
                             "product_type": extract_product_type(link_text)  # Speichere auch den Produkttyp
-                        })
+                        }
                         
                     except Exception as e:
-                        print(f"⚠️ Fehler beim Prüfen der Verfügbarkeit für {product_url}: {e}", flush=True)
+                        logger.warning(f"⚠️ Fehler beim Prüfen der Verfügbarkeit für {product_url}: {e}")
                 
                 # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
                 if only_available and not is_available:
@@ -532,8 +551,11 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 )
                 
                 if should_notify:
+                    # Wenn Produkt wieder verfügbar ist, anpassen
+                    if is_back_in_stock:
+                        status_text = "🎉 Wieder verfügbar!"
                     # Status-Text erstellen oder den bereits generierten verwenden
-                    if not status_text:
+                    elif not status_text:
                         status_text = get_status_text(is_available, is_back_in_stock)
                     
                     # Escape special characters for Markdown
@@ -564,7 +586,11 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             seen.add(f"{product_id}_status_unavailable")
                         
                         new_matches.append(product_id)
-                        print(f"✅ Neuer Treffer gemeldet: {link_text} - {status_text}", flush=True)
+                        logger.info(f"✅ Neuer Treffer gemeldet: {link_text} - {status_text}")
+                        
+                        # Nach dem ersten Treffer abbrechen
+                        if len(new_matches) >= 1:
+                            break
             
             # Aktualisiere die Liste der bekannten Keywords im Cache
             product_cache[cache_key] = current_keywords
@@ -573,7 +599,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
             save_product_cache(product_cache)
     
     except Exception as e:
-        print(f"❌ Fehler beim generischen Scraping von {url}: {e}", flush=True)
+        logger.error(f"❌ Fehler beim generischen Scraping von {url}: {e}", exc_info=True)
     
     return new_matches
 
@@ -585,10 +611,14 @@ def check_product_availability(url, headers):
     :param headers: HTTP-Headers für die Anfrage
     :return: Tuple (BeautifulSoup-Objekt, Verfügbarkeitsstatus, Preis, Status-Text)
     """
-    print(f"🔍 Prüfe Produktdetails für {url}", flush=True)
+    logger.info(f"🔍 Prüfe Produktdetails für {url}")
     
-    response = requests.get(url, headers=headers, timeout=15)
-    if response.status_code != 200:
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return None, False, "Preis nicht verfügbar", "❌ Ausverkauft (Fehler beim Laden)"
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"⚠️ Netzwerkfehler beim Abrufen von {url}: {e}")
         return None, False, "Preis nicht verfügbar", "❌ Ausverkauft (Fehler beim Laden)"
     
     soup = BeautifulSoup(response.text, "html.parser")
@@ -596,8 +626,8 @@ def check_product_availability(url, headers):
     # Verwende das Availability-Modul für webseitenspezifische Erkennung
     is_available, price, status_text = detect_availability(soup, url)
     
-    print(f"  - Verfügbarkeit für {url}: {status_text}", flush=True)
-    print(f"  - Preis: {price}", flush=True)
+    logger.debug(f"  - Verfügbarkeit für {url}: {status_text}")
+    logger.debug(f"  - Preis: {price}")
     
     return soup, is_available, price, status_text
 
@@ -608,16 +638,19 @@ def extract_product_type(text):
     :param text: Text, aus dem der Produkttyp extrahiert werden soll
     :return: Produkttyp als String
     """
+    if not text:
+        return "unknown"
+    
     text = text.lower()
     
     # Display erkennen - höchste Priorität und strenge Prüfung
-    if re.search(r'\bdisplay\b|\b36er\b|\b36\s+booster\b|\bbooster\s+display\b', text):
+    if re.search(r'\bdisplay\b|\b36er\b|\b36\s+booster\b|\bbooster\s+display\b|\bbox\s+display\b', text):
         # Zusätzliche Prüfung: Wenn andere Produkttypen erwähnt werden, ist es möglicherweise kein Display
         if re.search(r'\bblister\b|\bpack\b|\bbuilder\b|\bbuild\s?[&]?\s?battle\b|\betb\b|\belite trainer box\b', text):
             # Prüfe, ob "display" tatsächlich prominenter ist als andere Erwähnungen
             if text.find('display') < text.find('blister') and text.find('display') < text.find('pack'):
                 return "display"
-            print(f"  [DEBUG] Produkt enthält 'display', aber auch andere Produkttypen: '{text}'", flush=True)
+            logger.debug(f"  [DEBUG] Produkt enthält 'display', aber auch andere Produkttypen: '{text}'")
             return "mixed_or_unclear"
         return "display"
     

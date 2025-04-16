@@ -3,6 +3,8 @@ import time
 import logging
 import traceback
 from datetime import datetime
+import concurrent.futures
+import random
 
 # Neue Importe für verbesserte Konfigurationsverwaltung
 from utils.config_manager import (
@@ -67,40 +69,70 @@ def run_once(only_available=False, reset_seen=False):
                 all_matches.extend(sapphire_matches)
             else:
                 logger.info("[INFO] Keine neuen Treffer bei Sapphire-Cards")
-            # Entferne sapphire-cards.de aus der URL-Liste für den generischen Scraper
+            # Entferne sapphire-cards.de aus der URL-Liste für die generischen Scraper
             urls = [url for url in urls if "sapphire-cards.de" not in url]
         except Exception as e:
             logger.error(f"[ERROR] Fehler beim Sapphire-Cards Scraping: {str(e)}")
-            logger.error(traceback.format_exc())
+            logger.debug(traceback.format_exc())
     
     # TCGViert-spezifischer Scraper
-    try:
-        logger.info("[SCRAPER] Starte TCGViert Scraper")
-        tcgviert_matches = scrape_tcgviert(keywords_map, seen, out_of_stock, only_available)
-        if tcgviert_matches:
-            logger.info(f"[SUCCESS] {len(tcgviert_matches)} neue Treffer bei TCGViert gefunden")
-            all_matches.extend(tcgviert_matches)
-        else:
-            logger.info("[INFO] Keine neuen Treffer bei TCGViert")
-        # Entferne tcgviert.com aus der URL-Liste für den generischen Scraper
-        urls = [url for url in urls if "tcgviert.com" not in url]
-    except Exception as e:
-        logger.error(f"[ERROR] Fehler beim TCGViert Scraping: {str(e)}")
-        logger.error(traceback.format_exc())
-    
-    # Generische URL-Scraper für alle übrigen URLs
-    for url in urls:
+    if any("tcgviert.com" in url for url in urls):
         try:
-            logger.info(f"[SCRAPER] Starte generischen Scraper für {url}")
-            new_url_matches = scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=True, only_available=only_available)
-            if new_url_matches:
-                logger.info(f"[SUCCESS] {len(new_url_matches)} neue Treffer bei {url} gefunden")
-                all_matches.extend(new_url_matches)
+            logger.info("[SCRAPER] Starte TCGViert Scraper")
+            tcgviert_matches = scrape_tcgviert(keywords_map, seen, out_of_stock, only_available)
+            if tcgviert_matches:
+                logger.info(f"[SUCCESS] {len(tcgviert_matches)} neue Treffer bei TCGViert gefunden")
+                all_matches.extend(tcgviert_matches)
             else:
-                logger.info(f"[INFO] Keine neuen Treffer bei {url}")
+                logger.info("[INFO] Keine neuen Treffer bei TCGViert")
+            # Entferne tcgviert.com aus der URL-Liste für die generischen Scraper
+            urls = [url for url in urls if "tcgviert.com" not in url]
         except Exception as e:
-            logger.error(f"[ERROR] Fehler beim Scraping von {url}: {str(e)}")
-            logger.error(traceback.format_exc())
+            logger.error(f"[ERROR] Fehler beim TCGViert Scraping: {str(e)}")
+            logger.debug(traceback.format_exc())
+    
+    # Wenn wir bereits genug Treffer haben, überspringe die generischen Scraper
+    if all_matches:
+        logger.info("[INFO] Bereits Treffer bei spezialisierten Scrapern gefunden, überspringe generische URLs")
+    # Generische URL-Scraper für alle übrigen URLs
+    elif urls:
+        logger.info(f"[INFO] Starte generische Scraper für {len(urls)} URLs")
+        
+        # Begrenzen der maximalen Anzahl an URLs für einen Durchlauf
+        max_urls = 3
+        if len(urls) > max_urls:
+            logger.info(f"[LIMIT] Begrenze generische URLs auf {max_urls} (von {len(urls)})")
+            # Zufällige Auswahl für bessere Abdeckung im Laufe der Zeit
+            urls = random.sample(urls, max_urls)
+            
+        # Parallele Verarbeitung mit ThreadPoolExecutor
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_urls) as executor:
+            # Dictionary zum Speichern der Future-Objekte mit ihren URLs
+            future_to_url = {
+                executor.submit(
+                    scrape_generic, url, keywords_map, seen, out_of_stock, 
+                    check_availability=True, only_available=only_available
+                ): url for url in urls
+            }
+            
+            # Ergebnisse sammeln, sobald sie verfügbar sind
+            for future in concurrent.futures.as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    new_url_matches = future.result()
+                    if new_url_matches:
+                        logger.info(f"[SUCCESS] {len(new_url_matches)} neue Treffer bei {url} gefunden")
+                        all_matches.extend(new_url_matches)
+                        # Wenn wir bereits Treffer haben, können wir andere Futures abbrechen
+                        for f in future_to_url:
+                            if not f.done() and not f.cancelled():
+                                f.cancel()
+                        break
+                    else:
+                        logger.info(f"[INFO] Keine neuen Treffer bei {url}")
+                except Exception as e:
+                    logger.error(f"[ERROR] Fehler beim Scraping von {url}: {str(e)}")
+                    logger.debug(traceback.format_exc())
 
     # Speichere aktualisierte Zustände
     save_seen(seen)
@@ -258,9 +290,49 @@ def monitor_out_of_stock():
         
         logger.info(f"  - {site}: {series} {type_} ({lang})")
 
+def clean_database():
+    """Bereinigt die Datenbanken von alten oder fehlerhaften Einträgen"""
+    logger.info("[CLEAN] Bereinige Datenbanken")
+    
+    # Lade aktuelle Daten
+    seen = load_seen()
+    out_of_stock = load_out_of_stock()
+    
+    # Vor der Bereinigung
+    logger.info(f"[INFO] Vor der Bereinigung: {len(seen)} gesehene Produkte, {len(out_of_stock)} ausverkaufte Produkte")
+    
+    # Entferne Einträge, die kein korrektes Format haben
+    valid_seen = set()
+    for entry in seen:
+        # Gültiges Format: product_id_status_available oder product_id_status_unavailable
+        if "_status_" in entry and (entry.endswith("_available") or entry.endswith("_unavailable")):
+            valid_seen.add(entry)
+    
+    # Entferne veraltete Einträge aus out_of_stock
+    # Wir behalten nur Einträge, die einer der bekannten Domains entsprechen
+    valid_domains = ["tcgviert", "card-corner", "comicplanet", "gameware", 
+                     "kofuku", "mighty-cards", "games-island", "sapphirecards"]
+    
+    valid_out_of_stock = set()
+    for product_id in out_of_stock:
+        parts = product_id.split('_')
+        if len(parts) >= 2 and parts[0] in valid_domains:
+            valid_out_of_stock.add(product_id)
+    
+    # Speichere bereinigte Daten
+    save_seen(valid_seen)
+    save_out_of_stock(valid_out_of_stock)
+    
+    # Nach der Bereinigung
+    logger.info(f"[INFO] Nach der Bereinigung: {len(valid_seen)} gesehene Produkte, {len(valid_out_of_stock)} ausverkaufte Produkte")
+    logger.info(f"[INFO] Entfernt: {len(seen) - len(valid_seen)} gesehene Produkte, {len(out_of_stock) - len(valid_out_of_stock)} ausverkaufte Produkte")
+    
+    return len(seen) - len(valid_seen), len(out_of_stock) - len(valid_out_of_stock)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pokémon TCG Scraper mit verbesserten Filtern")
-    parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", "availability_test", "sapphire_test", "show_out_of_stock"], 
+    parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", "availability_test", 
+                                          "sapphire_test", "show_out_of_stock", "clean"], 
                         default="loop", help="Ausführungsmodus")
     parser.add_argument("--only-available", action="store_true", 
                         help="Nur verfügbare Produkte melden (nicht ausverkaufte)")
@@ -290,3 +362,5 @@ if __name__ == "__main__":
         test_sapphire()
     elif args.mode == "show_out_of_stock":
         monitor_out_of_stock()
+    elif args.mode == "clean":
+        clean_database()

@@ -3,8 +3,18 @@ Filter-Utility-Modul zur Filterung von URLs und Text-Inhalten basierend auf den 
 """
 
 import re
+import logging
 from urllib.parse import urlparse
 from utils.filter_config import URL_FILTERS, TEXT_FILTERS, PRODUCT_TYPE_EXCLUSIONS, CATEGORY_WHITELIST
+
+# Logger konfigurieren
+logger = logging.getLogger(__name__)
+
+# Cache für verarbeitete Domains und Filterentscheidungen
+_domain_cache = {}
+_filter_decision_cache = {}
+# Maximale Größe der Caches, um Speicherverbrauch zu begrenzen
+MAX_CACHE_ENTRIES = 1000
 
 def get_domain(url):
     """
@@ -13,6 +23,10 @@ def get_domain(url):
     :param url: Die zu analysierende URL
     :return: Normalisierte Domain ohne www. Präfix
     """
+    # Prüfe, ob die Domain bereits im Cache ist
+    if url in _domain_cache:
+        return _domain_cache[url]
+        
     try:
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
@@ -21,9 +35,15 @@ def get_domain(url):
         if domain.startswith('www.'):
             domain = domain[4:]
             
-        return domain.lower()
+        result = domain.lower()
+        
+        # Speichere im Cache
+        if len(_domain_cache) < MAX_CACHE_ENTRIES:
+            _domain_cache[url] = result
+            
+        return result
     except Exception as e:
-        print(f"⚠️ Fehler beim Extrahieren der Domain aus {url}: {e}", flush=True)
+        logger.debug(f"Fehler beim Extrahieren der Domain aus {url}: {e}")
         return url.lower()
 
 def should_filter_url(url, link_text=None, search_product_type=None, site_id=None):
@@ -39,9 +59,24 @@ def should_filter_url(url, link_text=None, search_product_type=None, site_id=Non
     if not url:
         return True  # Leere URLs immer filtern
     
+    # Cache-Schlüssel erstellen
+    cache_key = f"{url}::{link_text or ''}::{search_product_type or ''}::{site_id or ''}"
+    if cache_key in _filter_decision_cache:
+        return _filter_decision_cache[cache_key]
+    
     # Normalisiere URL und Link-Text
     normalized_url = url.lower()
     normalized_text = link_text.lower() if link_text else ""
+    
+    # Schneller Filter für offensichtliche URL-Typen
+    if ("/login" in normalized_url or 
+        "/account" in normalized_url or 
+        "#" in normalized_url or
+        "javascript:" in normalized_url or
+        "mailto:" in normalized_url or
+        "tel:" in normalized_url):
+        _store_filter_decision(cache_key, True)
+        return True
     
     # Extrahiere Domain
     domain = site_id or get_domain(url)
@@ -49,7 +84,7 @@ def should_filter_url(url, link_text=None, search_product_type=None, site_id=Non
     # 1. Prüfe globale URL-Filter
     for filter_term in URL_FILTERS.get("global", []):
         if filter_term in normalized_url:
-            print(f"   [Filter] URL enthält globalen Filter-Term: '{filter_term}'", flush=True)
+            _store_filter_decision(cache_key, True)
             return True
     
     # 2. Prüfe website-spezifische URL-Filter
@@ -57,7 +92,7 @@ def should_filter_url(url, link_text=None, search_product_type=None, site_id=Non
         if site != "global" and site in domain:
             for filter_term in filters:
                 if filter_term in normalized_url:
-                    print(f"   [Filter] URL enthält website-spezifischen Filter-Term: '{filter_term}'", flush=True)
+                    _store_filter_decision(cache_key, True)
                     return True
     
     # Wenn Link-Text vorhanden ist, auch diesen prüfen
@@ -65,7 +100,7 @@ def should_filter_url(url, link_text=None, search_product_type=None, site_id=Non
         # 3. Prüfe globale Text-Filter
         for filter_term in TEXT_FILTERS.get("global", []):
             if filter_term in normalized_text:
-                print(f"   [Filter] Link-Text enthält globalen Filter-Term: '{filter_term}'", flush=True)
+                _store_filter_decision(cache_key, True)
                 return True
         
         # 4. Prüfe website-spezifische Text-Filter
@@ -73,7 +108,7 @@ def should_filter_url(url, link_text=None, search_product_type=None, site_id=Non
             if site != "global" and site in domain:
                 for filter_term in filters:
                     if filter_term in normalized_text:
-                        print(f"   [Filter] Link-Text enthält website-spezifischen Filter-Term: '{filter_term}'", flush=True)
+                        _store_filter_decision(cache_key, True)
                         return True
         
         # 5. Prüfe Produkt-Typ-Kompatibilität
@@ -82,18 +117,24 @@ def should_filter_url(url, link_text=None, search_product_type=None, site_id=Non
             exclude_terms = PRODUCT_TYPE_EXCLUSIONS.get("global", [])
             for term in exclude_terms:
                 if term in normalized_text:
-                    print(f"   [Filter] Link-Text enthält Nicht-Display-Term: '{term}'", flush=True)
+                    _store_filter_decision(cache_key, True)
                     return True
                     
     # Whitelist-Ansatz für Kategorien, wenn aktiviert
     if is_category_link(normalized_url) and CATEGORY_WHITELIST:
         # Prüfe, ob der Link-Text relevante Kategorien enthält
         if not should_process_category(normalized_text, domain):
-            print(f"   [Filter] Kategorie nicht in Whitelist: '{normalized_text}'", flush=True)
+            _store_filter_decision(cache_key, True)
             return True
     
     # Die URL hat alle Filter bestanden
+    _store_filter_decision(cache_key, False)
     return False
+
+def _store_filter_decision(cache_key, decision):
+    """Speichert eine Filterentscheidung im Cache"""
+    if len(_filter_decision_cache) < MAX_CACHE_ENTRIES:
+        _filter_decision_cache[cache_key] = decision
 
 def should_process_category(category_text, domain):
     """
@@ -156,57 +197,113 @@ def filter_links(all_links, base_url, search_product_type=None):
     
     domain = get_domain(base_url)
     filtered_links = []
-    total_links = len(all_links)
-    filtered_count = 0
     
-    print(f"🔍 Filtern von {total_links} Links für {domain}...", flush=True)
-    
-    for href, text in all_links:
-        if not should_filter_url(href, text, search_product_type, domain):
-            filtered_links.append((href, text))
-        else:
-            filtered_count += 1
-    
-    # Erfolgsrate berechnen
-    success_rate = ((total_links - filtered_count) / total_links) * 100 if total_links > 0 else 0
-    print(f"✅ {len(filtered_links)} von {total_links} Links nach Filterung übrig ({filtered_count} gefiltert, {success_rate:.1f}% Erfolgsrate)", flush=True)
+    # Schnelles Filtern durch Batch-Verarbeitung
+    batch_size = 50
+    for i in range(0, len(all_links), batch_size):
+        batch = all_links[i:i+batch_size]
+        
+        # Parallele Entscheidungsfindung für den Batch
+        for href, text in batch:
+            if not should_filter_url(href, text, search_product_type, domain):
+                filtered_links.append((href, text))
     
     return filtered_links
 
-def extract_product_links_from_soup(soup, base_url, search_product_type=None):
+def extract_product_links_from_soup(soup, base_url, search_product_type=None, max_links=50):
     """
     Extrahiert und filtert Produkt-Links aus einer BeautifulSoup-Instanz
     
     :param soup: BeautifulSoup-Objekt
     :param base_url: Basis-URL für relative Links
     :param search_product_type: Produkttyp, nach dem gesucht wird
+    :param max_links: Maximale Anzahl zu extrahierender Links
     :return: Liste gefilterter Link-Tuples (href, text)
     """
     if not soup:
         return []
     
     domain = get_domain(base_url)
-    all_links = []
     
     # Finde alle Links
-    for a_tag in soup.find_all('a', href=True):
-        href = a_tag.get('href', '').strip()
+    all_links = []
+    counter = 0
+    
+    # Prioritäts-Selektoren für Produktlinks
+    priority_selectors = [
+        'a.product-title', 'a.product-name', '.product a', 
+        '.product-card a', '.product-item a', '.grid-product a',
+        '.grid__item a', '[data-product-card] a'
+    ]
+    
+    # Zuerst Prioritäts-Selektoren prüfen
+    for selector in priority_selectors:
+        if len(all_links) >= max_links:
+            break
+            
+        for a_tag in soup.select(selector):
+            href = a_tag.get('href', '').strip()
+            
+            # Überspringe leere oder JS-Links
+            if not href or href.startswith(('#', 'javascript:', 'tel:', 'mailto:')):
+                continue
+            
+            # Vollständige URL erstellen
+            if not href.startswith(('http://', 'https://')):
+                if href.startswith('/'):
+                    href = f"{base_url.rstrip('/')}{href}"
+                else:
+                    href = f"{base_url.rstrip('/')}/{href}"
+            
+            # Link-Text extrahieren und bereinigen
+            link_text = a_tag.get_text().strip()
+            
+            all_links.append((href, link_text))
+            counter += 1
+            
+            if counter >= max_links:
+                break
+    
+    # Wenn nicht genug Prioritäts-Links gefunden, nach regulären Links suchen
+    if len(all_links) < max_links:
+        remaining_links = max_links - len(all_links)
         
-        # Überspringe leere oder JS-Links
-        if not href or href.startswith(('#', 'javascript:', 'tel:', 'mailto:')):
-            continue
-        
-        # Vollständige URL erstellen
-        if not href.startswith(('http://', 'https://')):
-            if href.startswith('/'):
-                href = f"{base_url.rstrip('/')}{href}"
-            else:
-                href = f"{base_url.rstrip('/')}/{href}"
-        
-        # Link-Text extrahieren und bereinigen
-        link_text = a_tag.get_text().strip()
-        
-        all_links.append((href, link_text))
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag.get('href', '').strip()
+            
+            # Überspringe leere oder JS-Links
+            if not href or href.startswith(('#', 'javascript:', 'tel:', 'mailto:')):
+                continue
+                
+            # Schnelle Filterung offensichtlich irrelevanter Links
+            if ('/login' in href or '/account' in href or '/checkout' in href or 
+                '/cart' in href or '/wishlist' in href):
+                continue
+            
+            # Produktlinks bevorzugen
+            if ('/product/' not in href and '/products/' not in href and 
+                '/produkt/' not in href and 'detail' not in href):
+                continue
+            
+            # Vollständige URL erstellen
+            if not href.startswith(('http://', 'https://')):
+                if href.startswith('/'):
+                    href = f"{base_url.rstrip('/')}{href}"
+                else:
+                    href = f"{base_url.rstrip('/')}/{href}"
+            
+            # Link-Text extrahieren und bereinigen
+            link_text = a_tag.get_text().strip()
+            
+            # Duplikate vermeiden
+            if any(href == h for h, _ in all_links):
+                continue
+                
+            all_links.append((href, link_text))
+            counter += 1
+            
+            if counter >= max_links:
+                break
     
     # Anschließend filtern
     return filter_links(all_links, base_url, search_product_type)
@@ -250,6 +347,35 @@ def filter_product_type(product_title, search_product_type):
     # Im Zweifelsfall Produkt zulassen
     return True
 
+def reset_caches():
+    """
+    Setzt die internen Caches zurück (für Testzwecke oder bei Speicherproblemen)
+    
+    :return: Anzahl der zurückgesetzten Cache-Einträge
+    """
+    global _domain_cache, _filter_decision_cache
+    
+    domain_count = len(_domain_cache)
+    filter_count = len(_filter_decision_cache)
+    
+    _domain_cache = {}
+    _filter_decision_cache = {}
+    
+    return domain_count + filter_count
+
+def get_cache_stats():
+    """
+    Gibt Statistiken zu den aktuellen Caches zurück
+    
+    :return: Dictionary mit Cache-Statistiken
+    """
+    return {
+        "domain_cache_size": len(_domain_cache),
+        "filter_decision_cache_size": len(_filter_decision_cache),
+        "total_cache_entries": len(_domain_cache) + len(_filter_decision_cache),
+        "max_cache_entries": MAX_CACHE_ENTRIES
+    }
+
 def log_filter_stats(site_id, filtered_links, total_links):
     """
     Gibt Statistiken zur Filterung aus
@@ -263,7 +389,7 @@ def log_filter_stats(site_id, filtered_links, total_links):
     else:
         rate = (filtered_links / total_links) * 100
     
-    print(f"📊 Filter-Statistik für {site_id}:", flush=True)
-    print(f"  - Ursprüngliche Links: {total_links}", flush=True)
-    print(f"  - Verbleibende Links: {filtered_links}", flush=True)
-    print(f"  - Erfolgsrate: {rate:.1f}%", flush=True)
+    logger.debug(f"Filter-Statistik für {site_id}:")
+    logger.debug(f"  - Ursprüngliche Links: {total_links}")
+    logger.debug(f"  - Verbleibende Links: {filtered_links}")
+    logger.debug(f"  - Erfolgsrate: {rate:.1f}%")

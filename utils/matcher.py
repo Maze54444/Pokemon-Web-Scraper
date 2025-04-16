@@ -1,5 +1,9 @@
 import re
 import json
+import logging
+
+# Logger konfigurieren
+logger = logging.getLogger(__name__)
 
 def clean_text(text):
     """
@@ -15,27 +19,35 @@ def extract_product_type_from_text(text):
     Extrahiert den Produkttyp aus einem Text für strengere Filterung
     
     :param text: Text, aus dem der Produkttyp extrahiert werden soll
-    :return: Produkttyp als String oder None wenn nicht eindeutig
+    :return: Produkttyp als String oder "unknown" wenn nicht eindeutig
     """
+    if not text:
+        return "unknown"
+        
     text = text.lower()
     
     # Definiere klare Muster für verschiedene Produkttypen
     product_patterns = {
-        "display": [r'\bdisplay\b', r'36er', r'36\s+booster', r'booster\s+display'],
+        "display": [r'\bdisplay\b', r'36er', r'36\s+booster', r'booster\s+display', r'booster\s+box'],
         "etb": [r'\belite\s+trainer\s+box\b', r'\betb\b', r'\btrainer\s+box\b', r'\btop\s+trainer\s+box\b'],
         "build_battle": [r'\bbuild\s*[&]?\s*battle\b', r'\bprerelease\b'],
         "blister": [r'\bblister\b', r'\b3er\s+blister\b', r'\b3-pack\b', r'\bchecklane\b', r'\bsleeve(d)?\s+booster\b'],
-        "booster": [r'\bbooster\b', r'\bbooster\s+pack\b', r'\bpack\b'],
+        "single_booster": [r'\bsingle\s+booster\b', r'\bbooster\s+pack\b'],
         "tin": [r'\btin\b', r'\bmetal\s+box\b'],
         "premium": [r'\bpremium\b', r'\bcollection\b', r'\bcollector\b']
     }
     
+    # Jedes Muster prüfen und den ersten Treffer zurückgeben
     for product_type, patterns in product_patterns.items():
         for pattern in patterns:
             if re.search(pattern, text):
                 return product_type
     
-    return None  # Wenn kein klarer Produkttyp erkannt wurde
+    # Wenn "booster" oder "pack" ohne "display" erwähnt wird
+    if re.search(r'\bbooster\b|\bpack\b', text) and not re.search(r'display|36er|box', text):
+        return "single_booster"
+    
+    return "unknown"  # Default: Wenn kein klarer Produkttyp erkannt wurde
 
 def is_product_type_match(search_type, text_type):
     """
@@ -46,25 +58,34 @@ def is_product_type_match(search_type, text_type):
     :return: True wenn übereinstimmend, False sonst
     """
     # Wenn kein bestimmter Produkttyp gesucht wird, gilt das als Übereinstimmung
-    if not search_type:
+    if not search_type or search_type == "unknown":
         return True
     
-    # Wenn im Text kein Produkttyp erkannt wurde, aber einer gesucht wird, keine Übereinstimmung
-    if search_type and not text_type:
-        return False
+    # Wenn im Text kein Produkttyp erkannt wurde ("unknown"), aber einer gesucht wird
+    if search_type and text_type == "unknown":
+        # Bei "display" sind wir strenger - nur bei expliziter Erwähnung
+        if search_type == "display":
+            return False
+        # Bei anderen Typen sind wir toleranter
+        return True
     
     # Exakte Übereinstimmung erforderlich
     return search_type == text_type
 
-def is_keyword_in_text(keywords, text):
+def is_keyword_in_text(keywords, text, log_level='DEBUG'):
     """
     Strengere Prüfung auf exakte Übereinstimmung des Suchbegriffs im Text
     mit besonderer Berücksichtigung der Produkttypen
     
     :param keywords: Liste mit einzelnen Wörtern des Suchbegriffs
     :param text: Zu prüfender Text
+    :param log_level: Loglevel für Ausgaben (DEBUG, INFO, ERROR, None für keine Ausgabe)
     :return: True, wenn die Phrase gefunden wurde und Produkttypen übereinstimmen, sonst False
     """
+    # Kurze Texte sofort ablehnen
+    if not text or len(text) < 3:
+        return False
+        
     original_keywords = " ".join(keywords)  # für Debug-Ausgaben
     text = clean_text(text)
     
@@ -76,14 +97,16 @@ def is_keyword_in_text(keywords, text):
     text_product_type = extract_product_type_from_text(text)
     
     # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Text übereinstimmen
-    if search_product_type and text_product_type:
+    if search_product_type and search_product_type != "unknown" and text_product_type != "unknown":
         if search_product_type != text_product_type:
-            print(f"    ❌ Produkttyp-Konflikt: Suche nach '{search_product_type}', Text enthält '{text_product_type}'", flush=True)
+            if log_level and log_level != 'None':
+                logger.debug(f"Produkttyp-Konflikt: Suche nach '{search_product_type}', Text enthält '{text_product_type}'")
             return False
     
     # Wenn nach "display" gesucht wird, darf der Text KEINEN anderen Produkttyp enthalten
-    if search_product_type == "display" and text_product_type and text_product_type != "display":
-        print(f"    ❌ Nach Display gesucht, aber Produkt ist '{text_product_type}'", flush=True)
+    if search_product_type == "display" and text_product_type != "unknown" and text_product_type != "display":
+        if log_level and log_level != 'None':
+            logger.debug(f"Nach Display gesucht, aber Produkt ist '{text_product_type}'")
         return False
     
     # Standardisiere Singular/Plural
@@ -106,48 +129,38 @@ def is_keyword_in_text(keywords, text):
                             ("pack", "packs"), ("box", "boxes")]:
         standardized_text = standardized_text.replace(plural, singular)
     
-    # Konstruiere eine exakte Phrase aus den standardisierten Keywords
-    phrase = " ".join(standardized_keywords)
-    
-    # Die Phrase muss als eigenständiges Wort oder Teilphrase vorkommen
-    words = standardized_text.split()
-    text_length = len(words)
-    phrase_words = phrase.split()
-    phrase_length = len(phrase_words)
-    
     # Überprüfe die Übereinstimmung von Schlüsselwörtern
-    key_terms_found = True
+    # Ignoriere kurze Wörter (< 3 Zeichen) und häufige Füllwörter
+    ignore_words = ["und", "the", "and", "for", "mit", "von", "pro", "per", "der", "die", "das"]
+    important_keywords = [k for k in standardized_keywords 
+                         if len(k) > 3 and k not in ignore_words and k not in ["display", "booster", "pack", "box", "etb", "blister"]]
     
-    # Überprüfe, ob alle wichtigen Begriffe enthalten sind (z.B. "journey together", "reisegefährten")
-    non_product_keywords = [k for k in standardized_keywords if k not in ["display", "booster", "pack", "box", "etb", "blister"]]
-    for key_term in non_product_keywords:
-        if key_term not in standardized_text:
-            key_terms_found = False
-            break
+    # Wenn es keine wichtigen Keywords gibt, verwende alle
+    if not important_keywords:
+        important_keywords = [k for k in standardized_keywords if k not in ignore_words]
     
-    if not key_terms_found:
-        print(f"    ❌ Wichtige Begriffe nicht gefunden: '{original_keywords}' in '{text}'", flush=True)
-        return False
+    # Zähle, wie viele wichtige Keywords gefunden wurden
+    found_count = sum(1 for key_term in important_keywords if key_term in standardized_text)
     
-    # Suche nach der exakten Phrase im Text
-    exact_match = False
-    for i in range(text_length - phrase_length + 1):
-        if " ".join(words[i:i+phrase_length]) == phrase:
-            exact_match = True
-            break
+    # Mindestens 80% der wichtigen Keywords müssen gefunden werden
+    threshold = 0.8
+    required_matches = max(1, int(len(important_keywords) * threshold))
     
-    # Wenn eine exakte Übereinstimmung erforderlich ist und fehlt
-    if phrase_length <= 3 and not exact_match:
-        print(f"    ❌ Keine exakte Übereinstimmung für kurze Phrase: '{original_keywords}' in '{text}'", flush=True)
+    if found_count < required_matches:
+        if log_level and log_level != 'None' and important_keywords:
+            logger.debug(f"Nicht genug wichtige Begriffe gefunden ({found_count}/{len(important_keywords)}): '{original_keywords}' in '{text}'")
         return False
     
     # Spezielle Logik für Produkte mit "display" im Suchbegriff
-    if "display" in standardized_keywords:
-        if "display" not in standardized_text:
-            print(f"    ❌ 'display' im Suchbegriff, aber nicht im Text gefunden: '{original_keywords}' in '{text}'", flush=True)
+    if "display" in standardized_keywords and search_product_type == "display":
+        if "display" not in standardized_text and "box" not in standardized_text and "36" not in standardized_text:
+            if log_level and log_level != 'None':
+                logger.debug(f"'display' im Suchbegriff, aber nicht im Text gefunden: '{original_keywords}' in '{text}'")
             return False
     
-    print(f"    ✅ Treffer für Suchbegriff: '{original_keywords}' in '{text}'", flush=True)
+    if log_level and log_level == 'INFO':
+        logger.info(f"Treffer für Suchbegriff: '{original_keywords}' in '{text}'")
+        
     return True
 
 def normalize_product_name(text):
@@ -202,16 +215,16 @@ def prepare_keywords(products):
                     # Dies stellt sicher, dass nur Synonyme für tatsächliche Suchbegriffe verwendet werden
                                 
                 synonyms_loaded = True
-                print(f"ℹ️ Synonyme aus {file_path} geladen", flush=True)
+                logger.info(f"ℹ️ Synonyme aus {file_path} geladen")
                 break  # Wenn erfolgreich geladen, breche die Schleife ab
                 
         except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"ℹ️ Synonyme aus {file_path} konnten nicht geladen werden: {e}", flush=True)
+            logger.debug(f"ℹ️ Synonyme aus {file_path} konnten nicht geladen werden: {e}")
     
     if not synonyms_loaded:
-        print("ℹ️ Keine Synonyme geladen. Nur direkte Suchbegriffe werden verwendet.", flush=True)
+        logger.info("ℹ️ Keine Synonyme geladen. Nur direkte Suchbegriffe werden verwendet.")
     
     # Debug-Ausgabe der geladenen Suchbegriffe
-    print(f"ℹ️ Geladene Suchbegriffe: {list(keywords_map.keys())}", flush=True)
+    logger.info(f"ℹ️ Geladene Suchbegriffe: {list(keywords_map.keys())}")
     
     return keywords_map
