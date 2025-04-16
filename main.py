@@ -1,12 +1,18 @@
 import argparse
 import time
 import logging
+import traceback
 from datetime import datetime
-from utils.filetools import load_list, load_seen, save_seen
-from utils.stock import load_out_of_stock, save_out_of_stock
-from utils.scheduler import get_current_interval
+
+# Neue Importe für verbesserte Konfigurationsverwaltung
+from utils.config_manager import (
+    load_products, load_urls, load_seen, save_seen,
+    load_out_of_stock, save_out_of_stock, get_current_interval
+)
 from utils.telegram import send_telegram_message
-from utils.matcher import prepare_keywords, is_keyword_in_text, clean_text
+from utils.matcher import prepare_keywords
+
+# Scraper-Module
 from scrapers.tcgviert import scrape_tcgviert
 from scrapers.generic import scrape_generic
 from scrapers.sapphire_cards import scrape_sapphire_cards
@@ -36,14 +42,13 @@ def run_once(only_available=False, reset_seen=False):
     # Seen-Liste zurücksetzen, wenn angefordert
     if reset_seen:
         logger.info("[RESET] Setze Liste der gesehenen Produkte zurück")
-        with open("data/seen.txt", "w", encoding="utf-8") as f:
-            f.write("")
+        save_seen(set())
     
-    # Lade Konfiguration und Zustände
+    # Lade Konfiguration und Zustände mit den neuen Funktionen
     seen = load_seen()
     out_of_stock = load_out_of_stock()
-    products = load_list("data/products.txt")
-    urls = load_list("data/urls.txt")
+    products = load_products()
+    urls = load_urls()
     keywords_map = prepare_keywords(products)
     
     logger.info(f"[INFO] Durchlauf: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -65,7 +70,8 @@ def run_once(only_available=False, reset_seen=False):
             # Entferne sapphire-cards.de aus der URL-Liste für den generischen Scraper
             urls = [url for url in urls if "sapphire-cards.de" not in url]
         except Exception as e:
-            logger.error(f"[ERROR] Fehler beim Sapphire-Cards Scraping: {e}")
+            logger.error(f"[ERROR] Fehler beim Sapphire-Cards Scraping: {str(e)}")
+            logger.error(traceback.format_exc())
     
     # TCGViert-spezifischer Scraper
     try:
@@ -79,7 +85,8 @@ def run_once(only_available=False, reset_seen=False):
         # Entferne tcgviert.com aus der URL-Liste für den generischen Scraper
         urls = [url for url in urls if "tcgviert.com" not in url]
     except Exception as e:
-        logger.error(f"[ERROR] Fehler beim TCGViert Scraping: {e}")
+        logger.error(f"[ERROR] Fehler beim TCGViert Scraping: {str(e)}")
+        logger.error(traceback.format_exc())
     
     # Generische URL-Scraper für alle übrigen URLs
     for url in urls:
@@ -92,7 +99,8 @@ def run_once(only_available=False, reset_seen=False):
             else:
                 logger.info(f"[INFO] Keine neuen Treffer bei {url}")
         except Exception as e:
-            logger.error(f"[ERROR] Fehler beim Scraping von {url}: {e}")
+            logger.error(f"[ERROR] Fehler beim Scraping von {url}: {str(e)}")
+            logger.error(traceback.format_exc())
 
     # Speichere aktualisierte Zustände
     save_seen(seen)
@@ -105,7 +113,7 @@ def run_once(only_available=False, reset_seen=False):
     else:
         logger.info("[INFO] Keine neuen Treffer in diesem Durchlauf")
     
-    interval = get_current_interval("config/schedule.json")
+    interval = get_current_interval()
     logger.info(f"[DONE] Fertig. Nächster Durchlauf in {interval} Sekunden")
     return interval
 
@@ -126,7 +134,8 @@ def run_loop(only_available=False):
             time.sleep(interval)
         except Exception as e:
             consecutive_errors += 1
-            logger.error(f"[ERROR] Fehler im Hauptloop: {e}")
+            logger.error(f"[ERROR] Fehler im Hauptloop: {str(e)}")
+            logger.error(traceback.format_exc())
             
             # Exponentielles Backoff bei wiederholten Fehlern
             retry_time = min(60 * (2 ** (consecutive_errors - 1)), 3600)  # Max 1 Stunde
@@ -168,6 +177,8 @@ def test_matching():
         ["journey", "together", "display"],
         ["reisegefährten", "display"]
     ]
+    
+    from utils.matcher import is_keyword_in_text, clean_text
     
     for title in test_titles:
         logger.info(f"\nTest für Titel: {title}")
@@ -215,7 +226,7 @@ def test_sapphire():
     """Testet den Sapphire-Cards Scraper isoliert"""
     logger.info("[TEST] Teste Sapphire-Cards Scraper isoliert")
     
-    products = load_list("data/products.txt")
+    products = load_products()
     keywords_map = prepare_keywords(products)
     
     seen = set()
@@ -248,7 +259,7 @@ def monitor_out_of_stock():
         logger.info(f"  - {site}: {series} {type_} ({lang})")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Pokémon TCG Scraper mit verbesserten Filtern")
     parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", "availability_test", "sapphire_test", "show_out_of_stock"], 
                         default="loop", help="Ausführungsmodus")
     parser.add_argument("--only-available", action="store_true", 
@@ -267,6 +278,8 @@ if __name__ == "__main__":
     
     if args.mode == "once":
         run_once(only_available=args.only_available, reset_seen=args.reset)
+    elif args.mode == "loop":
+        run_loop(only_available=args.only_available)
     elif args.mode == "test":
         test_telegram()
     elif args.mode == "match_test":
@@ -277,5 +290,3 @@ if __name__ == "__main__":
         test_sapphire()
     elif args.mode == "show_out_of_stock":
         monitor_out_of_stock()
-    else:
-        run_loop(only_available=args.only_available)
