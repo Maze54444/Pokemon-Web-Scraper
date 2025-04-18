@@ -6,7 +6,7 @@ import random
 import logging
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote_plus
-from utils.telegram import send_telegram_message, escape_markdown
+from utils.telegram import send_telegram_message, escape_markdown, send_product_notification, send_batch_notification
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text
 from utils.stock import get_status_text, update_product_status
 from utils.availability import detect_availability
@@ -27,6 +27,7 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
     """
     logger.info("🌐 Starte speziellen Scraper für sapphire-cards.de")
     new_matches = []
+    all_products = []  # Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
     
     # Verwende ein Set, um bereits verarbeitete URLs zu speichern und Duplikate zu vermeiden
     processed_urls = set()
@@ -79,126 +80,112 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
             continue
         
         processed_urls.add(product_url)
-        result = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, max_retries)
+        product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, max_retries)
         
-        if result:
+        if product_data:
             successful_direct_urls = True
             logger.info(f"✅ Direkter Produktlink erfolgreich verarbeitet: {product_url}")
             
-            # Bei erfolgreicher Verarbeitung reicht ein Treffer
-            if len(new_matches) >= 1:
-                logger.info("✅ Ausreichend Treffer bei direkten URLs gefunden")
-                break
+            # Produkt zur Liste hinzufügen für sortierte Benachrichtigung
+            if isinstance(product_data, dict):
+                all_products.append(product_data)
         else:
             # URL zum Cache der fehlgeschlagenen URLs hinzufügen
             failed_urls_cache[product_url] = time.time()
     
-    # Katalogseite durchsuchen, wenn direkte URLs nicht funktionieren
-    if not successful_direct_urls:
-        logger.info("🔍 Direkte URLs erfolglos, durchsuche Katalogseiten...")
-        
-        # Reduzierte Liste von Katalogseiten-URLs 
-        catalog_urls = [
-            "https://sapphire-cards.de/produkt-kategorie/pokemon/",
-            "https://sapphire-cards.de/produkt-kategorie/pokemon/displays-pokemon/",
-            "https://sapphire-cards.de/produkt-kategorie/vorbestellungen/"
-        ]
-        
-        for catalog_url in catalog_urls:
-            if len(new_matches) >= 1:
-                logger.info("✅ Ausreichend Treffer in Katalogseiten gefunden")
-                break
-                
-            try:
-                logger.info(f"🔍 Durchsuche Katalogseite: {catalog_url}")
-                
-                # Nur ein einzelner Versuch pro Katalogseite
-                try:
-                    response = requests.get(catalog_url, headers=headers, timeout=15)
-                    if response.status_code != 200:
-                        logger.warning(f"⚠️ Fehler beim Abrufen von {catalog_url}: Status {response.status_code}")
-                        continue
-                except requests.exceptions.RequestException as e:
-                    logger.warning(f"⚠️ Netzwerkfehler bei {catalog_url}: {e}")
-                    continue
-                
-                soup = BeautifulSoup(response.text, "html.parser")
-                
-                # Sammle alle Links, die auf Produkte verweisen könnten
-                product_links = []
-                
-                # VERBESSERT: Umfassendere Suche nach relevanten Links mit einmaligem Durchlauf
-                all_links = soup.find_all('a', href=True)
-                
-                # Schlüsselwörter für die Filterung
-                relevant_keywords = ['journey', 'together', 'reise', 'gefährten', 'gefaehrten', 'sv09', 'sv9', 'kp09', 'kp9']
-                
-                for link in all_links:
-                    href = link.get('href', '')
-                    if '/produkt/' in href and href not in product_links and href not in processed_urls:
-                        if any(keyword in href.lower() for keyword in relevant_keywords) or \
-                           any(keyword in link.get_text().lower() for keyword in relevant_keywords):
-                            product_links.append(href)
-                
-                logger.info(f"🔍 {len(product_links)} potenzielle Produktlinks gefunden")
-                
-                # Begrenzen Sie die Anzahl der zu prüfenden Links
-                if len(product_links) > 5:
-                    logger.info(f"⚙️ Begrenze die Anzahl der zu prüfenden Links auf 5 (von {len(product_links)})")
-                    product_links = product_links[:5]
-                
-                # Prüfe jeden Link auf Übereinstimmung mit Suchbegriffen
-                for product_url in product_links:
-                    # Überspringe kürzlich fehlgeschlagene URLs
-                    if product_url in failed_urls_cache:
-                        if time.time() - failed_urls_cache[product_url] < 3600:
-                            continue
-                            
-                    # Vollständige URL erstellen, falls nur ein relativer Pfad
-                    if not product_url.startswith('http'):
-                        product_url = urljoin(catalog_url, product_url)
-                    
-                    processed_urls.add(product_url)
-                    result = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, 2)  # Reduzierte Wiederholungen
-                    
-                    if not result:
-                        failed_urls_cache[product_url] = time.time()
-                    elif len(new_matches) >= 1:
-                        logger.info(f"✅ Ausreichend Treffer in Katalogseite gefunden")
-                        break
-                
-            except Exception as e:
-                logger.error(f"❌ Fehler beim Durchsuchen der Katalogseite {catalog_url}: {e}")
+    # Katalogseite durchsuchen, auch wenn direkte URLs funktionieren
+    logger.info("🔍 Durchsuche Katalogseiten...")
     
-    # Fallback: Suche nach Produkten (nur wenn keine Treffer gefunden wurden)
-    if not new_matches:
-        logger.info("🔍 Keine Treffer in Katalogseiten, versuche Suche...")
-        search_urls = try_search_fallback(keywords_map, processed_urls, headers, max_retries=1)  # Reduzierte Wiederholungen
-        
-        # Begrenze die Anzahl zu prüfender Such-URLs
-        search_limit = 3
-        if len(search_urls) > search_limit:
-            logger.info(f"⚙️ Begrenze die Anzahl der Suchergebnisse auf {search_limit} (von {len(search_urls)})")
-            search_urls = search_urls[:search_limit]
-        
-        # Verarbeite die gefundenen URLs, aber vermeide Duplikate
-        for product_url in search_urls:
-            # Überspringe kürzlich fehlgeschlagene URLs
-            if product_url in failed_urls_cache:
-                if time.time() - failed_urls_cache[product_url] < 3600:
+    # Reduzierte Liste von Katalogseiten-URLs 
+    catalog_urls = [
+        "https://sapphire-cards.de/produkt-kategorie/pokemon/",
+        "https://sapphire-cards.de/produkt-kategorie/pokemon/displays-pokemon/",
+        "https://sapphire-cards.de/produkt-kategorie/vorbestellungen/"
+    ]
+    
+    for catalog_url in catalog_urls:
+        try:
+            logger.info(f"🔍 Durchsuche Katalogseite: {catalog_url}")
+            
+            # Nur ein einzelner Versuch pro Katalogseite
+            try:
+                response = requests.get(catalog_url, headers=headers, timeout=15)
+                if response.status_code != 200:
+                    logger.warning(f"⚠️ Fehler beim Abrufen von {catalog_url}: Status {response.status_code}")
                     continue
-                    
-            if product_url in processed_urls:
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"⚠️ Netzwerkfehler bei {catalog_url}: {e}")
                 continue
             
-            processed_urls.add(product_url)
-            result = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, 1)  # Minimale Wiederholungen
+            soup = BeautifulSoup(response.text, "html.parser")
             
-            if not result:
-                failed_urls_cache[product_url] = time.time()
-            elif len(new_matches) >= 1:
-                logger.info(f"✅ Ausreichend Treffer gefunden")
-                break
+            # Sammle alle Links, die auf Produkte verweisen könnten
+            product_links = []
+            
+            # VERBESSERT: Umfassendere Suche nach relevanten Links mit einmaligem Durchlauf
+            all_links = soup.find_all('a', href=True)
+            
+            # Schlüsselwörter für die Filterung
+            relevant_keywords = ['journey', 'together', 'reise', 'gefährten', 'gefaehrten', 'sv09', 'sv9', 'kp09', 'kp9']
+            
+            for link in all_links:
+                href = link.get('href', '')
+                if '/produkt/' in href and href not in product_links and href not in processed_urls:
+                    if any(keyword in href.lower() for keyword in relevant_keywords) or \
+                       any(keyword in link.get_text().lower() for keyword in relevant_keywords):
+                        product_links.append(href)
+            
+            logger.info(f"🔍 {len(product_links)} potenzielle Produktlinks gefunden")
+            
+            # Verarbeite alle gefundenen Links
+            for product_url in product_links:
+                # Überspringe kürzlich fehlgeschlagene URLs
+                if product_url in failed_urls_cache:
+                    if time.time() - failed_urls_cache[product_url] < 3600:
+                        continue
+                        
+                # Vollständige URL erstellen, falls nur ein relativer Pfad
+                if not product_url.startswith('http'):
+                    product_url = urljoin(catalog_url, product_url)
+                
+                processed_urls.add(product_url)
+                product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, 2)  # Reduzierte Wiederholungen
+                
+                if not product_data:
+                    failed_urls_cache[product_url] = time.time()
+                elif isinstance(product_data, dict):
+                    all_products.append(product_data)
+                
+        except Exception as e:
+            logger.error(f"❌ Fehler beim Durchsuchen der Katalogseite {catalog_url}: {e}")
+    
+    # Fallback: Suche nach Produkten (auch wenn Treffer gefunden wurden)
+    logger.info("🔍 Versuche Suche als zusätzliche Methode...")
+    search_urls = try_search_fallback(keywords_map, processed_urls, headers, max_retries=1)  # Reduzierte Wiederholungen
+    
+    # Begrenze die Anzahl zu prüfender Such-URLs
+    search_limit = 3
+    if len(search_urls) > search_limit:
+        logger.info(f"⚙️ Begrenze die Anzahl der Suchergebnisse auf {search_limit} (von {len(search_urls)})")
+        search_urls = search_urls[:search_limit]
+    
+    # Verarbeite die gefundenen URLs, aber vermeide Duplikate
+    for product_url in search_urls:
+        # Überspringe kürzlich fehlgeschlagene URLs
+        if product_url in failed_urls_cache:
+            if time.time() - failed_urls_cache[product_url] < 3600:
+                continue
+                
+        if product_url in processed_urls:
+            continue
+        
+        processed_urls.add(product_url)
+        product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, 1)  # Minimale Wiederholungen
+        
+        if not product_data:
+            failed_urls_cache[product_url] = time.time()
+        elif isinstance(product_data, dict):
+            all_products.append(product_data)
     
     # Wenn nach all dem immer noch nichts gefunden wurde, manuelle Hardcoding-Fallback
     if not new_matches:
@@ -207,7 +194,10 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
             "url": "https://sapphire-cards.de/produkt/pokemon-journey-together-reisegefaehrten-booster-box-display/",
             "title": "Pokemon Journey Together | Reisegefährten Booster Box (Display)",
             "price": "159,99 €",
-            "is_available": True
+            "is_available": True,
+            "status_text": "✅ Verfügbar (Fallback)",
+            "product_type": "display",
+            "shop": "sapphire-cards.de"
         }
         
         # Wähle den passsendsten Suchbegriff aus
@@ -230,18 +220,14 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
             )
             
             if should_notify:
-                msg = (
-                    f"🎯 *{escape_markdown(fallback_product['title'])}* [DISPLAY]\n"
-                    f"💶 {escape_markdown(fallback_product['price'])}\n"
-                    f"📊 ✅ Verfügbar (Fallback)\n"
-                    f"🔎 Treffer für: '{escape_markdown(best_match)}'\n"
-                    f"🔗 [Zum Produkt]({fallback_product['url']})"
-                )
-                
-                if send_telegram_message(msg):
-                    seen.add(f"{product_id}_status_available")
-                    new_matches.append(product_id)
-                    logger.info(f"✅ Fallback-Treffer gemeldet: {fallback_product['title']}")
+                fallback_product["matched_term"] = best_match
+                all_products.append(fallback_product)
+                new_matches.append(product_id)
+                logger.info(f"✅ Fallback-Treffer gemeldet: {fallback_product['title']}")
+    
+    # Sende sortierte Benachrichtigung für alle gefundenen Produkte
+    if all_products:
+        send_batch_notification(all_products)
     
     return new_matches
 
@@ -257,7 +243,7 @@ def process_product_url(product_url, keywords_map, seen, out_of_stock, only_avai
     :param headers: HTTP-Headers für die Anfrage
     :param new_matches: Liste der neuen Treffer
     :param max_retries: Maximale Anzahl an Wiederholungsversuchen
-    :return: True wenn erfolgreich, False sonst
+    :return: Product data dict if successful, False otherwise
     """
     try:
         logger.info(f"🔍 Prüfe Produktlink: {product_url}")
@@ -440,45 +426,42 @@ def process_product_url(product_url, keywords_map, seen, out_of_stock, only_avai
                     else:
                         price = "159,99 €"  # Standardpreis für Displays
             
-            # Nur verfügbare anzeigen, wenn Option aktiviert
+            # Aktualisiere Produkt-Status und ggf. Benachrichtigung senden
+            product_id = create_product_id(product_url, title)
+            should_notify, is_back_in_stock = update_product_status(
+                product_id, is_available, seen, out_of_stock
+            )
+            
+            # Bei "nur verfügbare" Option überspringen, wenn nicht verfügbar
             if only_available and not is_available:
                 return True  # Erfolgreich verarbeitet aber nicht gemeldet
                 
-            # Status aktualisieren und ggf. Benachrichtigung senden
-            should_notify, is_back_in_stock = update_product_status(
-                create_product_id(product_url, title), is_available, seen, out_of_stock
-            )
-            
             if should_notify:
                 # Status anpassen wenn wieder verfügbar
                 if is_back_in_stock:
                     status_text = "🎉 Wieder verfügbar!"
                 
-                # Produkttyp-Information
-                product_type_info = f" [{title_product_type.upper()}]" if title_product_type != "unknown" else ""
+                # Produkt-Informationen für die Batch-Benachrichtigung
+                product_data = {
+                    "title": title,
+                    "url": product_url,
+                    "price": price,
+                    "status_text": status_text,
+                    "is_available": is_available,
+                    "matched_term": matched_terms[0],
+                    "product_type": title_product_type,
+                    "shop": "sapphire-cards.de"
+                }
                 
-                # Erzeuge Telegram-Nachricht
-                msg = (
-                    f"🎯 *{escape_markdown(title)}*{product_type_info}\n"
-                    f"💶 {escape_markdown(price)}\n"
-                    f"📊 {escape_markdown(status_text)}\n"
-                    f"🔎 Treffer für: '{escape_markdown(matched_terms[0])}'\n"
-                    f"🔗 [Zum Produkt]({product_url})"
-                )
+                new_matches.append(product_id)
+                logger.info(f"✅ Neuer Treffer bei sapphire-cards.de: {title} - {status_text}")
                 
-                if send_telegram_message(msg):
-                    product_id = create_product_id(product_url, title)
-                    if is_available:
-                        seen.add(f"{product_id}_status_available")
-                    else:
-                        seen.add(f"{product_id}_status_unavailable")
-                    
-                    new_matches.append(product_id)
-                    logger.info(f"✅ Neuer Treffer bei sapphire-cards.de: {title} - {status_text}")
+                # Gib die Produktdaten zurück für die Batch-Benachrichtigung
+                return product_data
             
-            return True
+            return True  # Erfolgreich, aber keine Benachrichtigung notwendig
         
-        return False
+        return False  # Kein Suchbegriff stimmte überein
     
     except Exception as e:
         logger.error(f"❌ Fehler beim Prüfen des Produkts {product_url}: {e}")

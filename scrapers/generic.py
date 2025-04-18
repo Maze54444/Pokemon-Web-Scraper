@@ -10,9 +10,9 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 
 from utils.matcher import clean_text, is_keyword_in_text, normalize_product_name, extract_product_type_from_text
-from utils.telegram import send_telegram_message, escape_markdown
+from utils.telegram import send_telegram_message, escape_markdown, send_product_notification
 from utils.stock import get_status_text, update_product_status
-from utils.availability import detect_availability, extract_price
+from utils.availability import detect_availability
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
@@ -110,9 +110,13 @@ DOMAIN_FILTERS = {
 def load_product_cache(cache_file="data/product_cache.json"):
     """Lädt das Cache-Dictionary mit bekannten Produkten und ihren URLs"""
     try:
+        # Stelle sicher, dass das Verzeichnis existiert
+        Path(cache_file).parent.mkdir(parents=True, exist_ok=True)
+        
         if os.path.exists(cache_file):
             with open(cache_file, "r", encoding="utf-8") as f:
                 return json.load(f)
+        logger.info(f"ℹ️ Produkt-Cache-Datei nicht gefunden. Neuer Cache wird erstellt.")
         return {}
     except Exception as e:
         logger.error(f"⚠️ Fehler beim Laden des Produkt-Caches: {e}")
@@ -126,6 +130,7 @@ def save_product_cache(cache, cache_file="data/product_cache.json"):
         
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
+        logger.debug(f"✅ Produkt-Cache mit {len(cache)} Einträgen gespeichert")
     except Exception as e:
         logger.error(f"⚠️ Fehler beim Speichern des Produkt-Caches: {e}")
 
@@ -224,6 +229,9 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
         # Keine neuen Keywords, wir können den Cache nutzen
         full_scan_needed = False
     
+    # Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
+    all_products = []
+    
     try:
         # User-Agent setzen, um Blockierung zu vermeiden
         headers = {
@@ -236,17 +244,13 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
         if domain_paths and not full_scan_needed:
             logger.info(f"🔍 Nutze {len(domain_paths)} gecachte Produktpfade für {site_id}")
             
-            # Limitiere die Anzahl zu prüfender Produkte für Effizienz
-            max_products_to_check = 5
-            products_checked = 0
+            # Alle gecachten Produkte prüfen
+            checked_products = 0
             
             # Nur die bereits bekannten Produktseiten prüfen
             for product_id, product_info in list(domain_paths.items()):  # list() erstellen um während Iteration zu löschen
-                # Limitierung der Produktprüfungen
-                products_checked += 1
-                if products_checked > max_products_to_check:
-                    logger.info(f"⚙️ Maximale Anzahl an Produktprüfungen erreicht ({max_products_to_check})")
-                    break
+                # Zähler für Produkte erhöhen
+                checked_products += 1
                 
                 product_url = product_info.get("url", "")
                 matched_term = product_info.get("term", "")
@@ -256,8 +260,8 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 if matched_term not in keywords_map:
                     continue
                 
-                # Prüfen, ob die Seite vor kurzem überprüft wurde (z.B. in den letzten 12 Stunden)
-                if time.time() - last_checked < 43200:  # 12 Stunden in Sekunden
+                # Prüfen, ob die Seite vor kurzem überprüft wurde (z.B. in den letzten 2 Stunden)
+                if time.time() - last_checked < 7200:  # 2 Stunden in Sekunden
                     logger.debug(f"⏱️ Überspringe kürzlich geprüftes Produkt: {product_url}")
                     continue
                 
@@ -309,16 +313,12 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                         logger.info(f"🔄 Änderung erkannt oder erste Prüfung: {product_url}")
                         domain_paths[product_id]["fingerprint"] = current_fingerprint
                         
-                        # Prüfe Verfügbarkeit und sende Benachrichtigung
+                        # Prüfe Verfügbarkeit
                         is_available, price, status_text = detect_availability(soup, product_url)
                         
                         # Aktualisiere Cache-Eintrag
                         domain_paths[product_id]["is_available"] = is_available
                         domain_paths[product_id]["price"] = price
-                        
-                        # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
-                        if only_available and not is_available:
-                            continue
                         
                         # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
                         should_notify, is_back_in_stock = update_product_status(
@@ -333,36 +333,21 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             elif not status_text:
                                 status_text = get_status_text(is_available, is_back_in_stock)
                             
-                            # Escape special characters for Markdown
-                            safe_link_text = escape_markdown(link_text)
-                            safe_price = escape_markdown(price)
-                            safe_status_text = escape_markdown(status_text)
-                            safe_matched_term = escape_markdown(matched_term)
+                            # Produkt-Informationen sammeln für Batch-Benachrichtigung
+                            product_data = {
+                                "title": link_text,
+                                "url": product_url,
+                                "price": price,
+                                "status_text": status_text,
+                                "is_available": is_available,
+                                "matched_term": matched_term,
+                                "product_type": title_product_type,
+                                "shop": site_id
+                            }
                             
-                            # Füge Produkttyp-Information hinzu
-                            product_type_info = f" [{title_product_type.upper()}]" if title_product_type != "unknown" else ""
-                            
-                            # URLs müssen nicht escaped werden, da sie in Klammern stehen
-                            msg = (
-                                f"🎯 *{safe_link_text}*{product_type_info}\n"
-                                f"💶 {safe_price}\n"
-                                f"📊 {safe_status_text}\n"
-                                f"🔎 Treffer für: '{safe_matched_term}'\n"
-                                f"🔗 [Zum Produkt]({product_url})"
-                            )
-                            
-                            if send_telegram_message(msg):
-                                if is_available:
-                                    seen.add(f"{product_id}_status_available")
-                                else:
-                                    seen.add(f"{product_id}_status_unavailable")
-                                
-                                new_matches.append(product_id)
-                                logger.info(f"✅ Cache-Treffer gemeldet: {link_text} - {status_text}")
-                                
-                                # Nach dem ersten Treffer abbrechen
-                                if len(new_matches) >= 1:
-                                    break
+                            all_products.append(product_data)
+                            new_matches.append(product_id)
+                            logger.info(f"✅ Cache-Treffer: {link_text} - {status_text}")
                     else:
                         logger.debug(f"✓ Keine Änderung für {product_url}")
                         
@@ -374,7 +359,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
             save_product_cache(product_cache)
         
         # Wenn neue Keywords oder ein vollständiger Scan erforderlich ist
-        if (full_scan_needed or not domain_paths) and len(new_matches) == 0:
+        if full_scan_needed or not domain_paths:
             logger.info(f"🔍 Durchführung eines vollständigen Scans für {url}")
             
             try:
@@ -429,13 +414,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
             
             logger.info(f"🔍 {len(potential_product_links)} potenzielle Produktlinks gefunden auf {url}")
             
-            # Begrenze die Anzahl zu prüfender Links
-            max_links_to_check = 5
-            if len(potential_product_links) > max_links_to_check:
-                logger.info(f"⚙️ Begrenze die Anzahl zu prüfender Links auf {max_links_to_check} (von {len(potential_product_links)})")
-                potential_product_links = potential_product_links[:max_links_to_check]
-            
-            # Verarbeite die potenziellen Produktlinks
+            # Verarbeite alle potenziellen Produktlinks
             for href, link_text in potential_product_links:
                 # Vollständige URL erstellen
                 if href.startswith('http'):
@@ -519,9 +498,6 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                         if site_id not in product_cache:
                             product_cache[site_id] = {}
                         
-                        if product_id not in product_cache[site_id]:
-                            product_cache[site_id] = {}
-                        
                         # Speichere Produktinfos im Cache
                         fingerprint = ""
                         if detail_soup:
@@ -541,16 +517,12 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     except Exception as e:
                         logger.warning(f"⚠️ Fehler beim Prüfen der Verfügbarkeit für {product_url}: {e}")
                 
-                # Bei "nur verfügbare" Option, nicht-verfügbare Produkte überspringen
-                if only_available and not is_available:
-                    continue
-                
                 # Benachrichtigungslogik
                 should_notify, is_back_in_stock = update_product_status(
                     product_id, is_available, seen, out_of_stock
                 )
                 
-                if should_notify:
+                if should_notify and (not only_available or is_available):
                     # Wenn Produkt wieder verfügbar ist, anpassen
                     if is_back_in_stock:
                         status_text = "🎉 Wieder verfügbar!"
@@ -558,45 +530,34 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     elif not status_text:
                         status_text = get_status_text(is_available, is_back_in_stock)
                     
-                    # Escape special characters for Markdown
-                    safe_link_text = escape_markdown(link_text)
-                    safe_price = escape_markdown(price)
-                    safe_status_text = escape_markdown(status_text)
-                    safe_matched_term = escape_markdown(matched_term)
-                    
-                    # Füge Produkttyp-Information hinzu
+                    # Produkt-Informationen sammeln für Batch-Benachrichtigung
                     product_type = extract_product_type(link_text)
-                    product_type_info = f" [{product_type.upper()}]" if product_type != "unknown" else ""
                     
-                    # Nachricht zusammenstellen
-                    msg = (
-                        f"🎯 *{safe_link_text}*{product_type_info}\n"
-                        f"💶 {safe_price}\n"
-                        f"📊 {safe_status_text}\n"
-                        f"🔎 Treffer für: '{safe_matched_term}'\n"
-                        f"🔗 [Zum Produkt]({product_url})"
-                    )
+                    product_data = {
+                        "title": link_text,
+                        "url": product_url,
+                        "price": price,
+                        "status_text": status_text,
+                        "is_available": is_available,
+                        "matched_term": matched_term,
+                        "product_type": product_type,
+                        "shop": site_id
+                    }
                     
-                    # Telegram-Nachricht senden
-                    if send_telegram_message(msg):
-                        # Je nach Verfügbarkeit unterschiedliche IDs speichern
-                        if is_available:
-                            seen.add(f"{product_id}_status_available")
-                        else:
-                            seen.add(f"{product_id}_status_unavailable")
-                        
-                        new_matches.append(product_id)
-                        logger.info(f"✅ Neuer Treffer gemeldet: {link_text} - {status_text}")
-                        
-                        # Nach dem ersten Treffer abbrechen
-                        if len(new_matches) >= 1:
-                            break
+                    all_products.append(product_data)
+                    new_matches.append(product_id)
+                    logger.info(f"✅ Neuer Treffer gefunden: {link_text} - {status_text}")
             
             # Aktualisiere die Liste der bekannten Keywords im Cache
             product_cache[cache_key] = current_keywords
             
             # Speichere den aktualisierten Cache
             save_product_cache(product_cache)
+    
+        # Sende Benachrichtigungen sortiert nach Verfügbarkeit
+        if all_products:
+            from utils.telegram import send_batch_notification
+            send_batch_notification(all_products)
     
     except Exception as e:
         logger.error(f"❌ Fehler beim generischen Scraping von {url}: {e}", exc_info=True)
@@ -623,7 +584,7 @@ def check_product_availability(url, headers):
     
     soup = BeautifulSoup(response.text, "html.parser")
     
-    # Verwende das Availability-Modul für webseitenspezifische Erkennung
+# Verwende das Availability-Modul für webseitenspezifische Erkennung
     is_available, price, status_text = detect_availability(soup, url)
     
     logger.debug(f"  - Verfügbarkeit für {url}: {status_text}")

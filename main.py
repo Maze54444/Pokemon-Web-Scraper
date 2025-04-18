@@ -58,9 +58,11 @@ def run_once(only_available=False, reset_seen=False):
     logger.info(f"[INFO] {len(out_of_stock)} ausverkaufte Produkte werden überwacht")
     
     all_matches = []
+    all_urls = urls.copy()  # Kopie erstellen, damit die Originalliste intakt bleibt
     
-    # Sapphire-Cards spezifischer Scraper ZUERST ausführen, da dieser ein priorisierter Händler ist
-    if any("sapphire-cards.de" in url for url in urls):
+    # Sapphire-Cards spezifischer Scraper (wichtig: keine URLs mehr entfernen)
+    sapphire_urls = [url for url in all_urls if "sapphire-cards.de" in url]
+    if sapphire_urls:
         try:
             logger.info("[SCRAPER] Starte Sapphire-Cards Scraper")
             sapphire_matches = scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available)
@@ -69,14 +71,13 @@ def run_once(only_available=False, reset_seen=False):
                 all_matches.extend(sapphire_matches)
             else:
                 logger.info("[INFO] Keine neuen Treffer bei Sapphire-Cards")
-            # Entferne sapphire-cards.de aus der URL-Liste für die generischen Scraper
-            urls = [url for url in urls if "sapphire-cards.de" not in url]
         except Exception as e:
             logger.error(f"[ERROR] Fehler beim Sapphire-Cards Scraping: {str(e)}")
             logger.debug(traceback.format_exc())
     
-    # TCGViert-spezifischer Scraper
-    if any("tcgviert.com" in url for url in urls):
+    # TCGViert-spezifischer Scraper (wichtig: keine URLs mehr entfernen)
+    tcgviert_urls = [url for url in all_urls if "tcgviert.com" in url]
+    if tcgviert_urls:
         try:
             logger.info("[SCRAPER] Starte TCGViert Scraper")
             tcgviert_matches = scrape_tcgviert(keywords_map, seen, out_of_stock, only_available)
@@ -85,37 +86,26 @@ def run_once(only_available=False, reset_seen=False):
                 all_matches.extend(tcgviert_matches)
             else:
                 logger.info("[INFO] Keine neuen Treffer bei TCGViert")
-            # Entferne tcgviert.com aus der URL-Liste für die generischen Scraper
-            urls = [url for url in urls if "tcgviert.com" not in url]
         except Exception as e:
             logger.error(f"[ERROR] Fehler beim TCGViert Scraping: {str(e)}")
             logger.debug(traceback.format_exc())
     
-    # Wenn wir bereits genug Treffer haben, überspringe die generischen Scraper
-    if all_matches:
-        logger.info("[INFO] Bereits Treffer bei spezialisierten Scrapern gefunden, überspringe generische URLs")
-    # Generische URL-Scraper für alle übrigen URLs
-    elif urls:
-        logger.info(f"[INFO] Starte generische Scraper für {len(urls)} URLs")
+    # Generische URLs - immer alle scannen
+    generic_urls = [url for url in all_urls if not ("sapphire-cards.de" in url or "tcgviert.com" in url)]
+    if generic_urls:
+        logger.info(f"[INFO] Starte generische Scraper für {len(generic_urls)} URLs")
         
-        # Begrenzen der maximalen Anzahl an URLs für einen Durchlauf
-        max_urls = 3
-        if len(urls) > max_urls:
-            logger.info(f"[LIMIT] Begrenze generische URLs auf {max_urls} (von {len(urls)})")
-            # Zufällige Auswahl für bessere Abdeckung im Laufe der Zeit
-            urls = random.sample(urls, max_urls)
-            
         # Parallele Verarbeitung mit ThreadPoolExecutor
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_urls) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(generic_urls)) as executor:
             # Dictionary zum Speichern der Future-Objekte mit ihren URLs
             future_to_url = {
                 executor.submit(
                     scrape_generic, url, keywords_map, seen, out_of_stock, 
                     check_availability=True, only_available=only_available
-                ): url for url in urls
+                ): url for url in generic_urls
             }
             
-            # Ergebnisse sammeln, sobald sie verfügbar sind
+            # Ergebnisse sammeln
             for future in concurrent.futures.as_completed(future_to_url):
                 url = future_to_url[future]
                 try:
@@ -123,11 +113,6 @@ def run_once(only_available=False, reset_seen=False):
                     if new_url_matches:
                         logger.info(f"[SUCCESS] {len(new_url_matches)} neue Treffer bei {url} gefunden")
                         all_matches.extend(new_url_matches)
-                        # Wenn wir bereits Treffer haben, können wir andere Futures abbrechen
-                        for f in future_to_url:
-                            if not f.done() and not f.cancelled():
-                                f.cancel()
-                        break
                     else:
                         logger.info(f"[INFO] Keine neuen Treffer bei {url}")
                 except Exception as e:
