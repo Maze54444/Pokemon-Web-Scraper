@@ -6,6 +6,7 @@ import re
 import logging
 from urllib.parse import urlparse
 from utils.filter_config import URL_FILTERS, TEXT_FILTERS, PRODUCT_TYPE_EXCLUSIONS, CATEGORY_WHITELIST
+from utils.matcher import extract_product_type_from_text
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
@@ -112,14 +113,26 @@ def should_filter_url(url, link_text=None, search_product_type=None, site_id=Non
                         return True
         
         # 5. Prüfe Produkt-Typ-Kompatibilität
-        if search_product_type and search_product_type == "display":
-            # Wenn wir nach Display suchen, prüfe auf Schlüsselwörter, die nicht-Display-Produkte anzeigen
-            exclude_terms = PRODUCT_TYPE_EXCLUSIONS.get("global", [])
-            for term in exclude_terms:
-                if term in normalized_text:
+        if search_product_type == "display":
+            # Wenn nach Display gesucht wird, filtere Nicht-Display Produkte heraus
+            text_product_type = extract_product_type_from_text(normalized_text)
+            if text_product_type != "unknown" and text_product_type != "display":
+                _store_filter_decision(cache_key, True)
+                return True
+            
+            # Filtere falsche Serien
+            exclusion_sets = [
+                "stürmische funken", "sturmi", "paradox rift", "paradox", "prismat", "stellar", "battle partners",
+                "nebel der sagen", "zeit", "paldea", "obsidian", "151", "astral", "brilliant", "fusion", 
+                "kp01", "kp02", "kp03", "kp04", "kp05", "kp06", "kp07", "kp08", "sv01", "sv02", "sv03", "sv04", 
+                "sv05", "sv06", "sv07", "sv08", "sv10", "sv11", "sv12", "sv13"
+            ]
+            
+            for exclusion in exclusion_sets:
+                if exclusion in normalized_text:
                     _store_filter_decision(cache_key, True)
                     return True
-                    
+    
     # Whitelist-Ansatz für Kategorien, wenn aktiviert
     if is_category_link(normalized_url) and CATEGORY_WHITELIST:
         # Prüfe, ob der Link-Text relevante Kategorien enthält
@@ -321,30 +334,14 @@ def filter_product_type(product_title, search_product_type):
     
     product_title = product_title.lower()
     
-    # Wenn Display gesucht wird, nach relevanten Schlagwörtern suchen
+    # Extrahiere Produkttyp aus dem Titel
+    text_product_type = extract_product_type_from_text(product_title)
+    
+    # Wenn Display gesucht wird, muss der Titel auch als Display erkannt werden
     if search_product_type == "display":
-        display_indicators = [
-            r'\bdisplay\b', r'36er', r'36\s+booster', r'\bbooster\s+display\b',
-            r'\bbox\s+display\b', r'booster\s+box', r'\b36\s+packs?\b'
-        ]
-        
-        for pattern in display_indicators:
-            if re.search(pattern, product_title, re.IGNORECASE):
-                return True
-        
-        # Negative Indikatoren prüfen
-        non_display_indicators = [
-            r'\bblister\b', r'\betb\b', r'\belite\s+trainer\s+box\b',
-            r'\bbuild\s*[&]?\s*battle\b', r'\btin\b', r'\bpack\b'
-        ]
-        
-        for pattern in non_display_indicators:
-            if re.search(pattern, product_title, re.IGNORECASE):
-                return False
+        return text_product_type == "display"
     
-    # Weitere Produkttypen können hier hinzugefügt werden
-    
-    # Im Zweifelsfall Produkt zulassen
+    # Bei anderen Produkttypen können wir weniger streng sein
     return True
 
 def reset_caches():

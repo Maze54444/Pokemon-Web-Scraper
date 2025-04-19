@@ -24,7 +24,6 @@ def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
     :return: Liste der neuen Treffer
     """
     logger.info("🌐 Starte Scraper für tcgviert.com")
-    logger.debug(f"🔍 Suche nach folgenden Begriffen: {list(keywords_map.keys())}")
     
     json_matches = []
     html_matches = []
@@ -75,7 +74,7 @@ def extract_product_info(title):
         language = "UNK"
     
     # Extrahiere Produkttyp mit der verbesserten Funktion
-    product_type = extract_product_type(title)
+    product_type = extract_product_type_from_text(title)
     if product_type == "unknown":
         # Fallback zur alten Methode
         if re.search(r'display|36er', title.lower()):
@@ -98,8 +97,6 @@ def extract_product_info(title):
         series_code = "sv09"
     elif "reisegefährten" in title.lower():
         series_code = "kp09"
-    elif "royal blood" in title.lower():
-        series_code = "op10"
     
     return (series_code, product_type, language)
 
@@ -126,58 +123,6 @@ def create_product_id(title, base_id="tcgviert"):
         product_id += "_top"
     
     return product_id
-
-def extract_product_type(text):
-    """
-    Extrahiert den Produkttyp aus einem Text mit strengeren Regeln
-    
-    :param text: Text, aus dem der Produkttyp extrahiert werden soll
-    :return: Produkttyp als String
-    """
-    if not text:
-        return "unknown"
-        
-    text = text.lower()
-    
-    # Display erkennen - höchste Priorität und strenge Prüfung
-    if re.search(r'\bdisplay\b|\b36er\b|\b36\s+booster\b|\bbooster\s+display\b', text):
-        # Zusätzliche Prüfung: Wenn andere Produkttypen erwähnt werden, ist es möglicherweise kein Display
-        if re.search(r'\bblister\b|\bpack\b|\bbuilder\b|\bbuild\s?[&]?\s?battle\b|\betb\b|\belite trainer box\b', text):
-            # Prüfe, ob "display" tatsächlich prominenter ist als andere Erwähnungen
-            display_pos = text.find('display')
-            if display_pos >= 0:
-                blister_pos = text.find('blister')
-                pack_pos = text.find('pack')
-                
-                if (blister_pos < 0 or display_pos < blister_pos) and (pack_pos < 0 or display_pos < pack_pos):
-                    return "display"
-            
-            logger.debug(f"Produkt enthält 'display', aber auch andere Produkttypen: '{text}'")
-            return "mixed_or_unclear"
-        return "display"
-    
-    # Blister erkennen - klare Abgrenzung
-    elif re.search(r'\bblister\b|\b3er\s+blister\b|\b3-pack\b|\bsleeve(d)?\s+booster\b|\bcheck\s?lane\b', text):
-        return "blister"
-    
-    # Elite Trainer Box eindeutig erkennen
-    elif re.search(r'\belite trainer box\b|\betb\b|\btrainer box\b', text):
-        return "etb"
-    
-    # Build & Battle Box eindeutig erkennen
-    elif re.search(r'\bbuild\s?[&]?\s?battle\b|\bprerelease\b', text):
-        return "build_battle"
-    
-    # Premium Collectionen oder Special Produkte
-    elif re.search(r'\bpremium\b|\bcollector\b|\bcollection\b|\bspecial\b', text):
-        return "premium"
-
-    # Einzelne Booster erkennen - aber nur wenn "display" definitiv nicht erwähnt wird
-    elif re.search(r'\bbooster\b|\bpack\b', text) and not re.search(r'display', text):
-        return "single_booster"
-    
-    # Wenn nichts erkannt wurde
-    return "unknown"
 
 def discover_collection_urls():
     """
@@ -218,6 +163,11 @@ def discover_collection_urls():
         if not valid_urls:
             logger.warning("Keine Prioritäts-URLs funktionieren, verwende Fallbacks")
             return fallback_urls
+        
+        # Wenn genug Priority-URLs gefunden wurden (mindestens 3), dann reicht das
+        if len(valid_urls) >= 3:
+            logger.info(f"🔍 {len(valid_urls)} Prioritäts-URLs gefunden, überspringe weitere Suche")
+            return valid_urls
         
         # Hauptseiten-Scan nur durchführen, wenn wir noch nicht genug URLs haben
         main_url = "https://tcgviert.com"
@@ -291,10 +241,25 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
         relevant_products = []
         for product in products:
             title = product["title"]
-            if ("journey together" in title.lower() or 
-                "reisegefährten" in title.lower() or 
-                "sv09" in title.lower() or 
-                "kp09" in title.lower()):
+            # Produkttyp aus dem Titel extrahieren
+            product_type = extract_product_type_from_text(title)
+            
+            # Nur Produkte, die in der Suche sind und vom richtigen Typ (nur wenn es Displays im Suchbegriff gibt)
+            is_relevant = False
+            for search_term in keywords_map.keys():
+                search_term_type = extract_product_type_from_text(search_term)
+                
+                # Wenn wir nach Display suchen, nur Displays berücksichtigen
+                if search_term_type == "display" and product_type != "display":
+                    continue
+                
+                # Prüfe auf relevante Begriffe
+                if ("journey together" in title.lower() or "reisegefährten" in title.lower() or 
+                   "sv09" in title.lower() or "kp09" in title.lower()):
+                    is_relevant = True
+                    break
+            
+            if is_relevant:
                 relevant_products.append(product)
         
         logger.info(f"🔍 {len(relevant_products)} relevante Produkte gefunden")
@@ -315,7 +280,7 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
             for search_term, tokens in keywords_map.items():
                 # Extrahiere Produkttyp aus Suchbegriff und Titel
                 search_term_type = extract_product_type_from_text(search_term)
-                title_product_type = extract_product_type(title)
+                title_product_type = extract_product_type_from_text(title)
                 
                 # Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
                 if search_term_type == "display" and title_product_type != "display":
@@ -352,7 +317,7 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
                     url = f"https://tcgviert.com/products/{handle}"
                     
                     # Produkt-Informationen für Batch-Benachrichtigung
-                    product_type = extract_product_type(title)
+                    product_type = extract_product_type_from_text(title)
                     
                     product_data = {
                         "title": title,
@@ -430,12 +395,25 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                     href = link.get("href", "")
                     text = link.get_text().strip()
                     
-                    if not text or "products/" not in href:
+                    if not text or not href:
                         continue
+                    
+                    # Prüfe ob es sich um Produktlinks handelt
+                    is_product_link = ("/products/" in href or 
+                                       "/product/" in href or 
+                                       "detail" in href)
+                    
+                    # Prüfe ob der Link zu Pokémon-Produkten führt
+                    is_pokemon_link = ("pokemon" in href.lower() or 
+                                       "pokemon" in text.lower())
+                                       
+                    # Prüfe ob der Produktname passt
+                    has_right_terms = any(term in href.lower() or term in text.lower() 
+                                        for term in ["journey", "reise", "gefähr", "gefaehr", "sv09", "kp09"])
                     
                     # Vollständige URL erstellen
                     if not href.startswith('http'):
-                        product_url = urljoin(url, href)
+                        product_url = urljoin("https://tcgviert.com", href)
                     else:
                         product_url = href
                     
@@ -443,14 +421,10 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                     if product_url in processed_links:
                         continue
                     
-                    processed_links.add(product_url)
-                    
-                    # Prüfe, ob der Link relevant für Suchbegriffe ist
-                    link_text = text.lower()
-                    if ("journey" in link_text or "reise" in link_text or 
-                        "gefährten" in link_text or "sv09" in link_text or 
-                        "kp09" in link_text):
+                    # Links mit Produktinformationen bevorzugen
+                    if (is_product_link and is_pokemon_link) or has_right_terms:
                         relevant_links.append((product_url, text))
+                        processed_links.add(product_url)
                 
                 # Verarbeite relevante Links
                 for product_url, text in relevant_links:
@@ -462,7 +436,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                     for search_term, tokens in keywords_map.items():
                         # Extrahiere Produkttyp aus Suchbegriff und Linktext
                         search_term_type = extract_product_type_from_text(search_term)
-                        link_product_type = extract_product_type(text)
+                        link_product_type = extract_product_type_from_text(text)
                         
                         # Wenn nach einem Display gesucht wird, aber der Link keins ist, überspringen
                         if search_term_type == "display" and link_product_type != "display":
@@ -489,7 +463,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                             if detail_title:
                                 detail_title_text = detail_title.text.strip()
                                 # Erneute Prüfung auf korrekte Produkttypübereinstimmung
-                                detail_product_type = extract_product_type(detail_title_text)
+                                detail_product_type = extract_product_type_from_text(detail_title_text)
                                 if search_term_type == "display" and detail_product_type != "display":
                                     continue
                                 
@@ -510,7 +484,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                                     status_text = "🎉 Wieder verfügbar!"
                                 
                                 # Produkt-Informationen für Batch-Benachrichtigung
-                                product_type = extract_product_type(text)
+                                product_type = extract_product_type_from_text(text)
                                 
                                 product_data = {
                                     "title": text,
@@ -554,6 +528,9 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                 
                 title = title_elem.text.strip()
                 
+                # Frühe Prüfung auf relevante Produkte - Filter nach Produktart
+                title_product_type = extract_product_type_from_text(title)
+                
                 # Prüfe, ob das Produkt relevant ist
                 title_lower = title.lower()
                 if not ("journey" in title_lower or "reise" in title_lower or 
@@ -583,7 +560,6 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                 for search_term, tokens in keywords_map.items():
                     # Extrahiere Produkttyp aus Suchbegriff und Titel
                     search_term_type = extract_product_type_from_text(search_term)
-                    title_product_type = extract_product_type(title)
                     
                     # Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
                     if search_term_type == "display" and title_product_type != "display":
@@ -595,7 +571,6 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                         break
                 
                 if matched_term:
-                    # Verwende webseitenspezifische Verfügbarkeitsprüfung für tcgviert.com
                     try:
                         # Besuche Produktdetailseite für genaue Verfügbarkeitsprüfung
                         try:
@@ -611,7 +586,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                         if detail_title:
                             detail_title_text = detail_title.text.strip()
                             # Erneute Prüfung auf korrekte Produkttypübereinstimmung
-                            detail_product_type = extract_product_type(detail_title_text)
+                            detail_product_type = extract_product_type_from_text(detail_title_text)
                             if search_term_type == "display" and detail_product_type != "display":
                                 continue
                             
@@ -632,7 +607,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                                 status_text = "🎉 Wieder verfügbar!"
                             
                             # Produkt-Informationen für Batch-Benachrichtigung
-                            product_type = extract_product_type(title)
+                            product_type = extract_product_type_from_text(title)
                             
                             product_data = {
                                 "title": title,
@@ -680,7 +655,7 @@ def generic_scrape_product(url, product_title, product_url, price, status, match
     
     # Extrahiere Produkttyp aus Suchbegriff und Produkttitel
     search_term_type = extract_product_type_from_text(matched_term)
-    product_type = extract_product_type(product_title)
+    product_type = extract_product_type_from_text(product_title)
     
     # Wenn nach einem Display gesucht wird, aber das Produkt keins ist, überspringen
     if search_term_type == "display" and product_type != "display":
