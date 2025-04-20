@@ -1,9 +1,9 @@
-https://tcgviert.com/collections/vorbestellungen
-https://www.comicplanet.de/search?search=reisegef%C3%A4hrten
-https://kofuku.de/collections/pokemon-karten
-https://www.card-corner.de/search/?qs=journey+together
-https://games-island.eu/Pokemon-Booster-Displays
-https://sapphire-cards.de/?s=reisegef%C3%A4hrten&post_type=product&type_aws=true
+https://tcgviert.com/
+https://www.comicplanet.de/
+https://kofuku.de/
+https://www.card-corner.de/
+https://games-island.eu/
+https://sapphire-cards.de/
 https://www.mighty-cards.de/
-https://www.gameware.at/info/spaces/gameware/gamewareSearch?query=reisegef%E4hrten&actionTag=search
-https://fantasiacards.de/collections/pokemon-1
+https://www.gameware.at/
+https://fantasiacards.de/
