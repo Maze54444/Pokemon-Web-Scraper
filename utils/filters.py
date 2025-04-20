@@ -112,26 +112,48 @@ def should_filter_url(url, link_text=None, search_product_type=None, site_id=Non
                         _store_filter_decision(cache_key, True)
                         return True
         
-        # 5. Prüfe Produkt-Typ-Kompatibilität
+        # 5. Wichtig: Strenge Produkttyp-Überprüfung (insbesondere für Displays)
         if search_product_type == "display":
             # Wenn nach Display gesucht wird, filtere Nicht-Display Produkte heraus
             text_product_type = extract_product_type_from_text(normalized_text)
+            
+            # Wenn der Produkttyp erkannt wurde und nicht "display" ist, filtern
             if text_product_type != "unknown" and text_product_type != "display":
                 _store_filter_decision(cache_key, True)
                 return True
+            
+            # Zusätzliche Prüfung: Wenn der Link Text eindeutige Nicht-Display Begriffe enthält
+            non_display_terms = [
+                "3er", "3 er", "3-pack", "blister", "elite trainer", "etb", "top trainer", 
+                "build & battle", "build and battle", "einzelpack", "single pack", "einzelbooster",
+                "premium", "tin", "sleeves", "pin", "mini tin"
+            ]
+            
+            # Genaue Treffer mit Wortgrenzen
+            for term in non_display_terms:
+                if re.search(r'\b' + re.escape(term) + r'\b', normalized_text):
+                    _store_filter_decision(cache_key, True)
+                    return True
             
             # Filtere falsche Serien
             exclusion_sets = [
                 "stürmische funken", "sturmi", "paradox rift", "paradox", "prismat", "stellar", "battle partners",
                 "nebel der sagen", "zeit", "paldea", "obsidian", "151", "astral", "brilliant", "fusion", 
                 "kp01", "kp02", "kp03", "kp04", "kp05", "kp06", "kp07", "kp08", "sv01", "sv02", "sv03", "sv04", 
-                "sv05", "sv06", "sv07", "sv08", "sv10", "sv11", "sv12", "sv13"
+                "sv05", "sv06", "sv07", "sv08", "sv10", "sv11", "sv12", "sv13", 
+                "glory of team rocket"  # Ausnahme für journey together/reisegefährten
             ]
             
+            # Prüfe URL und Text auf falsche Serien
             for exclusion in exclusion_sets:
-                if exclusion in normalized_text:
-                    _store_filter_decision(cache_key, True)
-                    return True
+                if exclusion in normalized_url or exclusion in normalized_text:
+                    # Prüfe, ob wir nach Reisegefährten/Journey Together suchen
+                    if ("reisegefährten" in normalized_url or "journey together" in normalized_url or
+                        "reisegefährten" in normalized_text or "journey together" in normalized_text or
+                        "sv09" in normalized_url or "sv09" in normalized_text or
+                        "kp09" in normalized_url or "kp09" in normalized_text):
+                        _store_filter_decision(cache_key, True)
+                        return True
     
     # Whitelist-Ansatz für Kategorien, wenn aktiviert
     if is_category_link(normalized_url) and CATEGORY_WHITELIST:
@@ -296,7 +318,23 @@ def extract_product_links_from_soup(soup, base_url, search_product_type=None, ma
             # Produktlinks bevorzugen
             if ('/product/' not in href and '/products/' not in href and 
                 '/produkt/' not in href and 'detail' not in href):
-                continue
+                
+                # Spezielle Pfad-Muster für bestimmte Shops prüfen
+                shop_specific_patterns = {
+                    'mighty-cards.de': ['/shop/', '/p'],
+                    'fantasiacards.de': ['/collections/']
+                }
+                
+                match_found = False
+                for shop, patterns in shop_specific_patterns.items():
+                    if shop in base_url:
+                        for pattern in patterns:
+                            if pattern in href:
+                                match_found = True
+                                break
+                
+                if not match_found:
+                    continue
             
             # Vollständige URL erstellen
             if not href.startswith(('http://', 'https://')):
@@ -339,6 +377,13 @@ def filter_product_type(product_title, search_product_type):
     
     # Wenn Display gesucht wird, muss der Titel auch als Display erkannt werden
     if search_product_type == "display":
+        # Sehr strenge Prüfung für Displays
+        if text_product_type in ("unknown", ""):
+            # Bei unbekanntem Typ: Prüfe auf eindeutige Display-Hinweise
+            if re.search(r'\bdisplay\b|\b36er\b|\b36\s+booster\b|\bbooster\s+box\b', product_title):
+                return True
+            return False
+        
         return text_product_type == "display"
     
     # Bei anderen Produkttypen können wir weniger streng sein

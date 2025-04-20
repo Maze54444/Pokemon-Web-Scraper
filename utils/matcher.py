@@ -33,14 +33,18 @@ def extract_product_type_from_text(text):
             r'\b36er\b', 
             r'\b36\s+booster\b', 
             r'\bbooster\s+display\b', 
+            r'\bbox\s+display\b',
+            r'\b36\s+(pack|packs)\b',
             r'\bbooster\s+box\b',
-            r'\bbox\s+display\b'
+            r'\b18er\s+booster\s+display\b',
+            r'\b36er\s+display\b'
         ],
         "etb": [
             r'\belite\s+trainer\s+box\b', 
             r'\betb\b', 
             r'\btrainer\s+box\b', 
-            r'\btop\s+trainer\s+box\b'
+            r'\btop\s+trainer\s+box\b',
+            r'\btop-trainer-box\b'
         ],
         "build_battle": [
             r'\bbuild\s*[&]?\s*battle\b', 
@@ -48,12 +52,13 @@ def extract_product_type_from_text(text):
         ],
         "blister": [
             r'\bblister\b', 
-            r'\b3er\s+blister\b',
+            r'\b3er\s+booster\b',
             r'\b3\s*er\b',
             r'\b3-pack\b', 
             r'\bchecklane\b', 
             r'\bsleeve(d)?\s+booster\b',
-            r'\b3\s*pack\b'
+            r'\b3\s*pack\b',
+            r'\bpremium\s*checklane\b'
         ],
         "single_booster": [
             r'\bsingle\s+booster\b', 
@@ -70,32 +75,74 @@ def extract_product_type_from_text(text):
         ]
     }
     
+    # Stark hervorheben: Wenn "display" und "36" oder "18" im Text vorkommen, ist es definitiv ein Display 
+    # - höchste Priorität, wird immer zuerst geprüft
+    if (re.search(r'\bdisplay\b', text) and 
+        (re.search(r'\b36\b|\b36er\b|\b18\b|\b18er\b', text) or re.search(r'\bbooster\s+box\b', text))):
+        return "display"
+        
+    # Spezifische Codes-Muster, die nur für Displays verwendet werden
+    # SV09/KP09 + (36er/18er oder Display)
+    if (re.search(r'\b(sv0?9|kp0?9)\b', text) and 
+        (re.search(r'\b36er\b|\b18er\b|\bdisplay\b|\bbooster box\b', text))):
+        return "display"
+        
     # Explizit nach "booster pack" oder "pack" suchen, um single booster von displays zu unterscheiden
-    has_booster_pack = re.search(r'\bbooster\s+pack\b|\bpack\b|\bbooster(?!\s+display|\s+box|\s+36|\s*36er)\b', text) is not None
+    has_booster_pack_pattern = r'\bbooster\s+pack\b|\bpack\b|\beinzelpack\b|\bsingle\s*pack\b'
+    has_booster_pack = re.search(has_booster_pack_pattern, text) is not None
     
     # Explizit nach "3er", "3-pack", etc. suchen, um blister zu identifizieren
-    has_3pack_or_blister = re.search(r'\b3er\b|\b3-pack\b|\b3\s+pack\b|\bblister\b|\b3\s*er\b', text) is not None
+    blister_pattern = r'\b3er\b|\b3-pack\b|\b3\s+pack\b|\bblister\b|\b3\s*er\b|\bchecklane\b'
+    has_3pack_or_blister = re.search(blister_pattern, text) is not None
     
     # Jedes Muster prüfen und den ersten Treffer zurückgeben
     for product_type, patterns in product_patterns.items():
         for pattern in patterns:
             if re.search(pattern, text):
                 # Vermeidung von Fehlklassifikationen:
+                
                 # Wenn wir "display" gefunden haben, prüfen wir ob auch "3er"/"blister" vorhanden ist
                 if product_type == "display" and has_3pack_or_blister:
-                    return "blister"  # Priorität für blister bei Mehrdeutigkeit
+                    # In diesem Fall handelt es sich wahrscheinlich um ein Blister-Produkt
+                    logger.debug(f"Produkt enthält 'display', aber auch blister/3er: '{text}' → als blister klassifiziert")
+                    return "blister"
                 
-                # Wenn wir "display" gefunden haben und "booster pack" steht definitiv im Titel, 
+                # Wenn wir "display" gefunden haben und einzelne Booster-Muster definitiv im Titel stehen, 
                 # dann ist es kein Display, sondern einzelne Booster
                 if product_type == "display" and has_booster_pack:
+                    # Check für spezielle Display-Kennzeichen, die stärker sind als Booster-Pack
+                    if re.search(r'\b36er\b|\b36\s+booster\b|\b18er\b|\b18\s+booster\b', text):
+                        # Bei expliziter Anzahl von Boostern (36/18) ist es ein Display trotz "Pack" im Namen
+                        return "display"
+                    logger.debug(f"Produkt enthält 'display', aber auch 'booster pack': '{text}' → als single_booster klassifiziert")
                     return "single_booster"
+                
+                # Wenn "booster" und "Preis unter 10€" gefunden wird, ist es sehr wahrscheinlich ein einzelner Booster
+                if product_type == "display" and re.search(r'\b\d[,\.]\d{2}\s*[€$]', text):
+                    # Extrahiere Preis und prüfe, ob er unter 10€ liegt
+                    price_match = re.search(r'(\d+[,\.]\d{2})\s*[€$]', text)
+                    if price_match:
+                        price_str = price_match.group(1).replace(',', '.')
+                        try:
+                            price = float(price_str)
+                            if price < 10.0:
+                                logger.debug(f"Produkt enthält 'display', aber Preis unter 10€ ({price}€): '{text}' → als single_booster klassifiziert")
+                                return "single_booster"
+                        except ValueError:
+                            pass
                 
                 return product_type
     
     # Spezialfall für einzelne Booster erkennen (ohne "display" im Text)
     if has_booster_pack or (re.search(r'\bbooster\b', text) and not re.search(r'display|36er|box', text)):
+        # Wenn "Booster" alleine steht, ohne "display" oder "36er", dann ist es ein einzelner Booster
         return "single_booster"
     
+    # Wenn wir hier sind, haben wir keinen eindeutigen Produkttyp erkannt
+    # Nochmal spezifische Muster für Display-Produkte prüfen
+    if re.search(r'36\s*(x|\*)', text) or re.search(r'booster\s*box', text, re.IGNORECASE):
+        return "display"
+        
     return "unknown"  # Default: Wenn kein klarer Produkttyp erkannt wurde
 
 def is_product_type_match(search_type, text_type):
@@ -151,7 +198,7 @@ def is_keyword_in_text(keywords, text, log_level='DEBUG'):
     if search_product_type == "display":
         if text_product_type != "display":
             if log_level and log_level != 'None':
-                logger.debug(f"Produkttyp-Konflikt: Suche nach 'display', Text enthält '{text_product_type}': {original_text}")
+                logger.debug(f"⚠️ Produkttyp-Konflikt: Suche nach 'display', Text enthält '{text_product_type}': {original_text}")
             return False
     
     # Prüfe auf falsche Kartensets und veraltete Produkte
@@ -159,20 +206,21 @@ def is_keyword_in_text(keywords, text, log_level='DEBUG'):
         "stürmische funken", "sturmi", "paradox rift", "paradox", "prismat", "stellar", "battle partners",
         "nebel der sagen", "zeit", "paldea", "obsidian", "151", "astral", "brilliant", "fusion", 
         "kp01", "kp02", "kp03", "kp04", "kp05", "kp06", "kp07", "kp08", "sv01", "sv02", "sv03", "sv04", 
-        "sv05", "sv06", "sv07", "sv08", "sv10", "sv11", "sv12", "sv13"
+        "sv05", "sv06", "sv07", "sv08", "sv10", "sv11", "sv12", "sv13", "the glory of team rocket",
+        "glory of team rocket"
     ]
     
-    # Prüfe spezifische Produkte - wenn wir nach "Journey Together" oder "Reisegefährten" suchen
+    # Spezifische Ausschlüsse nur bei Suchbegriffen zu Journey Together/Reisegefährten
     has_journey_together = "journey together" in search_term.lower() or "sv09" in search_term.lower()
     has_reisegefaehrten = "reisegefährten" in search_term.lower() or "kp09" in search_term.lower()
     
-    # Wenn wir nach einem spezifischen Produkt suchen
-    if has_journey_together or has_reisegefaehrten:
+    # Wenn wir nach einem spezifischen Produkt suchen, prüfen wir auf falsche Sets
+    if (has_journey_together or has_reisegefaehrten) and search_product_type == "display":
         # Prüfen wir auf falsche Sets/Editionen, um andere Produkte auszuschließen
         for exclusion in exclusion_sets:
             if exclusion in text.lower():
                 if log_level and log_level != 'None':
-                    logger.debug(f"Text enthält ausgeschlossenes Set '{exclusion}': '{original_text}'")
+                    logger.debug(f"⚠️ Text enthält ausgeschlossenes Set '{exclusion}': '{original_text}'")
                 return False
     
     # Standardisiere Singular/Plural
@@ -217,7 +265,7 @@ def is_keyword_in_text(keywords, text, log_level='DEBUG'):
     # Bei Suche nach "display", muss "display" oder "36er" oder "box" im Text vorkommen
     if search_product_type == "display" and not any(term in standardized_text for term in ["display", "36er", "box", "36"]):
         if log_level and log_level != 'None':
-            logger.debug(f"'display' im Suchbegriff, aber kein Display-Begriff im Text gefunden: '{original_keywords}' in '{original_text}'")
+            logger.debug(f"⚠️ 'display' im Suchbegriff, aber kein Display-Begriff im Text gefunden: '{original_keywords}' in '{original_text}'")
         return False
     
     # Mindestens 80% der wichtigen Keywords müssen gefunden werden
@@ -226,11 +274,11 @@ def is_keyword_in_text(keywords, text, log_level='DEBUG'):
     
     if found_count < required_matches:
         if log_level and log_level != 'None' and important_keywords:
-            logger.debug(f"Nicht genug wichtige Begriffe gefunden ({found_count}/{len(important_keywords)}): '{original_keywords}' in '{original_text}'")
+            logger.debug(f"⚠️ Nicht genug wichtige Begriffe gefunden ({found_count}/{len(important_keywords)}): '{original_keywords}' in '{original_text}'")
         return False
     
     if log_level and log_level == 'INFO':
-        logger.info(f"Treffer für Suchbegriff: '{original_keywords}' in '{original_text}'")
+        logger.info(f"✅ Treffer für Suchbegriff: '{original_keywords}' in '{original_text}'")
         
     return True
 

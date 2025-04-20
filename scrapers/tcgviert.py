@@ -29,10 +29,26 @@ def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
     html_matches = []
     all_products = []  # Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
     
+    # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
+    search_product_type = None
+    if keywords_map:
+        sample_search_term = list(keywords_map.keys())[0]
+        search_product_type = extract_product_type_from_text(sample_search_term)
+        logger.debug(f"🔍 Suche nach Produkttyp: '{search_product_type}'")
+    
+    # Set für Deduplizierung von gefundenen Produkten innerhalb eines Durchlaufs
+    found_product_ids = set()
+    
     # Versuche beide Methoden und kombiniere die Ergebnisse
     try:
         json_matches, json_products = scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available)
-        all_products.extend(json_products)
+        
+        # Deduplizierung für die gefundenen Produkte
+        for product in json_products:
+            product_id = create_product_id(product["title"])
+            if product_id not in found_product_ids:
+                all_products.append(product)
+                found_product_ids.add(product_id)
     except Exception as e:
         logger.error(f"❌ Fehler beim JSON-Scraping: {e}", exc_info=True)
     
@@ -42,7 +58,13 @@ def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
         main_page_urls = discover_collection_urls()
         if main_page_urls:
             html_matches, html_products = scrape_tcgviert_html(main_page_urls, keywords_map, seen, out_of_stock, only_available)
-            all_products.extend(html_products)
+            
+            # Deduplizierung für die gefundenen Produkte
+            for product in html_products:
+                product_id = create_product_id(product["title"])
+                if product_id not in found_product_ids:
+                    all_products.append(product)
+                    found_product_ids.add(product_id)
     except Exception as e:
         logger.error(f"❌ Fehler beim HTML-Scraping: {e}", exc_info=True)
     
@@ -143,6 +165,18 @@ def discover_collection_urls():
         # Bei Fehlern direkt zu diesen URLs wechseln
         fallback_urls = ["https://tcgviert.com/collections/all"]
         
+        # Spezifische URLs für SV09/KP09 Produkte
+        display_specific_urls = [
+            "https://tcgviert.com/products/pokemon-tcg-journey-together-sv09-36er-display-en-max-1-per-person",
+            "https://tcgviert.com/products/pokemon-tcg-reisegefahrten-kp09-36er-display-de-max-1-pro-person"
+        ]
+        
+        # Diese direkt zu den validen URLs hinzufügen
+        for url in display_specific_urls:
+            if url not in valid_urls:
+                valid_urls.append(url)
+                logger.info(f"✅ Direkte Produkt-URL hinzugefügt: {url}")
+        
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
@@ -221,6 +255,13 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
     new_matches = []
     all_products = []  # Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
     
+    # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
+    search_product_type = None
+    if keywords_map:
+        sample_search_term = list(keywords_map.keys())[0]
+        search_product_type = extract_product_type_from_text(sample_search_term)
+        logger.debug(f"🔍 Suche nach Produkttyp mittels JSON-API: '{search_product_type}'")
+    
     try:
         # Versuche zuerst den JSON-Endpunkt mit kürzerem Timeout
         response = requests.get("https://tcgviert.com/products.json", timeout=8)
@@ -266,14 +307,37 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
         
         # Falls keine relevanten Produkte direkt gefunden wurden, prüfe alle
         if not relevant_products:
-            relevant_products = products
+            # Suche nach Display-Produkten in allen Produkten, wenn nach Display gesucht wird
+            if search_product_type == "display":
+                for product in products:
+                    title = product["title"]
+                    product_type = extract_product_type_from_text(title)
+                    
+                    # Nur Displays hinzufügen
+                    if product_type == "display" and (
+                        "journey together" in title.lower() or 
+                        "reisegefährten" in title.lower() or 
+                        "sv09" in title.lower() or 
+                        "kp09" in title.lower()):
+                        relevant_products.append(product)
+            
+            # Wenn immer noch nichts gefunden, verwende alle Produkte
+            if not relevant_products:
+                relevant_products = products
         
+        # Set für Deduplizierung von gefundenen Produkten innerhalb eines Durchlaufs
+        found_product_ids = set()
+                
         for product in relevant_products:
             title = product["title"]
             handle = product["handle"]
             
             # Erstelle eine eindeutige ID basierend auf den Produktinformationen
             product_id = create_product_id(title)
+            
+            # Deduplizierung innerhalb eines Durchlaufs
+            if product_id in found_product_ids:
+                continue
             
             # Prüfe jeden Suchbegriff gegen den Produkttitel mit reduziertem Logging
             matched_term = None
@@ -332,6 +396,7 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
                     
                     all_products.append(product_data)
                     new_matches.append(product_id)
+                    found_product_ids.add(product_id)
                     logger.info(f"✅ Neuer Treffer gefunden (JSON): {title} - {status_text}")
         
     except Exception as e:
@@ -347,10 +412,23 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
     new_matches = []
     all_products = []  # Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
     
+    # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
+    search_product_type = None
+    if keywords_map:
+        sample_search_term = list(keywords_map.keys())[0]
+        search_product_type = extract_product_type_from_text(sample_search_term)
+        logger.debug(f"🔍 Suche nach Produkttyp mittels HTML: '{search_product_type}'")
+    
     # Cache für bereits verarbeitete Links
     processed_links = set()
     
+    # Set für Deduplizierung von gefundenen Produkten innerhalb eines Durchlaufs
+    found_product_ids = set()
+    
     for url in urls:
+        # Überprüfe, ob es sich um eine direkte Produkt-URL handelt
+        is_product_url = '/products/' in url
+        
         try:
             logger.info(f"🔍 Durchsuche {url}")
             headers = {
@@ -367,6 +445,71 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                 continue
             
             soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Wenn es sich um eine direkte Produkt-URL handelt, diese direkt verarbeiten
+            if is_product_url:
+                # Extrahiere Titel
+                title_elem = soup.find('h1', {'class': 'product-single__title'}) or soup.find('h1')
+                if not title_elem:
+                    continue
+                
+                title = title_elem.text.strip()
+                product_url = url
+                
+                # Erstelle eine eindeutige ID
+                product_id = create_product_id(title)
+                
+                # Prüfe jeden Suchbegriff gegen den Titel
+                matched_term = None
+                for search_term, tokens in keywords_map.items():
+                    # Extrahiere Produkttyp aus Suchbegriff und Titel
+                    search_term_type = extract_product_type_from_text(search_term)
+                    title_product_type = extract_product_type_from_text(title)
+                    
+                    # Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
+                    if search_term_type == "display" and title_product_type != "display":
+                        continue
+                    
+                    # Strikte Keyword-Prüfung
+                    if is_keyword_in_text(tokens, title, log_level='None'):
+                        matched_term = search_term
+                        break
+                
+                if matched_term and product_id not in found_product_ids:
+                    # Verwende das neue Modul zur Verfügbarkeitsprüfung
+                    is_available, price, status_text = detect_availability(soup, product_url)
+                    
+                    # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
+                    should_notify, is_back_in_stock = update_product_status(
+                        product_id, is_available, seen, out_of_stock
+                    )
+                    
+                    if should_notify and (not only_available or is_available):
+                        # Status-Text aktualisieren, wenn Produkt wieder verfügbar ist
+                        if is_back_in_stock:
+                            status_text = "🎉 Wieder verfügbar!"
+                        
+                        # Produkt-Informationen für Batch-Benachrichtigung
+                        product_type = extract_product_type_from_text(title)
+                        
+                        product_data = {
+                            "title": title,
+                            "url": product_url,
+                            "price": price,
+                            "status_text": status_text,
+                            "is_available": is_available,
+                            "matched_term": matched_term,
+                            "product_type": product_type,
+                            "shop": "tcgviert.com"
+                        }
+                        
+                        all_products.append(product_data)
+                        new_matches.append(product_id)
+                        found_product_ids.add(product_id)
+                        logger.info(f"✅ Neuer Treffer gefunden (direkte Produkt-URL): {title} - {status_text}")
+                
+                # Bei direkter Produkt-URL keine weitere Verarbeitung nötig
+                continue
             
             # Versuche verschiedene CSS-Selektoren für Produktkarten
             product_selectors = [
@@ -430,6 +573,10 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                 for product_url, text in relevant_links:
                     # Erstelle eine eindeutige ID
                     product_id = create_product_id(text)
+                    
+                    # Deduplizierung innerhalb eines Durchlaufs
+                    if product_id in found_product_ids:
+                        continue
                     
                     # Prüfe jeden Suchbegriff gegen den Linktext
                     matched_term = None
@@ -499,6 +646,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                                 
                                 all_products.append(product_data)
                                 new_matches.append(product_id)
+                                found_product_ids.add(product_id)
                                 logger.info(f"✅ Neuer Treffer gefunden (HTML-Link): {text} - {status_text}")
                         except Exception as e:
                             logger.warning(f"Fehler beim Prüfen der Produktdetails: {e}")
@@ -554,6 +702,10 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                 
                 # Erstelle eine eindeutige ID basierend auf den Produktinformationen
                 product_id = create_product_id(title)
+                
+                # Deduplizierung innerhalb eines Durchlaufs
+                if product_id in found_product_ids:
+                    continue
                 
                 # Prüfe jeden Suchbegriff gegen den Produkttitel
                 matched_term = None
@@ -622,6 +774,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                             
                             all_products.append(product_data)
                             new_matches.append(product_id)
+                            found_product_ids.add(product_id)
                             logger.info(f"✅ Neuer Treffer gefunden (HTML): {title} - {status_text}")
                     except Exception as e:
                         logger.warning(f"Fehler beim Prüfen der Verfügbarkeit: {e}")

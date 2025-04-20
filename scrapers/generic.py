@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 
 from utils.matcher import clean_text, is_keyword_in_text, normalize_product_name, extract_product_type_from_text
-from utils.telegram import send_telegram_message, escape_markdown, send_product_notification
+from utils.telegram import send_telegram_message, escape_markdown, send_product_notification, send_batch_notification
 from utils.stock import get_status_text, update_product_status
 from utils.availability import detect_availability
 
@@ -104,6 +104,10 @@ DOMAIN_FILTERS = {
     "sapphire-cards.de": [
         "einzelkarten", "singles", "sleeves",
         "deckboxen", "binder", "dice", "würfel", "playmats",
+    ],
+    "fantasiacards.de": [
+        "einzelkarten", "singles", "sleeves", "zubehör",
+        "miniatur", "plush", "zubehör", "/manga", "/comics"
     ]
 }
 
@@ -190,7 +194,8 @@ def should_filter_url(url, link_text=""):
     # 3. Zusätzliche Heuristiken für Produktlinks vs. andere Seiten
     if "/category/" in normalized_url or "/collection/" in normalized_url:
         # Kategorieseiten nur zulassen, wenn sie relevante Begriffe enthalten
-        relevant_keywords = ["pokemon", "display", "booster", "karmesin", "purpur", "scarlet", "violet"]
+        relevant_keywords = ["pokemon", "display", "booster", "karmesin", "purpur", "scarlet", "violet",
+                            "reisegefährten", "journey together", "sv09", "kp09"]
         if not any(keyword in normalized_url for keyword in relevant_keywords) and not any(keyword in normalized_text for keyword in relevant_keywords):
             return True
             
@@ -232,6 +237,19 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
     # Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
     all_products = []
     
+    # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
+    search_product_type = None
+    if current_keywords:
+        sample_search_term = current_keywords[0]
+        search_product_type = extract_product_type_from_text(sample_search_term)
+        logger.debug(f"🔍 Suche nach Produkttyp: '{search_product_type}' basierend auf '{sample_search_term}'")
+    
+    # URL-Hash zur eindeutigen Identifikation von URLs mit dynamischen Parametern
+    url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:10]
+    
+    # Set für Deduplizierung von gefundenen Produkten innerhalb eines Durchlaufs
+    found_product_ids = set()
+    
     try:
         # User-Agent setzen, um Blockierung zu vermeiden
         headers = {
@@ -241,6 +259,54 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
         # Prüfen, ob wir gecachte Produktpfade für diese Domain haben
         domain_paths = product_cache.get(site_id, {})
         
+        # Spezielle Behandlung für bekannte Shops mit spezifischen Pfadmustern
+        if site_id == "mighty-cards.de" and not domain_paths:
+            logger.info(f"🔍 Spezielle Pfadmuster für {site_id} werden verwendet")
+            # Manuelle Pfadmuster für Mighty-Cards
+            shop_paths = [
+                "/shop/SV09-Journey-Togehter-36er-Booster-Display-Pokemon",
+                "/shop/KP09-Reisegefahrten-36er-Booster-Display-Pokemon",
+                "/shop/KP09-Reisegefahrten-18er-Booster-Display-Pokemon",
+                "/pokemon/reisegefahrten-journey-together/"
+            ]
+            
+            # Füge manuelle Pfade zum Cache hinzu
+            for shop_path in shop_paths:
+                path_url = f"https://{site_id}{shop_path}"
+                product_id = f"{site_id}_{hashlib.md5(path_url.encode()).hexdigest()[:8]}"
+                domain_paths[product_id] = {
+                    "url": path_url,
+                    "term": current_keywords[0] if current_keywords else "Reisegefährten display",
+                    "last_checked": 0,  # Erzwinge Überprüfung
+                    "is_available": False
+                }
+            
+            # Speichere diese Pfade im Cache
+            product_cache[site_id] = domain_paths
+        
+        # Spezielle Behandlung für FantasiaCards
+        elif site_id == "fantasiacards.de" and not domain_paths:
+            logger.info(f"🔍 Spezielle Pfadmuster für {site_id} werden verwendet")
+            # Manuelle Pfade für FantasiaCards
+            shop_paths = [
+                "/products/pokemon-journey-together-display-eng",
+                "/collections/pokemon-1"
+            ]
+            
+            # Füge manuelle Pfade zum Cache hinzu
+            for shop_path in shop_paths:
+                path_url = f"https://{site_id}{shop_path}"
+                product_id = f"{site_id}_{hashlib.md5(path_url.encode()).hexdigest()[:8]}"
+                domain_paths[product_id] = {
+                    "url": path_url,
+                    "term": current_keywords[0] if current_keywords else "Journey Together display",
+                    "last_checked": 0,  # Erzwinge Überprüfung
+                    "is_available": False
+                }
+            
+            # Speichere diese Pfade im Cache
+            product_cache[site_id] = domain_paths
+        
         if domain_paths and not full_scan_needed:
             logger.info(f"🔍 Nutze {len(domain_paths)} gecachte Produktpfade für {site_id}")
             
@@ -249,6 +315,10 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
             
             # Nur die bereits bekannten Produktseiten prüfen
             for product_id, product_info in list(domain_paths.items()):  # list() erstellen um während Iteration zu löschen
+                # Ignoriere Cache-Key Einträge
+                if product_id == cache_key:
+                    continue
+                
                 # Zähler für Produkte erhöhen
                 checked_products += 1
                 
@@ -293,7 +363,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     
                     # Extrahiere Produkttyp aus Suchbegriff und Titel
                     search_term_type = extract_product_type_from_search_term(matched_term)
-                    title_product_type = extract_product_type(link_text)
+                    title_product_type = extract_product_type_from_text(link_text)
                     
                     # Wenn nach einem Display gesucht wird, aber der Titel etwas anderes enthält, überspringen
                     if search_term_type == "display" and title_product_type != "display":
@@ -325,7 +395,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             product_id, is_available, seen, out_of_stock
                         )
                         
-                        if should_notify:
+                        if should_notify and (not only_available or is_available):
                             # Wenn Produkt wieder verfügbar ist, anpassen
                             if is_back_in_stock:
                                 status_text = "🎉 Wieder verfügbar!"
@@ -345,9 +415,12 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                                 "shop": site_id
                             }
                             
-                            all_products.append(product_data)
-                            new_matches.append(product_id)
-                            logger.info(f"✅ Cache-Treffer: {link_text} - {status_text}")
+                            # Deduplizierung innerhalb eines Durchlaufs
+                            if product_id not in found_product_ids:
+                                all_products.append(product_data)
+                                new_matches.append(product_id)
+                                found_product_ids.add(product_id)
+                                logger.info(f"✅ Cache-Treffer: {link_text} - {status_text}")
                     else:
                         logger.debug(f"✓ Keine Änderung für {product_url}")
                         
@@ -395,7 +468,12 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     continue
                 
                 # Nur Links mit Produktnamen-ähnlichem Text oder Produkt-Pfad verfolgen
-                if '/product/' in href or '/products/' in href or 'detail' in href:
+                if '/product/' in href or '/products/' in href or '/produkt/' in href or 'detail' in href:
+                    potential_product_links.append((href, a_tag.get_text().strip()))
+                    continue
+                
+                # Spezielle Behandlung für Mighty-Cards
+                if site_id == "mighty-cards.de" and ('/shop/' in href or '/p' in href):
                     potential_product_links.append((href, a_tag.get_text().strip()))
                     continue
                 
@@ -405,7 +483,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     search_term_type = extract_product_type_from_search_term(search_term)
                     
                     # Bei Display-Suchbegriffen: auch ersten Check machen, ob der Linktext Display enthält
-                    if search_term_type == "display" and "display" not in link_text.lower():
+                    if search_term_type == "display" and not any(term in link_text for term in ["display", "36er", "booster box"]):
                         continue
                     
                     if is_keyword_in_text(tokens, link_text, log_level='None'):
@@ -429,12 +507,16 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 # Eindeutige ID für diesen Fund erstellen
                 product_id = create_product_id(link_text, site_id=site_id)
                 
+                # Deduplizierung innerhalb eines Durchlaufs - überspringen, wenn bereits geprüft
+                if product_id in found_product_ids:
+                    continue
+                
                 # Prüfe jeden Suchbegriff gegen den Linktext
                 matched_term = None
                 for search_term, tokens in keywords_map.items():
                     # Extrahiere Produkttyp aus dem Suchbegriff und dem Link-Text
                     search_term_type = extract_product_type_from_search_term(search_term)
-                    link_product_type = extract_product_type(link_text)
+                    link_product_type = extract_product_type_from_text(link_text)
                     
                     # VERBESSERT: Wenn nach einem Display gesucht wird, aber der Link keins ist, überspringen
                     if search_term_type == "display" and link_product_type != "display":
@@ -478,7 +560,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             tokens = keywords_map.get(matched_term, [])
                             
                             # Extrahiere Produkttyp aus dem Detailtitel
-                            detail_product_type = extract_product_type(detail_title_text)
+                            detail_product_type = extract_product_type_from_text(detail_title_text)
                             search_term_type = extract_product_type_from_search_term(matched_term)
                             
                             # Wenn nach Display gesucht wird, muss der Detailtitel auch Display sein
@@ -511,7 +593,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             "price": price,
                             "last_checked": time.time(),
                             "fingerprint": fingerprint,
-                            "product_type": extract_product_type(link_text)  # Speichere auch den Produkttyp
+                            "product_type": extract_product_type_from_text(link_text)  # Speichere auch den Produkttyp
                         }
                         
                     except Exception as e:
@@ -531,22 +613,25 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                         status_text = get_status_text(is_available, is_back_in_stock)
                     
                     # Produkt-Informationen sammeln für Batch-Benachrichtigung
-                    product_type = extract_product_type(link_text)
+                    product_type = extract_product_type_from_text(link_text)
                     
-                    product_data = {
-                        "title": link_text,
-                        "url": product_url,
-                        "price": price,
-                        "status_text": status_text,
-                        "is_available": is_available,
-                        "matched_term": matched_term,
-                        "product_type": product_type,
-                        "shop": site_id
-                    }
-                    
-                    all_products.append(product_data)
-                    new_matches.append(product_id)
-                    logger.info(f"✅ Neuer Treffer gefunden: {link_text} - {status_text}")
+                    # Deduplizierung innerhalb eines Durchlaufs
+                    if product_id not in found_product_ids:
+                        product_data = {
+                            "title": link_text,
+                            "url": product_url,
+                            "price": price,
+                            "status_text": status_text,
+                            "is_available": is_available,
+                            "matched_term": matched_term,
+                            "product_type": product_type,
+                            "shop": site_id
+                        }
+                        
+                        all_products.append(product_data)
+                        new_matches.append(product_id)
+                        found_product_ids.add(product_id)
+                        logger.info(f"✅ Neuer Treffer gefunden: {link_text} - {status_text}")
             
             # Aktualisiere die Liste der bekannten Keywords im Cache
             product_cache[cache_key] = current_keywords
@@ -556,7 +641,6 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
     
         # Sende Benachrichtigungen sortiert nach Verfügbarkeit
         if all_products:
-            from utils.telegram import send_batch_notification
             send_batch_notification(all_products)
     
     except Exception as e:
@@ -584,7 +668,7 @@ def check_product_availability(url, headers):
     
     soup = BeautifulSoup(response.text, "html.parser")
     
-# Verwende das Availability-Modul für webseitenspezifische Erkennung
+    # Verwende das Availability-Modul für webseitenspezifische Erkennung
     is_available, price, status_text = detect_availability(soup, url)
     
     logger.debug(f"  - Verfügbarkeit für {url}: {status_text}")
@@ -599,44 +683,7 @@ def extract_product_type(text):
     :param text: Text, aus dem der Produkttyp extrahiert werden soll
     :return: Produkttyp als String
     """
-    if not text:
-        return "unknown"
-    
-    text = text.lower()
-    
-    # Display erkennen - höchste Priorität und strenge Prüfung
-    if re.search(r'\bdisplay\b|\b36er\b|\b36\s+booster\b|\bbooster\s+display\b|\bbox\s+display\b', text):
-        # Zusätzliche Prüfung: Wenn andere Produkttypen erwähnt werden, ist es möglicherweise kein Display
-        if re.search(r'\bblister\b|\bpack\b|\bbuilder\b|\bbuild\s?[&]?\s?battle\b|\betb\b|\belite trainer box\b', text):
-            # Prüfe, ob "display" tatsächlich prominenter ist als andere Erwähnungen
-            if text.find('display') < text.find('blister') and text.find('display') < text.find('pack'):
-                return "display"
-            logger.debug(f"  [DEBUG] Produkt enthält 'display', aber auch andere Produkttypen: '{text}'")
-            return "mixed_or_unclear"
-        return "display"
-    
-    # Blister erkennen - klare Abgrenzung
-    elif re.search(r'\bblister\b|\b3er\s+blister\b|\b3-pack\b|\bsleeve(d)?\s+booster\b|\bcheck\s?lane\b', text):
-        return "blister"
-    
-    # Elite Trainer Box eindeutig erkennen
-    elif re.search(r'\belite trainer box\b|\betb\b|\btrainer box\b', text):
-        return "etb"
-    
-    # Build & Battle Box eindeutig erkennen
-    elif re.search(r'\bbuild\s?[&]?\s?battle\b|\bprerelease\b', text):
-        return "build_battle"
-    
-    # Premium Collectionen oder Special Produkte
-    elif re.search(r'\bpremium\b|\bcollection\b|\bspecial\b', text):
-        return "premium"
-
-    # Einzelne Booster erkennen - aber nur wenn "display" definitiv nicht erwähnt wird
-    elif re.search(r'\bbooster\b|\bpack\b', text) and not re.search(r'display', text):
-        return "single_booster"
-    
-    # Wenn nichts erkannt wurde
-    return "unknown"
+    return extract_product_type_from_text(text)
 
 def create_product_id(product_title, site_id="generic"):
     """
@@ -670,17 +717,17 @@ def extract_product_info(title):
     :return: Tupel mit (series_code, product_type, language)
     """
     # Extrahiere Sprache (DE/EN/JP)
-    if "(DE)" in title or "pro Person" in title or "deutsch" in title.lower():
+    if "(DE)" in title or "pro Person" in title or "deutsch" in title.lower() or "deu" in title.lower():
         language = "DE"
-    elif "(EN)" in title or "per person" in title or "english" in title.lower():
+    elif "(EN)" in title or "per person" in title or "english" in title.lower() or "eng" in title.lower():
         language = "EN"
-    elif "(JP)" in title or "japan" in title.lower():
+    elif "(JP)" in title or "japan" in title.lower() or "jpn" in title.lower():
         language = "JP"
     else:
         language = "UNK"
     
     # Extrahiere Produkttyp mit der verbesserten Funktion
-    detected_type = extract_product_type(title)
+    detected_type = extract_product_type_from_text(title)
     if detected_type != "unknown":
         product_type = detected_type
     else:

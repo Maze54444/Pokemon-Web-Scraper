@@ -32,10 +32,16 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
     # Verwende ein Set, um bereits verarbeitete URLs zu speichern und Duplikate zu vermeiden
     processed_urls = set()
     
+    # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
+    search_product_type = None
+    if keywords_map:
+        sample_search_term = list(keywords_map.keys())[0]
+        search_product_type = extract_product_type_from_text(sample_search_term)
+        logger.debug(f"🔍 Suche nach Produkttyp: '{search_product_type}'")
+    
     # Reduzierte und aktualisierte Liste der direkten Produkt-URLs
-    # Basierend auf den Log-Auswertungen wurden 404-URLs entfernt
+    # Nur präzise funktionierende URLs
     direct_urls = [
-        # Aktuellste und funktionierende URL basierend auf den Logs
         "https://sapphire-cards.de/produkt/pokemon-journey-together-reisegefaehrten-booster-box-display/"
     ]
     
@@ -124,9 +130,16 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
                 
                 for link in all_links:
                     href = link.get('href', '')
+                    link_text = link.get_text().lower()
+                    
+                    # Eindeutige Produktlinks
                     if '/produkt/' in href and href not in product_links and href not in processed_urls:
-                        if any(keyword in href.lower() for keyword in relevant_keywords) or \
-                           any(keyword in link.get_text().lower() for keyword in relevant_keywords):
+                        # Bei Suche nach Display: Prüfe zusätzlich auf Display-Hinweise im Text/URL
+                        if search_product_type == "display":
+                            if any(keyword in href.lower() for keyword in relevant_keywords) and any(display_term in link_text for display_term in ["display", "36er", "box"]):
+                                product_links.append(href)
+                        # Bei anderer Suche oder unbekanntem Typ: Nur nach relevanten Keywords filtern
+                        elif any(keyword in href.lower() for keyword in relevant_keywords) or any(keyword in link_text for keyword in relevant_keywords):
                             product_links.append(href)
                 
                 logger.info(f"🔍 {len(product_links)} potenzielle Produktlinks gefunden")
@@ -347,6 +360,17 @@ def process_product_url(product_url, keywords_map, seen, out_of_stock, only_avai
                     
                 if "36 booster" in product_description or "display mit 36" in product_description:
                     title_product_type = "display"
+        
+        # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
+        search_product_type = None
+        if keywords_map:
+            sample_search_term = list(keywords_map.keys())[0]
+            search_product_type = extract_product_type_from_text(sample_search_term)
+        
+        # Strenge Prüfung: Wenn nach Display gesucht wird, muss es ein Display sein
+        if search_product_type == "display" and title_product_type != "display":
+            logger.debug(f"⚠️ Produkttyp-Konflikt: Suche nach 'display', aber Titel enthält '{title_product_type}': {title}")
+            return False
         
         # Prüfe jeden Suchbegriff gegen den Titel
         matched_terms = []
