@@ -3,8 +3,9 @@ import logging
 import re
 import time
 import json
+import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, quote_plus
+from urllib.parse import urljoin, quote_plus, urlparse, parse_qs
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text
 from utils.stock import get_status_text, update_product_status
 from utils.availability import detect_availability
@@ -12,9 +13,13 @@ from utils.availability import detect_availability
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
 
+# Konstanten für Ecwid-API
+ECWID_STORE_ID = "10031257"
+ECWID_BASE_URL = "https://app.ecwid.com"
+
 def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, min_price=None, max_price=None):
     """
-    Spezieller Scraper für mighty-cards.de
+    Spezieller Scraper für mighty-cards.de mit Ecwid-Integration
     
     :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
     :param seen: Set mit bereits gesehenen Produkttiteln
@@ -24,41 +29,19 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
     :param max_price: Maximaler Preis für Produktbenachrichtigungen
     :return: Liste der neuen Treffer
     """
-    logger.info("🌐 Starte speziellen Scraper für mighty-cards.de")
+    logger.info("🌐 Starte speziellen Scraper für mighty-cards.de mit Ecwid-Integration")
     new_matches = []
     all_products = []  # Liste für alle gefundenen Produkte
     
     # Set für Deduplizierung von gefundenen Produkten
     found_product_ids = set()
     
-    # Hardcoded Beispiel-URLs für bekannte Produkte
-    # Diese sollten nur als Backup dienen, wenn die Suche nicht funktioniert
+    # Hardcoded Beispiel-URLs für bekannte Produkte als letzter Fallback
     hardcoded_urls = [
         "https://www.mighty-cards.de/shop/SV09-Journey-Togehter-36er-Booster-Display-Pokemon-p743684893",
         "https://www.mighty-cards.de/shop/KP09-Reisegefahrten-36er-Booster-Display-Pokemon-p739749306",
         "https://www.mighty-cards.de/shop/KP09-Reisegefahrten-18er-Booster-Display-Pokemon-p739750556"
     ]
-    
-    # Kategorie-URL für Pokémon-Produkte
-    category_urls = [
-        "https://www.mighty-cards.de/pokemon/"
-    ]
-    
-    # Dynamische Erstellung von Suchanfragen basierend auf den Keywords
-    search_urls = []
-    for search_term in keywords_map.keys():
-        # URL-Encoding für die Suche
-        encoded_term = quote_plus(search_term)
-        search_url = f"https://www.mighty-cards.de/shop/search?keyword={encoded_term}&limit=20"
-        search_urls.append(search_url)
-        
-        # Zusätzliche Suchanfragen für Varianten
-        if "display" in search_term.lower():
-            # Variante ohne "display" für bessere Trefferquote
-            base_term = search_term.lower().replace("display", "").strip()
-            if base_term:
-                encoded_base = quote_plus(base_term)
-                search_urls.append(f"https://www.mighty-cards.de/shop/search?keyword={encoded_base}&limit=20")
     
     # User-Agent für Anfragen
     headers = {
@@ -72,139 +55,90 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
         "Cache-Control": "max-age=0"
     }
     
-    # 1. Zuerst Suchanfragen durchführen (basierend auf den tatsächlichen Suchbegriffen aus products.txt)
-    logger.info(f"🔍 Durchführe {len(search_urls)} Suchanfragen basierend auf Suchbegriffen")
-    for url in search_urls:
-        try:
-            logger.info(f"🔍 Durchsuche Suchergebnisse: {url}")
-            response = requests.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                logger.warning(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}")
-                continue
-                
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            # Produkt-Links in den Suchergebnissen finden
-            product_links = []
-            
-            # Finde alle Produktkarten/Links
-            product_elements = soup.select('.category-grid .category-product, .product-grid-item, .product')
-            if not product_elements:
-                # Alternativer Selektor, falls obiger nicht funktioniert
-                product_elements = soup.select('a[href*="/shop/"]')
-            
-            for product_elem in product_elements:
-                # Finde den Link (entweder ist das Element selbst ein Link oder enthält einen)
-                link = product_elem if product_elem.name == 'a' else product_elem.find('a')
-                if not link or not link.has_attr('href'):
-                    continue
-                    
-                href = link.get('href', '')
-                if '/shop/' not in href:
-                    continue
-                    
-                # Vollständige URL erstellen
-                product_url = urljoin("https://www.mighty-cards.de", href)
-                product_links.append(product_url)
-            
-            logger.info(f"🔍 {len(product_links)} Produkt-Links in Suchergebnissen gefunden")
-            
-            # Produkt-Links verarbeiten
-            for product_url in product_links:
-                product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
-                if product_data and isinstance(product_data, dict):
-                    product_id = create_product_id(product_data["title"])
-                    if product_id not in found_product_ids:
-                        all_products.append(product_data)
-                        new_matches.append(product_id)
-                        found_product_ids.add(product_id)
-                        logger.info(f"✅ Neuer Treffer gefunden (Suche): {product_data['title']} - {product_data['status_text']}")
-                
-        except Exception as e:
-            logger.error(f"❌ Fehler beim Durchsuchen der Suchergebnisse {url}: {e}")
+    # 1. Zuerst: Versuche die Sitemap für Produkte zu laden
+    logger.info("🔍 Versuche Produktdaten über die WP-Sitemap zu laden")
+    sitemap_products = fetch_products_from_sitemap(headers)
     
-    # 2. Dann Kategorie-Seiten durchsuchen, falls bei der Suche nichts gefunden wurde
-    if not all_products:
-        logger.info(f"🔍 Durchsuche {len(category_urls)} Kategorie-Seiten")
-        for url in category_urls:
-            try:
-                logger.info(f"🔍 Durchsuche Kategorie-Seite: {url}")
-                response = requests.get(url, headers=headers, timeout=15)
-                if response.status_code != 200:
-                    logger.warning(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}")
-                    continue
-                    
-                soup = BeautifulSoup(response.text, "html.parser")
-                
-                # Suche nach Unterkategorien, die die Suchbegriffe enthalten könnten
-                subcategory_links = []
-                for link in soup.select('a[href*="/pokemon/"]'):
-                    href = link.get('href', '')
-                    text = link.get_text().strip().lower()
-                    
-                    # Prüfe, ob Unterkategorie für eines der gesuchten Produkte relevant sein könnte
-                    for search_term in keywords_map.keys():
-                        clean_search = search_term.lower().replace("display", "").strip()
-                        if clean_search in text or clean_search in href.lower():
-                            subcategory_url = urljoin("https://www.mighty-cards.de", href)
-                            subcategory_links.append(subcategory_url)
-                            break
-                
-                logger.info(f"🔍 {len(subcategory_links)} relevante Unterkategorien gefunden")
-                
-                # Verarbeite Unterkategorien
-                for subcat_url in subcategory_links:
-                    try:
-                        subcat_response = requests.get(subcat_url, headers=headers, timeout=15)
-                        if subcat_response.status_code != 200:
-                            continue
-                            
-                        subcat_soup = BeautifulSoup(subcat_response.text, "html.parser")
-                        
-                        # Finde Produkt-Links
-                        product_elements = subcat_soup.select('.category-grid .category-product, .product-grid-item, .product')
-                        if not product_elements:
-                            product_elements = subcat_soup.select('a[href*="/shop/"]')
-                        
-                        for product_elem in product_elements:
-                            link = product_elem if product_elem.name == 'a' else product_elem.find('a')
-                            if not link or not link.has_attr('href'):
-                                continue
-                                
-                            href = link.get('href', '')
-                            if '/shop/' not in href:
-                                continue
-                                
-                            product_url = urljoin("https://www.mighty-cards.de", href)
-                            
-                            # Verarbeite Produkt
-                            product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
-                            if product_data and isinstance(product_data, dict):
-                                product_id = create_product_id(product_data["title"])
-                                if product_id not in found_product_ids:
-                                    all_products.append(product_data)
-                                    new_matches.append(product_id)
-                                    found_product_ids.add(product_id)
-                                    logger.info(f"✅ Neuer Treffer gefunden (Kategorie): {product_data['title']} - {product_data['status_text']}")
-                    
-                    except Exception as e:
-                        logger.warning(f"⚠️ Fehler beim Verarbeiten der Unterkategorie {subcat_url}: {e}")
-                
-            except Exception as e:
-                logger.error(f"❌ Fehler beim Durchsuchen der Kategorie-Seite {url}: {e}")
-    
-    # 3. Zuletzt direkte Produkt-URLs als Fallback-Lösung prüfen
-    if not all_products:
-        logger.info(f"🔍 Prüfe {len(hardcoded_urls)} bekannte Produkt-URLs als Fallback")
-        for url in hardcoded_urls:
-            product_data = process_fallback_product(url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
+    # Verarbeite Sitemap-Produkte
+    for product_url in sitemap_products:
+        logger.debug(f"Verarbeite Sitemap-Produkt: {product_url}")
+        if product_url not in found_product_ids:
+            product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
             if product_data and isinstance(product_data, dict):
                 product_id = create_product_id(product_data["title"])
                 if product_id not in found_product_ids:
                     all_products.append(product_data)
                     new_matches.append(product_id)
                     found_product_ids.add(product_id)
-                    logger.info(f"✅ Neuer Treffer gefunden (direkte URL): {product_data['title']} - {product_data['status_text']}")
+                    logger.info(f"✅ Neuer Treffer gefunden (Sitemap): {product_data['title']} - {product_data['status_text']}")
+    
+    # 2. Dann: Versuche die Ecwid-API direkt zu nutzen
+    logger.info("🔍 Versuche Produktdaten über die Ecwid-Integration zu laden")
+    ecwid_products = fetch_products_from_ecwid(keywords_map, headers)
+    
+    # Verarbeite Ecwid-Produkte
+    for product_url in ecwid_products:
+        logger.debug(f"Verarbeite Ecwid-Produkt: {product_url}")
+        if product_url not in found_product_ids:
+            product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
+            if product_data and isinstance(product_data, dict):
+                product_id = create_product_id(product_data["title"])
+                if product_id not in found_product_ids:
+                    all_products.append(product_data)
+                    new_matches.append(product_id)
+                    found_product_ids.add(product_id)
+                    logger.info(f"✅ Neuer Treffer gefunden (Ecwid): {product_data['title']} - {product_data['status_text']}")
+    
+    # 3. Dann: Durchsuche wichtige Kategorie-Seiten
+    logger.info("🔍 Durchsuche Pokemon-Kategorie und Unterkategorien")
+    category_products = fetch_products_from_categories(headers)
+    
+    # Verarbeite Kategorie-Produkte
+    for product_url in category_products:
+        logger.debug(f"Verarbeite Kategorie-Produkt: {product_url}")
+        if product_url not in found_product_ids:
+            product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
+            if product_data and isinstance(product_data, dict):
+                product_id = create_product_id(product_data["title"])
+                if product_id not in found_product_ids:
+                    all_products.append(product_data)
+                    new_matches.append(product_id)
+                    found_product_ids.add(product_id)
+                    logger.info(f"✅ Neuer Treffer gefunden (Kategorie): {product_data['title']} - {product_data['status_text']}")
+    
+    # 4. Dann: Suche mit Suchbegriffen durchführen
+    # Dynamische Erstellung von Suchanfragen basierend auf den Keywords
+    search_products = []
+    for search_term in keywords_map.keys():
+        search_term_products = search_mighty_cards_products(search_term, headers)
+        search_products.extend(search_term_products)
+    
+    # Verarbeite Produkte aus der Suche
+    for product_url in search_products:
+        logger.debug(f"Verarbeite Produkt aus Suche: {product_url}")
+        if product_url not in found_product_ids:
+            product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
+            if product_data and isinstance(product_data, dict):
+                product_id = create_product_id(product_data["title"])
+                if product_id not in found_product_ids:
+                    all_products.append(product_data)
+                    new_matches.append(product_id)
+                    found_product_ids.add(product_id)
+                    logger.info(f"✅ Neuer Treffer gefunden (Suche): {product_data['title']} - {product_data['status_text']}")
+    
+    # 5. Zuletzt: Fallback auf hardcoded URLs, wenn keine Produkte gefunden wurden
+    if not all_products:
+        logger.info(f"🔍 Keine Produkte gefunden. Prüfe {len(hardcoded_urls)} bekannte Produkt-URLs als Fallback")
+        for product_url in hardcoded_urls:
+            if product_url not in found_product_ids:
+                product_data = process_fallback_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
+                if product_data and isinstance(product_data, dict):
+                    product_id = create_product_id(product_data["title"])
+                    if product_id not in found_product_ids:
+                        all_products.append(product_data)
+                        new_matches.append(product_id)
+                        found_product_ids.add(product_id)
+                        logger.info(f"✅ Neuer Treffer gefunden (Fallback): {product_data['title']} - {product_data['status_text']}")
     
     # Sende Benachrichtigungen
     if all_products:
@@ -212,6 +146,342 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
         send_batch_notification(all_products)
     
     return new_matches
+
+def fetch_products_from_sitemap(headers):
+    """
+    Lädt Produkt-URLs aus der WordPress-Sitemap
+    
+    :param headers: HTTP-Headers für Anfragen
+    :return: Liste mit Produkt-URLs
+    """
+    product_urls = []
+    
+    # Versuche zuerst die Ecwid-spezifische Sitemap zu laden
+    sitemap_urls = [
+        "https://www.mighty-cards.de/wp-sitemap-ecstore-1.xml",  # Ecwid Store Sitemap
+        "https://www.mighty-cards.de/wp-sitemap.xml",  # Haupt-Sitemap
+        "https://www.mighty-cards.de/sitemap_index.xml"  # Alternative Sitemap
+    ]
+    
+    for sitemap_url in sitemap_urls:
+        try:
+            logger.info(f"🔍 Versuche Sitemap zu laden: {sitemap_url}")
+            response = requests.get(sitemap_url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                logger.warning(f"⚠️ Sitemap nicht gefunden: {sitemap_url}, Status: {response.status_code}")
+                continue
+                
+            # Parse XML
+            try:
+                root = ET.fromstring(response.content)
+                
+                # XML-Namespace bestimmen
+                ns = {'sm': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+                
+                # Alle URLs extrahieren
+                for url in root.findall('.//sm:url/sm:loc', ns):
+                    product_url = url.text
+                    # Filter für Produkt-URLs
+                    if '/shop/' in product_url and 'p' in product_url.split('/')[-1]:
+                        product_urls.append(product_url)
+                
+                # Falls es ein Sitemap-Index ist, extrahiere Links zu weiteren Sitemaps
+                for sitemap in root.findall('.//sm:sitemap/sm:loc', ns):
+                    sub_sitemap_url = sitemap.text
+                    if 'ecstore' in sub_sitemap_url or 'product' in sub_sitemap_url:
+                        try:
+                            sub_response = requests.get(sub_sitemap_url, headers=headers, timeout=15)
+                            if sub_response.status_code == 200:
+                                sub_root = ET.fromstring(sub_response.content)
+                                for url in sub_root.findall('.//sm:url/sm:loc', ns):
+                                    product_url = url.text
+                                    if '/shop/' in product_url and 'p' in product_url.split('/')[-1]:
+                                        product_urls.append(product_url)
+                        except Exception as e:
+                            logger.warning(f"⚠️ Fehler beim Laden der Sub-Sitemap {sub_sitemap_url}: {e}")
+                
+                logger.info(f"✅ {len(product_urls)} Produkt-URLs aus Sitemap extrahiert")
+                
+                # Wenn URLs gefunden wurden, früh beenden
+                if product_urls:
+                    break
+                    
+            except ET.ParseError as e:
+                logger.warning(f"⚠️ Fehler beim Parsen der Sitemap {sitemap_url}: {e}")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Fehler beim Abrufen der Sitemap {sitemap_url}: {e}")
+    
+    return product_urls
+
+def fetch_products_from_ecwid(keywords_map, headers):
+    """
+    Versucht, Produkte direkt über die Ecwid-Integration zu laden
+    
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :param headers: HTTP-Headers für Anfragen
+    :return: Liste mit Produkt-URLs
+    """
+    product_urls = []
+    
+    try:
+        # Versuche die Store-Frontpage zu laden, um JavaScript-Daten zu extrahieren
+        logger.info("🔍 Versuche Ecwid-Storedaten zu laden")
+        response = requests.get("https://www.mighty-cards.de/pokemon/", headers=headers, timeout=15)
+        if response.status_code != 200:
+            logger.warning(f"⚠️ Fehler beim Abrufen der Pokemon-Kategorie: Status {response.status_code}")
+            return product_urls
+            
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Suche nach dem Ecwid-Script mit Konfigurationsdaten
+        ecwid_config = extract_ecwid_config(soup)
+        if not ecwid_config:
+            logger.warning("⚠️ Keine Ecwid-Konfiguration gefunden")
+            return product_urls
+        
+        # Extrahiere die Store-ID
+        store_id = ecwid_config.get("storeId", ECWID_STORE_ID)
+        logger.info(f"✅ Ecwid-Store-ID gefunden: {store_id}")
+        
+        # Versuche, das Produkt-Browse-Widget zu laden
+        try:
+            # Direkte API-Anfrage an Ecwid
+            for search_term in keywords_map.keys():
+                # Suche mit dem Suchbegriff
+                logger.info(f"🔍 Ecwid-API-Suche für: {search_term}")
+                
+                # Bereinige den Suchbegriff
+                clean_term = search_term.lower().replace("display", " ").strip()
+                
+                api_url = f"{ECWID_BASE_URL}/api/v3/{store_id}/products?keyword={quote_plus(clean_term)}"
+                api_headers = {
+                    **headers,
+                    "Referer": "https://www.mighty-cards.de/",
+                    "X-Requested-With": "XMLHttpRequest"
+                }
+                
+                try:
+                    api_response = requests.get(api_url, headers=api_headers, timeout=15)
+                    if api_response.status_code == 200:
+                        try:
+                            api_data = api_response.json()
+                            if 'items' in api_data:
+                                for item in api_data['items']:
+                                    product_id = item.get('id')
+                                    if product_id:
+                                        product_url = f"https://www.mighty-cards.de/shop/p{product_id}"
+                                        product_urls.append(product_url)
+                        except ValueError:
+                            pass
+                except Exception as e:
+                    logger.debug(f"⚠️ Fehler bei der Ecwid-API-Anfrage: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ Fehler beim Zugriff auf die Ecwid-API: {e}")
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Fehler beim Laden der Ecwid-Daten: {e}")
+    
+    logger.info(f"✅ {len(product_urls)} Produkt-URLs über Ecwid-Integration gefunden")
+    return product_urls
+
+def extract_ecwid_config(soup):
+    """
+    Extrahiert die Ecwid-Konfiguration aus dem JavaScript der Seite
+    
+    :param soup: BeautifulSoup-Objekt der Seite
+    :return: Dictionary mit Konfigurationsdaten oder None
+    """
+    ecwid_config = {}
+    
+    # Suche nach bestimmten JavaScript-Skripten
+    for script in soup.find_all('script'):
+        script_content = script.string
+        if not script_content:
+            continue
+            
+        # Suche nach der Ecwid-Konfiguration
+        if 'goxEcwid.SyncShopConfig' in script_content:
+            config_match = re.search(r'SyncShopConfig\(\{(.*?)\}\)', script_content, re.DOTALL)
+            if config_match:
+                try:
+                    # Extrahiere den JSON-artigen String, ergänze fehlende Anführungszeichen
+                    config_text = '{' + config_match.group(1) + '}'
+                    # Ersetze JavaScript-Eigenschaftsnamen durch gültige JSON-Strings
+                    config_text = re.sub(r'(\w+):', r'"\1":', config_text)
+                    # Ersetze einfache Anführungszeichen durch doppelte
+                    config_text = config_text.replace("'", '"')
+                    # Parsen als JSON
+                    config_data = json.loads(config_text)
+                    ecwid_config.update(config_data)
+                except (ValueError, json.JSONDecodeError) as e:
+                    logger.debug(f"⚠️ Fehler beim Parsen der Ecwid-Konfiguration: {e}")
+            
+        # Suche nach der Store-ID
+        store_id_match = re.search(r"'(\d+)'", script_content)
+        if store_id_match and len(store_id_match.group(1)) > 7:  # Ecwid-IDs sind normalerweise 8+ Stellen
+            ecwid_config["storeId"] = store_id_match.group(1)
+    
+    return ecwid_config
+
+def fetch_products_from_categories(headers):
+    """
+    Durchsucht wichtige Kategorie-Seiten nach Produkten
+    
+    :param headers: HTTP-Headers für Anfragen
+    :return: Liste mit Produkt-URLs
+    """
+    product_urls = []
+    
+    # Liste der wichtigen Kategorien
+    category_urls = [
+        "https://www.mighty-cards.de/pokemon/",
+        "https://www.mighty-cards.de/pokemon/displays/",
+        "https://www.mighty-cards.de/vorbestellung/",
+    ]
+    
+    for category_url in category_urls:
+        try:
+            logger.info(f"🔍 Durchsuche Kategorie: {category_url}")
+            response = requests.get(category_url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                logger.warning(f"⚠️ Fehler beim Abrufen der Kategorie {category_url}: Status {response.status_code}")
+                continue
+                
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Suche nach Produktlinks und Kategorielinks
+            links = soup.find_all('a', href=True)
+            
+            # Extrahiere Produktlinks
+            for link in links:
+                href = link['href']
+                
+                # Direkter Produktlink
+                if '/shop/' in href and ('p' in href.split('/')[-1] or '-p' in href):
+                    full_url = href if href.startswith('http') else urljoin("https://www.mighty-cards.de", href)
+                    if full_url not in product_urls:
+                        product_urls.append(full_url)
+                
+                # Kategorie-Links weiterverfolgen (nur eine Ebene tief)
+                elif '/pokemon/' in href and href != category_url and "mighty-cards.de" in href:
+                    try:
+                        logger.debug(f"Untersuche Unterkategorie: {href}")
+                        subcat_response = requests.get(href, headers=headers, timeout=15)
+                        if subcat_response.status_code == 200:
+                            subcat_soup = BeautifulSoup(subcat_response.text, "html.parser")
+                            subcat_links = subcat_soup.find_all('a', href=True)
+                            
+                            for sublink in subcat_links:
+                                subhref = sublink['href']
+                                if '/shop/' in subhref and ('p' in subhref.split('/')[-1] or '-p' in subhref):
+                                    full_url = subhref if subhref.startswith('http') else urljoin("https://www.mighty-cards.de", subhref)
+                                    if full_url not in product_urls:
+                                        product_urls.append(full_url)
+                    except Exception as e:
+                        logger.debug(f"⚠️ Fehler beim Durchsuchen der Unterkategorie {href}: {e}")
+                        
+            # Suche nach JavaScript-Daten, die Produkte enthalten könnten
+            products_from_js = extract_products_from_js(soup)
+            product_urls.extend(products_from_js)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Fehler beim Durchsuchen der Kategorie {category_url}: {e}")
+    
+    # Dedupliziere die URLs
+    product_urls = list(set(product_urls))
+    logger.info(f"✅ {len(product_urls)} Produkt-URLs aus Kategorien extrahiert")
+    
+    return product_urls
+
+def extract_products_from_js(soup):
+    """
+    Extrahiert Produkt-URLs aus JavaScript-Daten auf der Seite
+    
+    :param soup: BeautifulSoup-Objekt der Seite
+    :return: Liste mit Produkt-URLs
+    """
+    product_urls = []
+    
+    # Suche nach bestimmten JavaScript-Skripten
+    for script in soup.find_all('script'):
+        script_content = script.string
+        if not script_content:
+            continue
+            
+        # Suche nach Produktdaten in verschiedenen Formaten
+        product_id_matches = re.findall(r'product_id["\']?\s*[:=]\s*["\']?(\d+)["\']?', script_content)
+        for product_id in product_id_matches:
+            product_url = f"https://www.mighty-cards.de/shop/p{product_id}"
+            if product_url not in product_urls:
+                product_urls.append(product_url)
+        
+        # Suche nach Produktlinks
+        product_url_matches = re.findall(r'["\'](/shop/[^"\']+?-p\d+)["\']', script_content)
+        for product_path in product_url_matches:
+            product_url = urljoin("https://www.mighty-cards.de", product_path)
+            if product_url not in product_urls:
+                product_urls.append(product_url)
+    
+    return product_urls
+
+def search_mighty_cards_products(search_term, headers):
+    """
+    Führt eine Suche auf der Website durch und extrahiert Produkt-URLs
+    
+    :param search_term: Suchbegriff
+    :param headers: HTTP-Headers für Anfragen
+    :return: Liste mit Produkt-URLs
+    """
+    product_urls = []
+    
+    try:
+        logger.info(f"🔍 Suche nach Produkten mit Begriff: {search_term}")
+        
+        # URL-Encoding für die Suche
+        encoded_term = quote_plus(search_term)
+        search_url = f"https://www.mighty-cards.de/shop/search?keyword={encoded_term}&limit=20"
+        
+        response = requests.get(search_url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            logger.warning(f"⚠️ Fehler bei der Suche: Status {response.status_code}")
+            return product_urls
+            
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Suche nach Produktlinks
+        product_elements = soup.select('.category-grid .category-product, .product-grid-item, .product')
+        if not product_elements:
+            # Alternativer Selektor, falls obiger nicht funktioniert
+            product_elements = soup.select('a[href*="/shop/"]')
+        
+        for product_elem in product_elements:
+            # Finde den Link (entweder ist das Element selbst ein Link oder enthält einen)
+            link = product_elem if product_elem.name == 'a' else product_elem.find('a')
+            if not link or not link.has_attr('href'):
+                continue
+                
+            href = link.get('href', '')
+            if '/shop/' not in href:
+                continue
+                
+            # Vollständige URL erstellen
+            product_url = urljoin("https://www.mighty-cards.de", href)
+            if product_url not in product_urls:
+                product_urls.append(product_url)
+        
+        # Versuche, Produkt-IDs aus dem JavaScript zu extrahieren
+        products_from_js = extract_products_from_js(soup)
+        for url in products_from_js:
+            if url not in product_urls:
+                product_urls.append(url)
+        
+        logger.info(f"🔍 {len(product_urls)} Produkt-Links in Suchergebnissen gefunden")
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Fehler bei der Suche nach '{search_term}': {e}")
+    
+    return product_urls
 
 def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price=None, max_price=None):
     """
@@ -277,7 +547,7 @@ def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, 
             # Wenn immer noch kein Titel gefunden wurde, verwende URL als Fallback
             if not title_elem:
                 title = extract_title_from_url(product_url)
-                logger.info(f"⚠️ Kein Titel gefunden, generiert aus URL: {title}")
+                logger.info(f"📝 Generierter Titel aus URL: '{title}'")
             else:
                 title = title_elem.text.strip()
             
@@ -325,6 +595,10 @@ def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, 
                 matched_term = "Journey Together display"
             elif "KP09" in product_url or "Reisegef" in product_url:
                 matched_term = "Reisegefährten display"
+            elif "SV10" in product_url or "Destined" in product_url or "destined" in title.lower():
+                matched_term = "Journey Together display"  # Als Fallback für neue Sets
+            elif "KP10" in product_url or "Ewige" in product_url or "ewige" in title.lower() or "rivalen" in title.lower():
+                matched_term = "Reisegefährten display"  # Als Fallback für neue Sets
         
         # Wenn kein passender Suchbegriff gefunden wurde
         if not matched_term:
@@ -452,6 +726,10 @@ def process_fallback_product(product_url, keywords_map, seen, out_of_stock, only
                     matched_term = "Journey Together display"
                 elif "KP09" in product_url or "Reisegef" in product_url:
                     matched_term = "Reisegefährten display"
+                elif "SV10" in product_url or "Destined" in product_url or "destined" in title.lower():
+                    matched_term = "Journey Together display"  # Als Fallback für neue Sets
+                elif "KP10" in product_url or "Ewige" in product_url or "ewige" in title.lower() or "rivalen" in title.lower():
+                    matched_term = "Reisegefährten display"  # Als Fallback für neue Sets
                     
             if not matched_term:
                 logger.warning(f"❌ Kein passender Suchbegriff für {title}")
@@ -542,6 +820,10 @@ def process_fallback_product(product_url, keywords_map, seen, out_of_stock, only
                 matched_term = "Journey Together display"
             elif "KP09" in product_url or "Reisegef" in product_url:
                 matched_term = "Reisegefährten display"
+            elif "SV10" in product_url or "Destined" in product_url or "destined" in title.lower():
+                matched_term = "Journey Together display"  # Als Fallback für neue Sets
+            elif "KP10" in product_url or "Ewige" in product_url or "ewige" in title.lower() or "rivalen" in title.lower():
+                matched_term = "Reisegefährten display"  # Als Fallback für neue Sets
         
         # Wenn immer noch kein passender Suchbegriff gefunden wurde
         if not matched_term:
@@ -643,6 +925,40 @@ def extract_js_product_data(soup, url):
                         return product
             except (json.JSONDecodeError, AttributeError) as e:
                 logger.debug(f"Fehler beim Parsen von PRELOADED_STATE: {e}")
+    
+    # Suche nach Ecwid-spezifischen Daten
+    try:
+        # Extrahiere Produkt-ID aus der URL
+        product_id_match = re.search(r'p(\d+)$', url)
+        if product_id_match:
+            product_id = product_id_match.group(1)
+            
+            # Suche nach Ecwid-Produkt-Daten im JavaScript
+            for script in soup.find_all('script'):
+                script_content = script.string
+                if not script_content:
+                    continue
+                
+                # Suche nach dem spezifischen Produkt-ID
+                product_js_match = re.search(rf'"id":\s*{product_id}.*?"name":\s*"([^"]+)"', script_content)
+                if product_js_match:
+                    product_title = product_js_match.group(1)
+                    
+                    # Suche nach Verfügbarkeitsinformationen
+                    available_match = re.search(rf'"id":\s*{product_id}.*?"inStock":\s*(true|false)', script_content)
+                    is_available = available_match and available_match.group(1) == 'true'
+                    
+                    # Suche nach Preisinformationen
+                    price_match = re.search(rf'"id":\s*{product_id}.*?"price":\s*(\d+\.\d+)', script_content)
+                    price = f"{price_match.group(1)}€" if price_match else "Preis nicht verfügbar"
+                    
+                    return {
+                        'title': product_title,
+                        'price': price,
+                        'available': is_available
+                    }
+    except Exception as e:
+        logger.debug(f"Fehler bei der Extraktion von Ecwid-Daten: {e}")
     
     # Suche nach productOptions oder productJson
     for script in soup.find_all('script'):
@@ -817,6 +1133,12 @@ def extract_title_from_url(url):
         if "Togehter" in title:
             title = title.replace("Togehter", "Together")
     elif "KP09" in title or "Reisegef" in title:
+        if "display" not in title.lower():
+            title += " Display"
+    elif "SV10" in title or "destined" in title.lower() or "Destined" in title:
+        if "display" not in title.lower():
+            title += " Display"
+    elif "KP10" in title or "ewige" in title.lower() or "Ewige" in title or "rivalen" in title.lower():
         if "display" not in title.lower():
             title += " Display"
     

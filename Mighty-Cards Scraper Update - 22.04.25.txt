@@ -1,0 +1,48 @@
+Mighty-Cards Scraper Update - Zusammenfassung
+Kontext
+Der Mighty-Cards Scraper hatte Probleme mit der Erkennung von Produkten, da die Website ein Ecwid-Shopsystem verwendet, das stark JavaScript-basiert ist. Produkte wurden nur über hardcoded URLs gefunden, was die Erkennung neuer Produkte wie "Destined Rivals" oder "Ewige Rivalen" verhinderte.
+Implementierte Lösung
+
+Mehrstufige Produkt-Discovery-Strategie:
+
+WordPress-Sitemap-Integration zur Extraktion aller Produkt-URLs
+Ecwid-API-Integration mit Store-ID 10031257
+Kategorie-basierte Produkt-Extraktion (Pokemon, Displays, Vorbestellungen)
+Suchfunktion für dynamische Produkt-Erkennung
+Hardcoded URLs als letzter Fallback
+
+
+Verbesserte JavaScript-Datenextraktion:
+
+Spezifisch für Ecwid-Shop-System optimiert
+Extrahiert Produktdaten direkt aus dem eingebetteten JavaScript
+Unterstützt verschiedene JavaScript-Datenstrukturen (JSON-LD, preloaded state, product configs)
+
+
+Robuste Titelextraktion:
+
+Fallback zur URL-basierten Titelgenerierung
+Automatische Korrektur des "Togehter"-Tippfehlers
+Intelligente Kategorisierung von Produkttypen
+
+
+Erweiterte Such-Parameter:
+
+Preisfilterung (min_price, max_price)
+Verbesserte Produkttyp-Erkennung für neue Serien
+
+
+Implementierte Fallback-Mechanismen:
+
+Mehrschichtige Verfügbarkeitsprüfung
+Erweiterte Produkt-Matching-Logik für neue Pokémon-Sets
+
+
+
+Nächste Schritte
+
+Integration der TCGViert 404-URL-Bereinigung
+Implementierung shop-spezifischer Scan-Intervalle
+Vervollständigung der Export/Import-Funktionalität für gefundene Produkte
+
+Diese Aktualisierung verbessert maßgeblich die Erkennung und Verfolgung neuer Pokémon-Kartensets, ohne dass hardcoded URLs für jedes neue Produkt hinzugefügt werden müssen.
