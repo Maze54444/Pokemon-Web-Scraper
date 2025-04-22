@@ -18,6 +18,7 @@ from utils.matcher import prepare_keywords
 from scrapers.tcgviert import scrape_tcgviert
 from scrapers.generic import scrape_generic
 from scrapers.sapphire_cards import scrape_sapphire_cards
+from scrapers.mighty_cards import scrape_mighty_cards
 
 # Logger-Konfiguration
 logger = logging.getLogger("main")
@@ -90,8 +91,23 @@ def run_once(only_available=False, reset_seen=False):
             logger.error(f"[ERROR] Fehler beim TCGViert Scraping: {str(e)}")
             logger.debug(traceback.format_exc())
     
-    # Generische URLs - immer alle scannen
-    generic_urls = [url for url in all_urls if not ("sapphire-cards.de" in url or "tcgviert.com" in url)]
+    # Mighty-cards spezifischer Scraper
+    mighty_cards_urls = [url for url in all_urls if "mighty-cards.de" in url]
+    if mighty_cards_urls:
+        try:
+            logger.info("[SCRAPER] Starte Mighty-Cards Scraper")
+            mighty_cards_matches = scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available)
+            if mighty_cards_matches:
+                logger.info(f"[SUCCESS] {len(mighty_cards_matches)} neue Treffer bei Mighty-Cards gefunden")
+                all_matches.extend(mighty_cards_matches)
+            else:
+                logger.info("[INFO] Keine neuen Treffer bei Mighty-Cards")
+        except Exception as e:
+            logger.error(f"[ERROR] Fehler beim Mighty-Cards Scraping: {str(e)}")
+            logger.debug(traceback.format_exc())
+    
+    # Generische URLs - immer alle scannen, aber jetzt auch Mighty-Cards ausschließen
+    generic_urls = [url for url in all_urls if not ("sapphire-cards.de" in url or "tcgviert.com" in url or "mighty-cards.de" in url)]
     if generic_urls:
         logger.info(f"[INFO] Starte generische Scraper für {len(generic_urls)} URLs")
         
@@ -257,6 +273,24 @@ def test_sapphire():
     else:
         logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
 
+def test_mighty_cards():
+    """Testet den Mighty-Cards Scraper isoliert"""
+    logger.info("[TEST] Teste Mighty-Cards Scraper isoliert")
+    
+    products = load_products()
+    keywords_map = prepare_keywords(products)
+    
+    seen = set()
+    out_of_stock = set()
+    
+    from scrapers.mighty_cards import scrape_mighty_cards
+    matches = scrape_mighty_cards(keywords_map, seen, out_of_stock)
+    
+    if matches:
+        logger.info(f"[SUCCESS] Test erfolgreich, {len(matches)} Treffer gefunden")
+    else:
+        logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
+
 def monitor_out_of_stock():
     """Zeigt die aktuell ausverkauften Produkte an, die überwacht werden"""
     out_of_stock = load_out_of_stock()
@@ -296,7 +330,7 @@ def clean_database():
     # Entferne veraltete Einträge aus out_of_stock
     # Wir behalten nur Einträge, die einer der bekannten Domains entsprechen
     valid_domains = ["tcgviert", "card-corner", "comicplanet", "gameware", 
-                     "kofuku", "mighty-cards", "games-island", "sapphirecards"]
+                     "kofuku", "mighty-cards", "games-island", "sapphirecards", "mightycards"]
     
     valid_out_of_stock = set()
     for product_id in out_of_stock:
@@ -317,7 +351,7 @@ def clean_database():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pokémon TCG Scraper mit verbesserten Filtern")
     parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", "availability_test", 
-                                          "sapphire_test", "show_out_of_stock", "clean"], 
+                                          "sapphire_test", "mighty_cards_test", "show_out_of_stock", "clean"], 
                         default="loop", help="Ausführungsmodus")
     parser.add_argument("--only-available", action="store_true", 
                         help="Nur verfügbare Produkte melden (nicht ausverkaufte)")
@@ -345,6 +379,8 @@ if __name__ == "__main__":
         test_availability()
     elif args.mode == "sapphire_test":
         test_sapphire()
+    elif args.mode == "mighty_cards_test":
+        test_mighty_cards()
     elif args.mode == "show_out_of_stock":
         monitor_out_of_stock()
     elif args.mode == "clean":
