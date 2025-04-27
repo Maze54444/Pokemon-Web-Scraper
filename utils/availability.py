@@ -345,37 +345,61 @@ def check_sapphire_cards(soup):
 
 def check_mighty_cards(soup):
     """
-    Prüft die Verfügbarkeit auf mighty-cards.de
+    Verbesserte Verfügbarkeitsprüfung speziell für mighty-cards.de
     
     Verfügbare Produkte:
-    - Statusindikator: NEW, SALE oder EXCLUSIVE
-    - Roter "In den Warenkorb"-Button
+    - "In den Warenkorb"-Button vorhanden
+    - Badge "NEW" vorhanden
     
     Nicht verfügbare Produkte:
-    - Roter Button mit "AUSVERKAUFT"
-    - Kein "In den Warenkorb"-Button
+    - Elemente mit Text "Ausverkauft"
+    - Keine aktiven "In den Warenkorb"-Buttons
     """
     # Extrahiere den Preis
     price = extract_price(soup, ['.price', '.product-price', '.current-price'])
     
-    # Prüfe auf "AUSVERKAUFT"-Text
-    sold_out_text = soup.find(string=re.compile("AUSVERKAUFT", re.IGNORECASE))
-    if sold_out_text:
-        return False, price, "[X] Ausverkauft (AUSVERKAUFT-Text)"
+    # 1. Explizite Prüfung auf "Ausverkauft"-Textelemente (höchste Priorität)
+    ausverkauft_elements = soup.find_all(string=re.compile("Ausverkauft", re.IGNORECASE))
+    if ausverkauft_elements:
+        return False, price, "[X] Ausverkauft (eindeutig gekennzeichnet)"
     
-    # Prüfe auf "In den Warenkorb"-Button
+    # 2. Prüfe auf "AUSVERKAUFT"-Badge/Label
+    ausverkauft_badge = soup.select_one('.label__text:contains("Ausverkauft"), [class*="sold-out"], [class*="out-of-stock"]')
+    if ausverkauft_badge:
+        return False, price, "[X] Ausverkauft (Badge gefunden)"
+    
+    # 3. Prüfung auf "In den Warenkorb"-Button
     cart_button = soup.find('button', string=re.compile("In den Warenkorb", re.IGNORECASE))
     if cart_button:
-        return True, price, "[V] Verfügbar (Warenkorb-Button)"
+        # Prüfe, ob der Button in einem deaktivierten Container ist
+        parent_disabled = 'disabled' in ' '.join(parent.get('class', []) for parent in cart_button.parents)
+        if not parent_disabled:
+            return True, price, "[V] Verfügbar (Warenkorb-Button aktiv)"
     
-    # Prüfe auf spezielle Statusanzeigen, die auf Verfügbarkeit hindeuten
-    special_status = soup.find(string=re.compile("NEW|SALE|EXCLUSIVE", re.IGNORECASE))
-    if special_status:
-        return True, price, f"[V] Verfügbar ({special_status.strip()})"
+    # 4. Prüfe auf das form-control-Element für den Warenkorb-Button (spezifisch für mighty-cards.de)
+    form_control_button = soup.select_one('.form-control__button-text:contains("In den Warenkorb")')
+    if form_control_button:
+        return True, price, "[V] Verfügbar (Warenkorb-Button gefunden)"
     
-    # Wenn keine der bekannten Muster zutrifft, generische Methode
-    is_available, _, status_text = check_generic(soup)
-    return is_available, price, status_text
+    # 5. Prüfe auf "NEW"-Badge/Label als Verfügbarkeitsmerkmal
+    new_badge = soup.select_one('.label__text:contains("NEW"), [class*="new"], [class*="badge-new"]')
+    if new_badge:
+        return True, price, "[V] Verfügbar (NEW-Badge gefunden)"
+    
+    # 6. Prüfe auf Vorbestellungen/Lieferzeit als Verfügbarkeitsindikator
+    if soup.find(string=re.compile("Vorraussichtliche Lieferzeit|Versand: in \d+ Tagen", re.IGNORECASE)):
+        return True, price, "[V] Verfügbar (Lieferzeit angegeben)"
+    
+    # 7. Fallback auf Seiteninhalt-Analyse (geringere Priorität)
+    page_text = soup.get_text().lower()
+    if "ausverkauft" in page_text or "nicht verfügbar" in page_text:
+        return False, price, "[X] Ausverkauft (Text im Seiteninhalt)"
+    
+    if "in den warenkorb" in page_text and "ausverkauft" not in page_text:
+        return True, price, "[V] Verfügbar (Warenkorb-Text gefunden)"
+
+    # Bei Unklarheit eher konservativ handeln (als nicht verfügbar behandeln)
+    return False, price, "[?] Status unklar (als nicht verfügbar behandelt)"
 
 def check_games_island(soup):
     """
@@ -518,12 +542,12 @@ def check_generic(soup):
     has_available_text = any(pattern in page_text for pattern in available_patterns)
     
     # Entscheidungslogik
-    if has_add_button and not any(pattern in page_text for pattern in unavailable_patterns):
-        return True, price, "[V] Verfügbar (Warenkorb-Button vorhanden)"
-    elif is_preorder:
-        return True, price, "[V] Vorbestellbar"
-    elif has_available_text:
-        return True, price, "[V] Verfügbar (Verfügbarkeitstext)"
-    else:
-        # Bei Unsicherheit eher als "nicht verfügbar" behandeln
-        return False, price, "[?] Status unbekannt (als nicht verfügbar behandelt)"
+   if has_add_button and not any(pattern in page_text for pattern in unavailable_patterns):
+       return True, price, "[V] Verfügbar (Warenkorb-Button vorhanden)"
+   elif is_preorder:
+       return True, price, "[V] Vorbestellbar"
+   elif has_available_text:
+       return True, price, "[V] Verfügbar (Verfügbarkeitstext)"
+   else:
+       # Bei Unsicherheit eher als "nicht verfügbar" behandeln
+       return False, price, "[?] Status unbekannt (als nicht verfügbar behandelt)"
