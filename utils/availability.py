@@ -542,12 +542,12 @@ def check_generic(soup):
     has_available_text = any(pattern in page_text for pattern in available_patterns)
     
     # Entscheidungslogik
-   if has_add_button and not any(pattern in page_text for pattern in unavailable_patterns):
-       return True, price, "[V] Verfügbar (Warenkorb-Button vorhanden)"
-   elif is_preorder:
-       return True, price, "[V] Vorbestellbar"
-   elif has_available_text:
-       return True, price, "[V] Verfügbar (Verfügbarkeitstext)"
-   else:
-       # Bei Unsicherheit eher als "nicht verfügbar" behandeln
-       return False, price, "[?] Status unbekannt (als nicht verfügbar behandelt)"
+    if has_add_button and not any(pattern in page_text for pattern in unavailable_patterns):
+        return True, price, "[V] Verfügbar (Warenkorb-Button vorhanden)"
+    elif is_preorder:
+        return True, price, "[V] Vorbestellbar"
+    elif has_available_text:
+        return True, price, "[V] Verfügbar (Verfügbarkeitstext)"
+    else:
+        # Bei Unsicherheit eher als "nicht verfügbar" behandeln
+        return False, price, "[?] Status unbekannt (als nicht verfügbar behandelt)"
