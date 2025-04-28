@@ -60,6 +60,19 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
     logger.info("🔍 Versuche Produktdaten über die WP-Sitemap zu laden")
     sitemap_products = fetch_products_from_sitemap(headers)
     
+    # Begrenze die Anzahl der zu verarbeitenden URLs, um Timeouts zu vermeiden
+    max_urls_to_process = 20
+    if len(sitemap_products) > max_urls_to_process:
+        logger.info(f"⚙️ Begrenze Verarbeitung auf {max_urls_to_process} URLs (von {len(sitemap_products)} gefundenen)")
+        # Filter für relevante URLs - bevorzuge URLs mit "journey", "reisegef", "pokemon", "sv09", "kp09"
+        priority_urls = [url for url in sitemap_products if any(kw in url.lower() for kw in ["journey", "reisegef", "pokemon", "sv09", "kp09"])]
+        # Wenn nicht genug prioritäre URLs, fülle mit anderen auf
+        if len(priority_urls) < max_urls_to_process:
+            remaining_urls = [url for url in sitemap_products if url not in priority_urls]
+            sitemap_products = priority_urls + remaining_urls[:max_urls_to_process - len(priority_urls)]
+        else:
+            sitemap_products = priority_urls[:max_urls_to_process]
+    
     # Verarbeite Sitemap-Produkte
     for product_url in sitemap_products:
         logger.debug(f"Verarbeite Sitemap-Produkt: {product_url}")
@@ -790,40 +803,82 @@ def extract_js_product_data(soup, url):
 
 def extract_title_from_url(url):
     """
-    Extrahiert einen sinnvollen Titel aus der URL-Struktur
+    Extrahiert einen sinnvollen Titel aus der URL-Struktur mit verbesserten Fallbacks
     
     :param url: URL der Produktseite
     :return: Extrahierter Titel
     """
-    # Extrahiere den Pfad aus der URL
-    path = url.split('/')[-1]
-    
-    # Entferne Parameter bei p12345 Endungen
-    path = re.sub(r'-p\d+$', '', path)
-    
-    # Ersetze Bindestriche durch Leerzeichen
-    title = path.replace('-', ' ')
-    
-    # Verarbeite Spezialfälle für bekannte Produkte
-    if "SV09" in title or "Journey" in title:
-        if "display" not in title.lower():
-            title += " Display"
-        if "Togehter" in title:
-            title = title.replace("Togehter", "Together")
-    elif "KP09" in title or "Reisegef" in title:
-        if "display" not in title.lower():
-            title += " Display"
-    elif "SV10" in title or "destined" in title.lower() or "Destined" in title:
-        if "display" not in title.lower():
-            title += " Display"
-    elif "KP10" in title or "ewige" in title.lower() or "Ewige" in title or "rivalen" in title.lower():
-        if "display" not in title.lower():
-            title += " Display"
-    
-    # Erster Buchstabe groß
-    title = title.strip().capitalize()
-    
-    return title
+    try:
+        # Protokoll und Domain entfernen, um nur den Pfad zu erhalten
+        path_parts = urlparse(url).path.strip('/').split('/')
+        
+        # Nur den letzten Teil betrachten (das letzte Segment des Pfads)
+        if not path_parts:
+            logger.warning(f"Keine Pfadteile in der URL gefunden: {url}")
+            return "Unbekanntes Mighty-Cards Produkt"
+            
+        path = path_parts[-1]  # Letzter Teil des Pfads
+        
+        # Für URLs ohne -p Format (Kategorien), versuche vorherige Teile
+        if not (path.endswith('.html') or '-p' in path or path.startswith('p')):
+            for part in reversed(path_parts):
+                if "journey" in part.lower() or "reisegef" in part.lower() or "pokemon" in part.lower():
+                    path = part
+                    break
+        
+        # Entferne Parameter bei p12345 Endungen
+        path = re.sub(r'-p\d+$', '', path)
+        
+        # Ersetze Bindestriche durch Leerzeichen
+        title = path.replace('-', ' ')
+        
+        # Überprüfen ob der Titel leer ist
+        if not title.strip():
+            # Versuche erneut mit dem Kategorieteil
+            if len(path_parts) > 1:
+                title = path_parts[-2].replace('-', ' ')
+                
+        # Wenn immer noch leer, setze Standard-Titel
+        if not title.strip():
+            if "pokemon" in url.lower():
+                if "journey" in url.lower() or "sv09" in url.lower():
+                    title = "Journey Together Pokemon Display"
+                elif "reisegef" in url.lower() or "kp09" in url.lower():
+                    title = "Reisegefährten Pokemon Display"
+                else:
+                    title = "Pokemon TCG Produkt"
+            else:
+                title = "Mighty Cards Produkt"
+        
+        # Verarbeite Spezialfälle für bekannte Produkte
+        if "SV09" in title or "Journey" in title:
+            if "display" not in title.lower():
+                title += " Display"
+            if "Togehter" in title:
+                title = title.replace("Togehter", "Together")
+        elif "KP09" in title or "Reisegef" in title:
+            if "display" not in title.lower():
+                title += " Display"
+        elif "SV10" in title or "destined" in title.lower() or "Destined" in title:
+            if "display" not in title.lower():
+                title += " Display"
+        elif "KP10" in title or "ewige" in title.lower() or "Ewige" in title or "rivalen" in title.lower():
+            if "display" not in title.lower():
+                title += " Display"
+        
+        # Erster Buchstabe groß
+        title = title.strip().capitalize()
+        
+        return title
+    except Exception as e:
+        logger.warning(f"Fehler bei Titel-Extraktion aus URL {url}: {e}")
+        # Standard-Fallback-Titel
+        if "journey" in url.lower() or "sv09" in url.lower():
+            return "Journey Together Pokemon Display"
+        elif "reisegef" in url.lower() or "kp09" in url.lower():
+            return "Reisegefährten Pokemon Display"
+        else:
+            return "Pokemon TCG Produkt"
 
 def extract_price_value(price_str):
     """
