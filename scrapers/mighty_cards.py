@@ -40,7 +40,9 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
     hardcoded_urls = [
         "https://www.mighty-cards.de/shop/SV09-Journey-Togehter-36er-Booster-Display-Pokemon-p743684893",
         "https://www.mighty-cards.de/shop/KP09-Reisegefahrten-36er-Booster-Display-Pokemon-p739749306",
-        "https://www.mighty-cards.de/shop/KP09-Reisegefahrten-18er-Booster-Display-Pokemon-p739750556"
+        "https://www.mighty-cards.de/shop/KP09-Reisegefahrten-18er-Booster-Display-Pokemon-p739750556",
+        # Neue URL aus der Log-Analyse hinzugefügt
+        "https://www.mighty-cards.de/pokemon/reisegefahrten-journey-together/"
     ]
     
     # User-Agent für Anfragen
@@ -155,9 +157,10 @@ def fetch_products_from_sitemap(headers):
     """
     product_urls = []
     
-    # Basierend auf der Analyse: Die Sitemap-URL für Ecwid-Produkte
+    # Basierend auf der Analyse: Die Sitemap-URLs für Ecwid-Produkte und Kategorien
     sitemap_urls = [
         "https://www.mighty-cards.de/wp-sitemap-ecstore-1.xml",  # Primäre Ecwid Store Sitemap
+        "https://www.mighty-cards.de/wp-sitemap-posts-page-1.xml",  # Enthält Kategorieseiten
         "https://www.mighty-cards.de/wp-sitemap.xml",  # WordPress Hauptsitemap
         "https://www.mighty-cards.de/sitemap_index.xml",  # Alternative Sitemap-Format
     ]
@@ -169,48 +172,84 @@ def fetch_products_from_sitemap(headers):
             if response.status_code != 200:
                 logger.warning(f"⚠️ Sitemap nicht gefunden: {sitemap_url}, Status: {response.status_code}")
                 continue
-                
-            # Parse XML
+            
+            # Parse XML - Verwende HTML-Parser als Fallback, wenn lxml nicht verfügbar ist
             try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(response.content, "xml")
-                
-                # Sammle alle URLs
-                urls = soup.find_all("url")
+                # Versuche zuerst mit lxml-xml Parser (wenn verfügbar)
+                soup = BeautifulSoup(response.content, "lxml-xml")
+            except Exception as e:
+                logger.warning(f"XML-Parser nicht verfügbar, verwende HTML-Parser als Fallback: {e}")
+                # Fallback zum Standard-HTML-Parser
+                soup = BeautifulSoup(response.content, "html.parser")
+            
+            # Sammle alle URLs
+            urls = soup.find_all("url")
+            if urls:
                 for url_tag in urls:
                     loc_tag = url_tag.find("loc")
                     if loc_tag:
                         product_url = loc_tag.text
-                        if "/shop/" in product_url and "p" in product_url.split('/')[-1]:
+                        if any(keyword in product_url.lower() for keyword in 
+                              ["shop/", "pokemon", "journey", "togehter", "together", "reisegefahrten"]):
                             product_urls.append(product_url)
-                
-                # Wenn es sich um einen Sitemap-Index handelt, lade auch verlinkte Sitemaps
-                sitemaps = soup.find_all("sitemap")
+            
+            # Wenn es sich um einen Sitemap-Index handelt, prüfe auch die verlinkten Sitemaps
+            sitemaps = soup.find_all("sitemap")
+            if sitemaps:
                 for sitemap_tag in sitemaps:
                     loc_tag = sitemap_tag.find("loc")
-                    if loc_tag and "ecstore" in loc_tag.text:
+                    if loc_tag:
                         try:
-                            sub_response = requests.get(loc_tag.text, headers=headers, timeout=15)
-                            if sub_response.status_code == 200:
-                                sub_soup = BeautifulSoup(sub_response.content, "xml")
-                                for url_tag in sub_soup.find_all("url"):
-                                    loc_tag = url_tag.find("loc")
-                                    if loc_tag and "/shop/" in loc_tag.text and "p" in loc_tag.text.split('/')[-1]:
-                                        product_urls.append(loc_tag.text)
+                            sub_url = loc_tag.text
+                            if "ecstore" in sub_url or "post" in sub_url:
+                                logger.info(f"🔍 Untersuche Sub-Sitemap: {sub_url}")
+                                sub_response = requests.get(sub_url, headers=headers, timeout=15)
+                                if sub_response.status_code == 200:
+                                    try:
+                                        # Versuche zuerst mit lxml-xml Parser
+                                        sub_soup = BeautifulSoup(sub_response.content, "lxml-xml")
+                                    except Exception:
+                                        # Fallback zum HTML-Parser
+                                        sub_soup = BeautifulSoup(sub_response.content, "html.parser")
+                                    
+                                    for url_tag in sub_soup.find_all("url"):
+                                        loc_tag = url_tag.find("loc")
+                                        if loc_tag:
+                                            url = loc_tag.text
+                                            if any(keyword in url.lower() for keyword in 
+                                                  ["shop/", "pokemon", "journey", "togehter", "together", "reisegefahrten"]):
+                                                product_urls.append(url)
                         except Exception as e:
                             logger.warning(f"⚠️ Fehler beim Laden der Sub-Sitemap {loc_tag.text}: {e}")
-                
-                logger.info(f"✅ {len(product_urls)} Produkt-URLs aus Sitemap extrahiert")
-                
-                # Wenn URLs gefunden wurden, früh beenden
-                if product_urls:
-                    break
-                
-            except Exception as e:
-                logger.warning(f"⚠️ Fehler beim Parsen der Sitemap {sitemap_url}: {e}")
-                
+            
+            # Wenn keine strukturierten URLs gefunden wurden, suche nach regulären Links im HTML
+            if not urls and not sitemaps:
+                logger.info("Keine strukturierten URL-Tags gefunden, suche nach regulären Links")
+                # Suche nach allen href-Attributen
+                for link in soup.find_all("a", href=True):
+                    href = link.get("href")
+                    if any(keyword in href.lower() for keyword in 
+                          ["shop/", "pokemon", "journey", "togehter", "together", "reisegefahrten"]):
+                        if href.startswith("http"):
+                            product_urls.append(href)
+                        else:
+                            product_urls.append(f"https://www.mighty-cards.de{href}" if href.startswith('/') else f"https://www.mighty-cards.de/{href}")
+                        
+            
+            logger.info(f"✅ {len(product_urls)} Produkt-URLs aus Sitemap extrahiert")
+            
+            # Wenn URLs gefunden wurden, früh beenden
+            if product_urls:
+                break
+        
         except Exception as e:
-            logger.warning(f"⚠️ Fehler beim Abrufen der Sitemap {sitemap_url}: {e}")
+            logger.warning(f"⚠️ Fehler beim Abrufen oder Parsen der Sitemap {sitemap_url}: {e}")
+    
+    # Spezielle Kategorie hinzufügen, wenn aus Logs bekannt
+    journey_category_url = "https://www.mighty-cards.de/pokemon/reisegefahrten-journey-together/"
+    if journey_category_url not in product_urls:
+        product_urls.append(journey_category_url)
+        logger.info("Spezielle Kategorieseite für Reisegefährten hinzugefügt")
     
     return product_urls
 
@@ -320,7 +359,8 @@ def fetch_products_from_categories(headers):
     category_urls = [
         "https://www.mighty-cards.de/shop/Pokemon-c165637849/",  # Pokemon-Kategorie
         "https://www.mighty-cards.de/shop/Displays-c165638577/",  # Displays-Kategorie
-        "https://www.mighty-cards.de/shop/Vorbestellung-c166467816/"  # Vorbestellungen
+        "https://www.mighty-cards.de/shop/Vorbestellung-c166467816/",  # Vorbestellungen
+        "https://www.mighty-cards.de/pokemon/reisegefahrten-journey-together/"  # Spezifische Reisegefährten-Kategorie
     ]
     
     for category_url in category_urls:
@@ -541,54 +581,54 @@ def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, 
                 break
         
         # Wenn kein Match gefunden, versuche Fallback basierend auf URL
-            if not matched_term:
-                if "SV09" in product_url or "Journey" in product_url:
-                    matched_term = "Journey Together display"
-                elif "KP09" in product_url or "Reisegef" in product_url:
-                    matched_term = "Reisegefährten display"
-                elif "SV10" in product_url or "Destined" in product_url or "destined" in title.lower():
-                    matched_term = "Journey Together display"  # Als Fallback für neue Sets
-                elif "KP10" in product_url or "Ewige" in product_url or "ewige" in title.lower() or "rivalen" in title.lower():
-                    matched_term = "Reisegefährten display"  # Als Fallback für neue Sets
-            
-            # Wenn immer noch kein passender Suchbegriff gefunden wurde
-            if not matched_term:
-                logger.debug(f"❌ Kein passender Suchbegriff für {title}")
-                return False
-            
-            # Erstelle eine einzigartige ID für das Produkt
-            product_id = create_product_id(title)
-            
-            # Überprüfe den Status und ob eine Benachrichtigung gesendet werden soll
-            should_notify, is_back_in_stock = update_product_status(
-                product_id, is_available, seen, out_of_stock
-            )
-            
-            # Bei "nur verfügbare" Option, nicht verfügbare Produkte überspringen
-            if only_available and not is_available:
-                return False
-            
-            # Wenn keine Benachrichtigung gesendet werden soll
-            if not should_notify:
-                return True  # Produkt erfolgreich verarbeitet, aber keine Benachrichtigung
-            
-            # Status-Text aktualisieren, wenn Produkt wieder verfügbar ist
-            if is_back_in_stock:
-                status_text = "🎉 Wieder verfügbar!"
-            
-            # Produkt-Informationen für die Benachrichtigung
-            product_data = {
-                "title": title,
-                "url": product_url,
-                "price": price,
-                "status_text": status_text,
-                "is_available": is_available,
-                "matched_term": matched_term,
-                "product_type": title_product_type,
-                "shop": "mighty-cards.de"
-            }
-            
-            return product_data
+        if not matched_term:
+            if "SV09" in product_url or "Journey" in product_url:
+                matched_term = "Journey Together display"
+            elif "KP09" in product_url or "Reisegef" in product_url:
+                matched_term = "Reisegefährten display"
+            elif "SV10" in product_url or "Destined" in product_url or "destined" in title.lower():
+                matched_term = "Journey Together display"  # Als Fallback für neue Sets
+            elif "KP10" in product_url or "Ewige" in product_url or "ewige" in title.lower() or "rivalen" in title.lower():
+                matched_term = "Reisegefährten display"  # Als Fallback für neue Sets
+        
+        # Wenn immer noch kein passender Suchbegriff gefunden wurde
+        if not matched_term:
+            logger.debug(f"❌ Kein passender Suchbegriff für {title}")
+            return False
+        
+        # Erstelle eine einzigartige ID für das Produkt
+        product_id = create_product_id(title)
+        
+        # Überprüfe den Status und ob eine Benachrichtigung gesendet werden soll
+        should_notify, is_back_in_stock = update_product_status(
+            product_id, is_available, seen, out_of_stock
+        )
+        
+        # Bei "nur verfügbare" Option, nicht verfügbare Produkte überspringen
+        if only_available and not is_available:
+            return False
+        
+        # Wenn keine Benachrichtigung gesendet werden soll
+        if not should_notify:
+            return True  # Produkt erfolgreich verarbeitet, aber keine Benachrichtigung
+        
+        # Status-Text aktualisieren, wenn Produkt wieder verfügbar ist
+        if is_back_in_stock:
+            status_text = "🎉 Wieder verfügbar!"
+        
+        # Produkt-Informationen für die Benachrichtigung
+        product_data = {
+            "title": title,
+            "url": product_url,
+            "price": price,
+            "status_text": status_text,
+            "is_available": is_available,
+            "matched_term": matched_term,
+            "product_type": title_product_type,
+            "shop": "mighty-cards.de"
+        }
+        
+        return product_data
             
     except Exception as e:
         logger.error(f"❌ Fehler beim Verarbeiten des Produkts {product_url}: {e}")
