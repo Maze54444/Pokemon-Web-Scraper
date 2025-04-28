@@ -297,6 +297,10 @@ def normalize_product_name(text):
     text = text.replace("boxes", "box")
     text = text.replace("tins", "tin")
     text = text.replace("blisters", "blister")
+    
+    # Korrigiere bekannte Tippfehler (basierend auf der Website-Analyse)
+    text = text.replace("togehter", "together")
+    
     return text
 
 def prepare_keywords(products):
