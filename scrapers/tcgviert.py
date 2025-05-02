@@ -6,7 +6,7 @@ import random
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from utils.telegram import send_telegram_message, escape_markdown, send_batch_notification
-from utils.matcher import is_keyword_in_text, extract_product_type_from_text
+from utils.matcher import is_keyword_in_text, extract_product_type_from_text, load_exclusion_sets
 from utils.stock import get_status_text, update_product_status
 from utils.availability import detect_availability
 
@@ -100,14 +100,34 @@ def check_known_404_urls(keywords_map, seen, out_of_stock, only_available, all_p
     """
     global _product_404_cache
     current_time = time.time()
+
+    # Bekannte Produktmuster ohne spezifische Seriennummern
+    product_patterns = {
+        "display": [
+            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-en-max-1-per-person",
+            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-de-max-1-pro-person"
+        ]
+    }
+
+    # Erstelle dynamische URLs basierend auf aktuellen Suchbegriffen
+    hardcoded_urls = []
     
-    # Fest codierte direkte Produkt-URLs für wichtige Produkte
-    hardcoded_urls = [
-        "https://tcgviert.com/products/pokemon-tcg-journey-together-sv09-36er-display-en-max-1-per-person",
-        "https://tcgviert.com/products/pokemon-tcg-reisegefahrten-kp09-36er-display-de-max-1-pro-person"
-    ]
+    # Für jedes Schlüsselwort in der Suchbegriffskarte
+    for search_term in keywords_map.keys():
+        # Extrahiere den Produkttyp
+        product_type = extract_product_type_from_text(search_term)
+        
+        # Wenn ein passender Produkttyp und Muster vorhanden sind
+        if product_type in product_patterns:
+            normalized_search_term = search_term.lower().replace(' display', '').strip()
+            
+            # Erstelle URLs basierend auf den vorhandenen Mustern
+            for pattern in product_patterns[product_type]:
+                url = pattern.format(normalized_search_term.replace(' ', '-'))
+                if url not in hardcoded_urls:
+                    hardcoded_urls.append(url)
     
-    # Füge die fest codierten URLs in den 404-Cache, wenn sie noch nicht drin sind
+    # Füge die generierten URLs in den 404-Cache, wenn sie noch nicht drin sind
     for url in hardcoded_urls:
         if url not in _product_404_cache:
             _product_404_cache[url] = {
@@ -258,11 +278,22 @@ def extract_product_info(title):
     code_match = re.search(r'(?:sv|kp|op)(?:\s|-)?\d+', title.lower())
     if code_match:
         series_code = code_match.group(0).replace(" ", "").replace("-", "")
-    # Spezifische Serien-Namen
-    elif "journey together" in title.lower():
-        series_code = "sv09"
-    elif "reisegefährten" in title.lower():
-        series_code = "kp09"
+    # Extrahiere Serien-Code aus beliebigem Text
+    else:
+        # Normalisiere den Titel und entferne "display", "booster", etc.
+        normalized_title = title.lower()
+        normalized_title = re.sub(r'display|booster|\d+er|box|pack|tin|elite|trainer', '', normalized_title)
+        normalized_title = re.sub(r'\s+', ' ', normalized_title).strip()
+        
+        # Verwende den Anfang des normalisierten Titels als Serien-Code
+        if normalized_title:
+            # Begrenze auf 1-3 Wörter für den Serien-Code
+            words = normalized_title.split()
+            if words:
+                if len(words) > 3:
+                    series_code = "-".join(words[:3])
+                else:
+                    series_code = "-".join(words)
     
     return (series_code, product_type, language)
 
@@ -309,11 +340,24 @@ def discover_collection_urls():
         # Bei Fehlern direkt zu diesen URLs wechseln
         fallback_urls = ["https://tcgviert.com/collections/all"]
         
-        # Spezifische URLs für SV09/KP09 Produkte
-        display_specific_urls = [
-            "https://tcgviert.com/products/pokemon-tcg-journey-together-sv09-36er-display-en-max-1-per-person",
-            "https://tcgviert.com/products/pokemon-tcg-reisegefahrten-kp09-36er-display-de-max-1-pro-person"
+        # Generiere dynamische Produktmuster-URLs
+        display_specific_urls = []
+        
+        # Erstelle dynamische Produktmuster-URLs basierend auf bekannten URL-Strukturen
+        base_display_patterns = [
+            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-en-max-1-per-person",
+            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-de-max-1-pro-person"
         ]
+        
+        # Verwende generische Produktnamen für Muster
+        common_product_names = ["newest-series", "current-set", "latest-expansion"]
+        
+        # Erstelle generische URLs
+        for pattern in base_display_patterns:
+            for product_name in common_product_names:
+                url = pattern.format(product_name)
+                if url not in display_specific_urls:
+                    display_specific_urls.append(url)
         
         # Diese direkt zu den validen URLs hinzufügen
         for url in display_specific_urls:
@@ -378,7 +422,7 @@ def discover_collection_urls():
                     full_url = f"{main_url}{href}" if href.startswith("/") else href
                     
                     # Priorisiere relevante URLs
-                    if any(term in href.lower() for term in ["journey", "together", "reise", "pokemon", "vorbestell"]):
+                    if any(term in href.lower() for term in ["pokemon", "vorbestell"]):
                         if full_url not in valid_urls:
                             valid_urls.append(full_url)
                     else:
@@ -430,7 +474,7 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
         products = data["products"]
         logger.info(f"🔍 {len(products)} Produkte zum Prüfen gefunden (JSON)")
         
-        # Relevante Produkte filtern (für Journey Together/Reisegefährten)
+        # Relevante Produkte filtern
         # Optimiert: Nur filtern, nicht alles ausgeben
         relevant_products = []
         for product in products:
@@ -447,11 +491,24 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
                 if search_term_type == "display" and product_type != "display":
                     continue
                 
-                # Prüfe auf relevante Begriffe
-                if ("journey together" in title.lower() or "reisegefährten" in title.lower() or 
-                   "sv09" in title.lower() or "kp09" in title.lower()):
-                    is_relevant = True
-                    break
+                # Erweitern: Generalisierte Relevanzprüfung
+                # Präpare Ausschlusslisten für die Serienprüfung
+                exclusion_sets = load_exclusion_sets()
+                
+                # Wenn wir nach einem bestimmten Suchbegriff und Typ suchen, prüfe Relevanz
+                tokens = keywords_map.get(search_term, [])
+                if is_keyword_in_text(tokens, title, log_level='None'):
+                    # Wenn relevant, prüfe auf Ausschlusslisten
+                    should_exclude = False
+                    
+                    for exclusion in exclusion_sets:
+                        if exclusion in title.lower():
+                            should_exclude = True
+                            break
+                    
+                    if not should_exclude:
+                        is_relevant = True
+                        break
             
             if is_relevant:
                 relevant_products.append(product)
@@ -467,12 +524,11 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
                     product_type = extract_product_type_from_text(title)
                     
                     # Nur Displays hinzufügen
-                    if product_type == "display" and (
-                        "journey together" in title.lower() or 
-                        "reisegefährten" in title.lower() or 
-                        "sv09" in title.lower() or 
-                        "kp09" in title.lower()):
-                        relevant_products.append(product)
+                    if product_type == "display":
+                        for search_term, tokens in keywords_map.items():
+                            if is_keyword_in_text(tokens, title, log_level='None'):
+                                relevant_products.append(product)
+                                break
             
             # Wenn immer noch nichts gefunden, verwende alle Produkte
             if not relevant_products:
@@ -726,10 +782,13 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                     # Prüfe ob der Link zu Pokémon-Produkten führt
                     is_pokemon_link = ("pokemon" in href.lower() or 
                                       "pokemon" in text.lower())
-                                      
-                    # Prüfe ob der Produktname passt
-                    has_right_terms = any(term in href.lower() or term in text.lower() 
-                                        for term in ["journey", "reise", "gefähr", "gefaehr", "sv09", "kp09"])
+                    
+                    # Generische Relevanzprüfung für beliebige Produkte
+                    is_relevant = False
+                    for search_term, tokens in keywords_map.items():
+                        if is_keyword_in_text(tokens, text, log_level='None') or is_keyword_in_text(tokens, href, log_level='None'):
+                            is_relevant = True
+                            break
                     
                     # Vollständige URL erstellen
                     if not href.startswith('http'):
@@ -742,7 +801,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                         continue
                     
                     # Links mit Produktinformationen bevorzugen
-                    if (is_product_link and is_pokemon_link) or has_right_terms:
+                    if (is_product_link and is_pokemon_link) or is_relevant:
                         relevant_links.append((product_url, text))
                         processed_links.add(product_url)
                 
@@ -863,13 +922,6 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                 
                 # Frühe Prüfung auf relevante Produkte - Filter nach Produktart
                 title_product_type = extract_product_type_from_text(title)
-                
-                # Prüfe, ob das Produkt relevant ist
-                title_lower = title.lower()
-                if not ("journey" in title_lower or "reise" in title_lower or 
-                        "gefährten" in title_lower or "sv09" in title_lower or 
-                        "kp09" in title_lower):
-                    continue
                 
                 # Link extrahieren
                 link_elem = product.find("a", href=True)

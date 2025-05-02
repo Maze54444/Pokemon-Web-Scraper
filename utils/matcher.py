@@ -42,9 +42,14 @@ def extract_product_type_from_text(text):
         "etb": [
             r'\belite\s+trainer\s+box\b', 
             r'\betb\b', 
-            r'\btrainer\s+box\b', 
+            r'\belite-trainer-box\b',
+            r'\belitetrainerbox\b'
+        ],
+        "ttb": [
             r'\btop\s+trainer\s+box\b',
-            r'\btop-trainer-box\b'
+            r'\bttb\b',
+            r'\btop-trainer-box\b',
+            r'\btoptrainerbox\b'
         ],
         "build_battle": [
             r'\bbuild\s*[&]?\s*battle\b', 
@@ -81,9 +86,9 @@ def extract_product_type_from_text(text):
         (re.search(r'\b36\b|\b36er\b|\b18\b|\b18er\b', text) or re.search(r'\bbooster\s+box\b', text))):
         return "display"
         
-    # Spezifische Codes-Muster, die nur für Displays verwendet werden
-    # SV09/KP09 + (36er/18er oder Display)
-    if (re.search(r'\b(sv0?9|kp0?9)\b', text) and 
+    # Spezifische Codes-Muster, die üblicherweise mit bestimmten Produkttypen verbunden sind
+    # SVXX/KPXX + (36er/18er oder Display)
+    if (re.search(r'\b(sv\d+|kp\d+)\b', text) and 
         (re.search(r'\b36er\b|\b18er\b|\bdisplay\b|\bbooster box\b', text))):
         return "display"
         
@@ -195,33 +200,24 @@ def is_keyword_in_text(keywords, text, log_level='DEBUG'):
     
     # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Text übereinstimmen
     # Besonders stringente Prüfung für Displays
-    if search_product_type == "display":
-        if text_product_type != "display":
+    if search_product_type in ["display", "etb", "ttb"]:
+        if text_product_type != search_product_type:
             if log_level and log_level != 'None':
-                logger.debug(f"⚠️ Produkttyp-Konflikt: Suche nach 'display', Text enthält '{text_product_type}': {original_text}")
+                logger.debug(f"⚠️ Produkttyp-Konflikt: Suche nach '{search_product_type}', Text enthält '{text_product_type}': {original_text}")
             return False
     
-    # Prüfe auf falsche Kartensets und veraltete Produkte
-    exclusion_sets = [
-        "stürmische funken", "sturmi", "paradox rift", "paradox", "prismat", "stellar", "battle partners",
-        "nebel der sagen", "zeit", "paldea", "obsidian", "151", "astral", "brilliant", "fusion", 
-        "kp01", "kp02", "kp03", "kp04", "kp05", "kp06", "kp07", "kp08", "sv01", "sv02", "sv03", "sv04", 
-        "sv05", "sv06", "sv07", "sv08", "sv10", "sv11", "sv12", "sv13", "the glory of team rocket",
-        "glory of team rocket"
-    ]
+    # Versuche, eine Konfigurationsdatei mit Ausschlusssets zu laden
+    exclusion_sets = load_exclusion_sets()
     
-    # Spezifische Ausschlüsse nur bei Suchbegriffen zu Journey Together/Reisegefährten
-    has_journey_together = "journey together" in search_term.lower() or "sv09" in search_term.lower()
-    has_reisegefaehrten = "reisegefährten" in search_term.lower() or "kp09" in search_term.lower()
+    # Produktspezifische Keywords aus dem Suchbegriff extrahieren (ohne Produkttyp)
+    product_keywords = extract_product_keywords(search_term)
     
-    # Wenn wir nach einem spezifischen Produkt suchen, prüfen wir auf falsche Sets
-    if (has_journey_together or has_reisegefaehrten) and search_product_type == "display":
-        # Prüfen wir auf falsche Sets/Editionen, um andere Produkte auszuschließen
-        for exclusion in exclusion_sets:
-            if exclusion in text.lower():
-                if log_level and log_level != 'None':
-                    logger.debug(f"⚠️ Text enthält ausgeschlossenes Set '{exclusion}': '{original_text}'")
-                return False
+    # Prüfe, ob Text Ausschlusssets enthält, die nicht dem gesuchten Produkt entsprechen
+    for exclusion in exclusion_sets:
+        if exclusion in text.lower() and not any(keyword in exclusion for keyword in product_keywords):
+            if log_level and log_level != 'None':
+                logger.debug(f"⚠️ Text enthält ausgeschlossenes Set '{exclusion}': '{original_text}'")
+            return False
     
     # Standardisiere Singular/Plural
     standardized_keywords = []
@@ -253,7 +249,7 @@ def is_keyword_in_text(keywords, text, log_level='DEBUG'):
     # Sammle wichtige Keywords (> 3 Zeichen) und nicht in ignore_words,
     # aber nicht die Produkttyp-Wörter (die werden separat geprüft)
     important_keywords = [k for k in standardized_keywords 
-                         if len(k) > 3 and k not in ignore_words and k not in ["display", "booster", "pack", "box", "etb", "blister"]]
+                         if len(k) > 3 and k not in ignore_words and k not in ["display", "booster", "pack", "box", "etb", "ttb", "blister"]]
     
     # Wenn es keine wichtigen Keywords gibt, verwende alle
     if not important_keywords:
@@ -266,6 +262,18 @@ def is_keyword_in_text(keywords, text, log_level='DEBUG'):
     if search_product_type == "display" and not any(term in standardized_text for term in ["display", "36er", "box", "36"]):
         if log_level and log_level != 'None':
             logger.debug(f"⚠️ 'display' im Suchbegriff, aber kein Display-Begriff im Text gefunden: '{original_keywords}' in '{original_text}'")
+        return False
+    
+    # Bei Suche nach "etb", muss "etb" oder "elite trainer box" im Text vorkommen
+    if search_product_type == "etb" and not any(term in standardized_text for term in ["etb", "elite trainer", "trainer box"]):
+        if log_level and log_level != 'None':
+            logger.debug(f"⚠️ 'etb' im Suchbegriff, aber kein ETB-Begriff im Text gefunden: '{original_keywords}' in '{original_text}'")
+        return False
+    
+    # Bei Suche nach "ttb", muss "ttb" oder "top trainer box" im Text vorkommen
+    if search_product_type == "ttb" and not any(term in standardized_text for term in ["ttb", "top trainer", "trainer box"]):
+        if log_level and log_level != 'None':
+            logger.debug(f"⚠️ 'ttb' im Suchbegriff, aber kein TTB-Begriff im Text gefunden: '{original_keywords}' in '{original_text}'")
         return False
     
     # Mindestens 80% der wichtigen Keywords müssen gefunden werden
@@ -281,6 +289,68 @@ def is_keyword_in_text(keywords, text, log_level='DEBUG'):
         logger.info(f"✅ Treffer für Suchbegriff: '{original_keywords}' in '{original_text}'")
         
     return True
+
+def extract_product_keywords(search_term):
+    """
+    Extrahiert produktspezifische Keywords aus einem Suchbegriff (ohne Produkttyp)
+    
+    :param search_term: Suchbegriff
+    :return: Liste mit produktspezifischen Keywords
+    """
+    search_term = search_term.lower()
+    
+    # Entferne Produkttyp-Wörter
+    product_type_words = ["display", "etb", "ttb", "elite trainer box", "top trainer box", 
+                          "elite-trainer-box", "top-trainer-box", "box"]
+    
+    for word in product_type_words:
+        search_term = search_term.replace(word, "")
+    
+    # Bereinige und teile in Wörter
+    clean_term = clean_text(search_term)
+    keywords = [word for word in clean_term.split() if len(word) > 2]
+    
+    # Entferne häufige Füllwörter
+    ignore_words = ["und", "the", "and", "for", "mit", "von", "pro", "per", "der", "die", "das", "set"]
+    keywords = [word for word in keywords if word not in ignore_words]
+    
+    return keywords
+
+def load_exclusion_sets():
+    """
+    Lädt die Liste der auszuschließenden Sets aus einer Konfigurationsdatei
+    oder verwendet eine Standard-Liste
+    
+    :return: Liste mit auszuschließenden Sets
+    """
+    exclusion_sets = []
+    try:
+        # Versuche, die Ausschlussliste aus einer Konfigurationsdatei zu laden
+        exclusion_file_paths = ["config/exclusion_sets.json", "data/exclusion_sets.json"]
+        
+        for file_path in exclusion_file_paths:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    exclusion_sets = json.load(f)
+                    logger.debug(f"Ausschlussliste aus {file_path} geladen: {len(exclusion_sets)} Einträge")
+                    return exclusion_sets
+            except FileNotFoundError:
+                pass
+            except json.JSONDecodeError as e:
+                logger.warning(f"Fehler beim Parsen der Ausschlussliste {file_path}: {e}")
+    except Exception as e:
+        logger.warning(f"Fehler beim Laden der Ausschlussliste: {e}")
+    
+    # Standard-Ausschlussliste, wenn keine Konfigurationsdatei gefunden wurde
+    exclusion_sets = [
+        "stürmische funken", "sturmi", "paradox rift", "paradox", "prismat", "stellar", "battle partners",
+        "nebel der sagen", "zeit", "paldea", "obsidian", "151", "astral", "brilliant", "fusion", 
+        "kp01", "kp02", "kp03", "kp04", "kp05", "kp06", "kp07", "kp08", "sv01", "sv02", "sv03", "sv04", 
+        "sv05", "sv06", "sv07", "sv08", "sv10", "sv11", "sv12", "sv13", 
+        "glory of team rocket"
+    ]
+    
+    return exclusion_sets
 
 def normalize_product_name(text):
     """
@@ -298,7 +368,7 @@ def normalize_product_name(text):
     text = text.replace("tins", "tin")
     text = text.replace("blisters", "blister")
     
-    # Korrigiere bekannte Tippfehler (basierend auf der Website-Analyse)
+    # Korrigiere bekannte Tippfehler
     text = text.replace("togehter", "together")
     
     return text

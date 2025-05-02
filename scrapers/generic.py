@@ -194,8 +194,7 @@ def should_filter_url(url, link_text=""):
     # 3. Zusätzliche Heuristiken für Produktlinks vs. andere Seiten
     if "/category/" in normalized_url or "/collection/" in normalized_url:
         # Kategorieseiten nur zulassen, wenn sie relevante Begriffe enthalten
-        relevant_keywords = ["pokemon", "display", "booster", "karmesin", "purpur", "scarlet", "violet",
-                            "reisegefährten", "journey together", "sv09", "kp09"]
+        relevant_keywords = ["pokemon", "display", "booster", "trainer", "box", "etb", "ttb"]
         if not any(keyword in normalized_url for keyword in relevant_keywords) and not any(keyword in normalized_text for keyword in relevant_keywords):
             return True
             
@@ -237,7 +236,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
     # Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
     all_products = []
     
-    # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
+    # Extrahiere den Produkttyp aus dem ersten Suchbegriff
     search_product_type = None
     if current_keywords:
         sample_search_term = current_keywords[0]
@@ -262,12 +261,11 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
         # Spezielle Behandlung für bekannte Shops mit spezifischen Pfadmustern
         if site_id == "mighty-cards.de" and not domain_paths:
             logger.info(f"🔍 Spezielle Pfadmuster für {site_id} werden verwendet")
-            # Manuelle Pfadmuster für Mighty-Cards
+            # Generische Pfadmuster für Pokemon-Produkte bei Mighty-Cards
             shop_paths = [
-                "/shop/SV09-Journey-Togehter-36er-Booster-Display-Pokemon",
-                "/shop/KP09-Reisegefahrten-36er-Booster-Display-Pokemon",
-                "/shop/KP09-Reisegefahrten-18er-Booster-Display-Pokemon",
-                "/pokemon/reisegefahrten-journey-together/"
+                "/shop/Pokemon",
+                "/pokemon/",
+                "/shop/Vorbestellung-c166467816"
             ]
             
             # Füge manuelle Pfade zum Cache hinzu
@@ -276,7 +274,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 product_id = f"{site_id}_{hashlib.md5(path_url.encode()).hexdigest()[:8]}"
                 domain_paths[product_id] = {
                     "url": path_url,
-                    "term": current_keywords[0] if current_keywords else "Reisegefährten display",
+                    "term": current_keywords[0] if current_keywords else "Pokemon",
                     "last_checked": 0,  # Erzwinge Überprüfung
                     "is_available": False
                 }
@@ -287,10 +285,10 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
         # Spezielle Behandlung für FantasiaCards
         elif site_id == "fantasiacards.de" and not domain_paths:
             logger.info(f"🔍 Spezielle Pfadmuster für {site_id} werden verwendet")
-            # Manuelle Pfade für FantasiaCards
+            # Manuelle Pfade für FantasiaCards (generisch für Pokémon-Produkte)
             shop_paths = [
-                "/products/pokemon-journey-together-display-eng",
-                "/collections/pokemon-1"
+                "/collections/pokemon-1",
+                "/collections/pokemon-neuheiten"
             ]
             
             # Füge manuelle Pfade zum Cache hinzu
@@ -299,7 +297,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 product_id = f"{site_id}_{hashlib.md5(path_url.encode()).hexdigest()[:8]}"
                 domain_paths[product_id] = {
                     "url": path_url,
-                    "term": current_keywords[0] if current_keywords else "Journey Together display",
+                    "term": current_keywords[0] if current_keywords else "Pokemon",
                     "last_checked": 0,  # Erzwinge Überprüfung
                     "is_available": False
                 }
@@ -365,9 +363,9 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     search_term_type = extract_product_type_from_search_term(matched_term)
                     title_product_type = extract_product_type_from_text(link_text)
                     
-                    # Wenn nach einem Display gesucht wird, aber der Titel etwas anderes enthält, überspringen
-                    if search_term_type == "display" and title_product_type != "display":
-                        logger.debug(f"⚠️ Produkttyp-Diskrepanz: Suche nach 'display', aber Produkt ist '{title_product_type}': {link_text}")
+                    # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Titel übereinstimmen
+                    if search_term_type in ["display", "etb", "ttb"] and title_product_type != search_term_type:
+                        logger.debug(f"⚠️ Produkttyp-Diskrepanz: Suche nach '{search_term_type}', aber Produkt ist '{title_product_type}': {link_text}")
                         continue
                     
                     # Strengere Keyword-Prüfung mit Berücksichtigung des Produkttyps
@@ -482,9 +480,16 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     # Extrahiere Produkttyp aus dem Suchbegriff
                     search_term_type = extract_product_type_from_search_term(search_term)
                     
-                    # Bei Display-Suchbegriffen: auch ersten Check machen, ob der Linktext Display enthält
-                    if search_term_type == "display" and not any(term in link_text for term in ["display", "36er", "booster box"]):
-                        continue
+                    # Bei spezifischen Produkttypen: zusätzliche Prüfung auf entsprechende Begriffe im Linktext
+                    if search_term_type == "display":
+                        if not any(term in link_text for term in ["display", "36er", "booster box"]):
+                            continue
+                    elif search_term_type == "etb":
+                        if not any(term in link_text for term in ["etb", "elite trainer", "trainer box"]):
+                            continue
+                    elif search_term_type == "ttb":
+                        if not any(term in link_text for term in ["ttb", "top trainer", "trainer box"]):
+                            continue
                     
                     if is_keyword_in_text(tokens, link_text, log_level='None'):
                         potential_product_links.append((href, a_tag.get_text().strip()))
@@ -518,9 +523,9 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     search_term_type = extract_product_type_from_search_term(search_term)
                     link_product_type = extract_product_type_from_text(link_text)
                     
-                    # VERBESSERT: Wenn nach einem Display gesucht wird, aber der Link keins ist, überspringen
-                    if search_term_type == "display" and link_product_type != "display":
-                        logger.debug(f"❌ Produkttyp-Konflikt: Suche nach Display, aber Link ist '{link_product_type}': {link_text}")
+                    # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Link übereinstimmen
+                    if search_term_type in ["display", "etb", "ttb"] and link_product_type != search_term_type:
+                        logger.debug(f"❌ Produkttyp-Konflikt: Suche nach '{search_term_type}', aber Link ist '{link_product_type}': {link_text}")
                         continue
                     
                     # VERBESSERT: Strenge Prüfung mit der neuen Funktion
@@ -563,9 +568,9 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             detail_product_type = extract_product_type_from_text(detail_title_text)
                             search_term_type = extract_product_type_from_search_term(matched_term)
                             
-                            # Wenn nach Display gesucht wird, muss der Detailtitel auch Display sein
-                            if search_term_type == "display" and detail_product_type != "display":
-                                logger.debug(f"❌ Detailseite ist kein Display, obwohl nach Display gesucht wurde: {detail_title_text}")
+                            # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Detailtitel übereinstimmen
+                            if search_term_type in ["display", "etb", "ttb"] and detail_product_type != search_term_type:
+                                logger.debug(f"❌ Detailseite ist kein {search_term_type}, obwohl danach gesucht wurde: {detail_title_text}")
                                 continue
                             
                             # Generelle Keyword-Übereinstimmungsprüfung
@@ -734,9 +739,13 @@ def extract_product_info(title):
         # Fallback zur alten Methode
         if re.search(r'display|36er', title.lower()):
             product_type = "display"
+        elif re.search(r'etb|elite trainer box', title.lower()):
+            product_type = "etb"
+        elif re.search(r'ttb|top trainer box', title.lower()):
+            product_type = "ttb"
         elif re.search(r'booster|pack|sleeve', title.lower()):
             product_type = "booster"
-        elif re.search(r'trainer box|elite trainer|box|tin', title.lower()):
+        elif re.search(r'box|tin', title.lower()):
             product_type = "box"
         elif re.search(r'blister|check\s?lane', title.lower()):
             product_type = "blister"
@@ -749,12 +758,42 @@ def extract_product_info(title):
     code_match = re.search(r'(?:sv|kp|op)(?:\s|-)?\d+', title.lower())
     if code_match:
         series_code = code_match.group(0).replace(" ", "").replace("-", "")
-    # Spezifische Serien-Namen
-    elif "journey together" in title.lower():
-        series_code = "sv09"
-    elif "reisegefährten" in title.lower():
-        series_code = "kp09"
-    elif "royal blood" in title.lower():
-        series_code = "op10"
+    # Ansonsten versuche, aus dem Titel abzuleiten
+    else:
+        # Extrahiere Tokens und versuche, eine Serie zu identifizieren
+        tokens = clean_text(title).split()
+        # Entferne allgemeine Begriffe wie "Pokemon", "Trainer", "Box", etc.
+        exclude_tokens = ["pokemon", "pokémon", "display", "box", "elite", "top", "trainer", 
+                          "etb", "ttb", "booster", "pack", "box", "tin", "blister"]
+        product_tokens = [t for t in tokens if t.lower() not in exclude_tokens and len(t) > 2]
+        
+        if product_tokens:
+            # Verwende die ersten beiden übrigen Token als Serie
+            series_code = "_".join(product_tokens[:2])
+            # Begrenzte Länge
+            if len(series_code) > 20:
+                series_code = series_code[:20]
     
     return (series_code, product_type, language)
+
+def extract_price_value(price_str):
+    """
+    Extrahiert den numerischen Wert aus einem Preis-String
+    
+    :param price_str: Preis als String (z.B. "19,99€" oder "EUR 29.99")
+    :return: Preis als Float oder None wenn nicht extrahierbar
+    """
+    if not price_str or price_str == "Preis nicht verfügbar":
+        return None
+        
+    # Suche nach Zahlen mit Komma oder Punkt
+    match = re.search(r'(\d+[.,]\d+|\d+)', price_str)
+    if match:
+        # Extrahiere den Wert und normalisiere das Format (Komma zu Punkt)
+        value_str = match.group(1).replace(',', '.')
+        try:
+            return float(value_str)
+        except ValueError:
+            pass
+    
+    return None

@@ -3,10 +3,12 @@ Filter-Utility-Modul zur Filterung von URLs und Text-Inhalten basierend auf den 
 """
 
 import re
+import json
 import logging
+import os
 from urllib.parse import urlparse
 from utils.filter_config import URL_FILTERS, TEXT_FILTERS, PRODUCT_TYPE_EXCLUSIONS, CATEGORY_WHITELIST
-from utils.matcher import extract_product_type_from_text
+from utils.matcher import extract_product_type_from_text, extract_product_keywords
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
@@ -46,6 +48,42 @@ def get_domain(url):
     except Exception as e:
         logger.debug(f"Fehler beim Extrahieren der Domain aus {url}: {e}")
         return url.lower()
+
+def load_exclusion_sets():
+    """
+    Lädt die Liste der auszuschließenden Sets aus einer Konfigurationsdatei
+    oder verwendet eine Standard-Liste
+    
+    :return: Liste mit auszuschließenden Sets
+    """
+    exclusion_sets = []
+    try:
+        # Versuche, die Ausschlussliste aus einer Konfigurationsdatei zu laden
+        exclusion_file_paths = ["config/exclusion_sets.json", "data/exclusion_sets.json"]
+        
+        for file_path in exclusion_file_paths:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    exclusion_sets = json.load(f)
+                    logger.debug(f"Ausschlussliste aus {file_path} geladen: {len(exclusion_sets)} Einträge")
+                    return exclusion_sets
+            except FileNotFoundError:
+                pass
+            except json.JSONDecodeError as e:
+                logger.warning(f"Fehler beim Parsen der Ausschlussliste {file_path}: {e}")
+    except Exception as e:
+        logger.warning(f"Fehler beim Laden der Ausschlussliste: {e}")
+    
+    # Standard-Ausschlussliste, wenn keine Konfigurationsdatei gefunden wurde
+    exclusion_sets = [
+        "stürmische funken", "sturmi", "paradox rift", "paradox", "prismat", "stellar", "battle partners",
+        "nebel der sagen", "zeit", "paldea", "obsidian", "astral", "brilliant", "fusion", 
+        "kp01", "kp02", "kp03", "kp04", "kp05", "kp06", "kp07", "kp08", "sv01", "sv02", "sv03", "sv04", 
+        "sv05", "sv06", "sv07", "sv08", "sv10", "sv11", "sv12", "sv13", 
+        
+    ]
+    
+    return exclusion_sets
 
 def should_filter_url(url, link_text=None, search_product_type=None, site_id=None):
     """
@@ -113,47 +151,63 @@ def should_filter_url(url, link_text=None, search_product_type=None, site_id=Non
                         return True
         
         # 5. Wichtig: Strenge Produkttyp-Überprüfung (insbesondere für Displays)
-        if search_product_type == "display":
-            # Wenn nach Display gesucht wird, filtere Nicht-Display Produkte heraus
+        if search_product_type:
+            # Extrahiere Produkttyp aus dem Text
             text_product_type = extract_product_type_from_text(normalized_text)
             
-            # Wenn der Produkttyp erkannt wurde und nicht "display" ist, filtern
-            if text_product_type != "unknown" and text_product_type != "display":
+            # Wenn der Produkttyp erkannt wurde und nicht mit dem gesuchten übereinstimmt, filtern
+            if text_product_type != "unknown" and text_product_type != search_product_type:
                 _store_filter_decision(cache_key, True)
                 return True
             
             # Zusätzliche Prüfung: Wenn der Link Text eindeutige Nicht-Display Begriffe enthält
-            non_display_terms = [
-                "3er", "3 er", "3-pack", "blister", "elite trainer", "etb", "top trainer", 
-                "build & battle", "build and battle", "einzelpack", "single pack", "einzelbooster",
-                "premium", "tin", "sleeves", "pin", "mini tin"
-            ]
-            
-            # Genaue Treffer mit Wortgrenzen
-            for term in non_display_terms:
-                if re.search(r'\b' + re.escape(term) + r'\b', normalized_text):
-                    _store_filter_decision(cache_key, True)
-                    return True
-            
-            # Filtere falsche Serien
-            exclusion_sets = [
-                "stürmische funken", "sturmi", "paradox rift", "paradox", "prismat", "stellar", "battle partners",
-                "nebel der sagen", "zeit", "paldea", "obsidian", "151", "astral", "brilliant", "fusion", 
-                "kp01", "kp02", "kp03", "kp04", "kp05", "kp06", "kp07", "kp08", "sv01", "sv02", "sv03", "sv04", 
-                "sv05", "sv06", "sv07", "sv08", "sv10", "sv11", "sv12", "sv13", 
-                "glory of team rocket"  # Ausnahme für journey together/reisegefährten
-            ]
-            
-            # Prüfe URL und Text auf falsche Serien
-            for exclusion in exclusion_sets:
-                if exclusion in normalized_url or exclusion in normalized_text:
-                    # Prüfe, ob wir nach Reisegefährten/Journey Together suchen
-                    if ("reisegefährten" in normalized_url or "journey together" in normalized_url or
-                        "reisegefährten" in normalized_text or "journey together" in normalized_text or
-                        "sv09" in normalized_url or "sv09" in normalized_text or
-                        "kp09" in normalized_url or "kp09" in normalized_text):
+            if search_product_type == "display":
+                non_display_terms = [
+                    "3er", "3 er", "3-pack", "blister", "elite trainer", "etb", "top trainer", 
+                    "build & battle", "build and battle", "einzelpack", "single pack", "einzelbooster",
+                    "premium", "tin", "sleeves", "pin", "mini tin"
+                ]
+                
+                # Genaue Treffer mit Wortgrenzen
+                for term in non_display_terms:
+                    if re.search(r'\b' + re.escape(term) + r'\b', normalized_text):
                         _store_filter_decision(cache_key, True)
                         return True
+            
+            # Ähnliche Prüfung für ETB
+            elif search_product_type == "etb":
+                non_etb_terms = [
+                    "display", "36er", "blister", "tin", "booster box", "36",
+                    "build & battle", "build and battle", "einzelpack", "single pack"
+                ]
+                
+                for term in non_etb_terms:
+                    if re.search(r'\b' + re.escape(term) + r'\b', normalized_text):
+                        _store_filter_decision(cache_key, True)
+                        return True
+            
+            # Ähnliche Prüfung für TTB
+            elif search_product_type == "ttb":
+                non_ttb_terms = [
+                    "display", "36er", "blister", "tin", "booster box", "36", "elite trainer",
+                    "build & battle", "build and battle", "einzelpack", "single pack"
+                ]
+                
+                for term in non_ttb_terms:
+                    if re.search(r'\b' + re.escape(term) + r'\b', normalized_text):
+                        _store_filter_decision(cache_key, True)
+                        return True
+    
+    # Prüfe auf ausgeschlossene Sets, falls ein Link-Text vorhanden ist
+    if normalized_text:
+        # Lade Ausschluss-Sets
+        exclusion_sets = load_exclusion_sets()
+        
+        # Wenn Link-Text einen ausgeschlossenen Set-Namen enthält, filtern
+        for exclusion in exclusion_sets:
+            if exclusion in normalized_text:
+                _store_filter_decision(cache_key, True)
+                return True
     
     # Whitelist-Ansatz für Kategorien, wenn aktiviert
     if is_category_link(normalized_url) and CATEGORY_WHITELIST:
@@ -375,16 +429,23 @@ def filter_product_type(product_title, search_product_type):
     # Extrahiere Produkttyp aus dem Titel
     text_product_type = extract_product_type_from_text(product_title)
     
-    # Wenn Display gesucht wird, muss der Titel auch als Display erkannt werden
-    if search_product_type == "display":
-        # Sehr strenge Prüfung für Displays
+    # Wenn ein bestimmter Produkttyp gesucht wird, muss der Titel auch als dieser Typ erkannt werden
+    if search_product_type in ["display", "etb", "ttb"]:
+        # Sehr strenge Prüfung für bestimmte Produkttypen
         if text_product_type in ("unknown", ""):
-            # Bei unbekanntem Typ: Prüfe auf eindeutige Display-Hinweise
-            if re.search(r'\bdisplay\b|\b36er\b|\b36\s+booster\b|\bbooster\s+box\b', product_title):
-                return True
+            # Bei unbekanntem Typ: Prüfe auf eindeutige Hinweise für den gesuchten Typ
+            if search_product_type == "display":
+                if re.search(r'\bdisplay\b|\b36er\b|\b36\s+booster\b|\bbooster\s+box\b', product_title):
+                    return True
+            elif search_product_type == "etb":
+                if re.search(r'\betb\b|\belite\s+trainer\s+box\b|\belite-trainer\b', product_title):
+                    return True
+            elif search_product_type == "ttb":
+                if re.search(r'\bttb\b|\btop\s+trainer\s+box\b|\btop-trainer\b', product_title):
+                    return True
             return False
         
-        return text_product_type == "display"
+        return text_product_type == search_product_type
     
     # Bei anderen Produkttypen können wir weniger streng sein
     return True

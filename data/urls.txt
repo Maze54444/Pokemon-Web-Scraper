@@ -1,11 +1,9 @@
-https://tcgviert.com/search?options%5Bunavailable_products%5D=last&options%5Bprefix%5D=last&options%5Bfields%5D=title%2Cvendor%2Cproduct_type%2Cvariants.title&q=journey+together
-https://tcgviert.com/search?options%5Bunavailable_products%5D=last&options%5Bprefix%5D=last&options%5Bfields%5D=title%2Cvendor%2Cproduct_type%2Cvariants.title&q=reisegef%C3%A4hrten
-https://www.comicplanet.de/
+https://tcgviert.com/
 https://kofuku.de/
 https://www.card-corner.de/search/?qs=journey+together
 https://games-island.eu/
 https://sapphire-cards.de/
-https://www.mighty-cards.de/shop/search?keyword=journey%20together&limit=9
-https://www.mighty-cards.de/shop/search?keyword=reisegef%C3%A4hrten&limit=9
+https://www.mighty-cards.de/
+https://www.mighty-cards.de/
 https://www.gameware.at/info/spaces/gameware/gamewareSearch?query=reisegef%E4hrten&actionTag=search
 https://fantasiacards.de/search?q=journey+together&options%5Bprefix%5D=last

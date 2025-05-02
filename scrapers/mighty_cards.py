@@ -6,7 +6,7 @@ import json
 import hashlib
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote_plus, urlparse
-from utils.matcher import is_keyword_in_text, extract_product_type_from_text
+from utils.matcher import is_keyword_in_text, extract_product_type_from_text, load_exclusion_sets
 from utils.stock import get_status_text, update_product_status
 from utils.availability import detect_availability
 
@@ -36,25 +36,105 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
     # Set für Deduplizierung von gefundenen Produkten
     found_product_ids = set()
     
-    # Hardcoded Beispiel-URLs für bekannte Produkte basierend auf deiner Analyse
-    hardcoded_urls = [
-        "https://www.mighty-cards.de/shop/SV09-Journey-Togehter-36er-Booster-Display-Pokemon-p743684893",
-        "https://www.mighty-cards.de/shop/KP09-Reisegefahrten-36er-Booster-Display-Pokemon-p739749306",
-        "https://www.mighty-cards.de/shop/KP09-Reisegefahrten-18er-Booster-Display-Pokemon-p739750556",
-        # Neue URL aus der Log-Analyse hinzugefügt
-        "https://www.mighty-cards.de/pokemon/reisegefahrten-journey-together/"
+    # Ermittle Produkttyp aus dem ersten Suchbegriff
+    search_product_type = None
+    if keywords_map:
+        sample_search_term = list(keywords_map.keys())[0]
+        search_product_type = extract_product_type_from_text(sample_search_term)
+        logger.debug(f"🔍 Suche nach Produkttyp: '{search_product_type}'")
+    
+    # Generiere dynamische URL-Muster basierend auf den Suchbegriffen
+    hardcoded_urls = []
+    
+    # URL-Muster für verschiedene Produkttypen
+    url_patterns = {
+        "display": [
+            "https://www.mighty-cards.de/shop/{}-36er-Booster-Display-Pokemon-p{}",
+            "https://www.mighty-cards.de/shop/{}-18er-Booster-Display-Pokemon-p{}"
+        ],
+        "box": [
+            "https://www.mighty-cards.de/shop/{}-Top-Trainer-Box-Pokemon-p{}",
+            "https://www.mighty-cards.de/shop/{}-Elite-Trainer-Box-Pokemon-p{}"
+        ]
+    }
+    
+    # Füge allgemeine Pokemon-Kategorie-URL hinzu
+    hardcoded_urls.append("https://www.mighty-cards.de/pokemon/")
+    
+    # Generiere URLs basierend auf Suchbegriffen und Produkttypen
+    for search_term, tokens in keywords_map.items():
+        product_type = extract_product_type_from_text(search_term)
+        
+        # Normalisiere den Suchbegriff für die URL
+        normalized_term = search_term.lower()
+        for suffix in [" display", " box", " etb", " tin"]:
+            normalized_term = normalized_term.replace(suffix, "")
+        normalized_term = normalized_term.strip().replace(" ", "-")
+        
+        # Wenn wir passende Muster für den Produkttyp haben, generiere URLs
+        if product_type in url_patterns:
+            for pattern in url_patterns[product_type]:
+                # Placeholder-ID für die URL (wird später mit echten IDs ersetzt)
+                placeholder_id = str(random.randint(700000000, 799999999))
+                product_url = pattern.format(normalized_term, placeholder_id)
+                hardcoded_urls.append(product_url)
+                
+                # Variante mit anderem Formatierungsstil
+                alt_term = normalized_term.replace("-", "")
+                alt_url = pattern.format(alt_term, placeholder_id)
+                hardcoded_urls.append(alt_url)
+        
+        # Füge auch eine produktspezifische Seite hinzu
+        hardcoded_urls.append(f"https://www.mighty-cards.de/pokemon/{normalized_term}/")
+    
+    # User-Agent-Rotation zur Vermeidung von Bot-Erkennung
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
     ]
     
-    # User-Agent für Anfragen
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "de,en-US;q=0.7,en;q=0.3",
+        "User-Agent": random.choice(user_agents),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://www.mighty-cards.de/",
         "DNT": "1",
         "Connection": "keep-alive",
-        "Referer": "https://www.mighty-cards.de/",
         "Upgrade-Insecure-Requests": "1"
     }
+    
+    logger.info(f"🔍 Prüfe {len(hardcoded_urls)} bekannte Produkt-URLs")
+    
+    # Cache für fehlgeschlagene URLs mit Timestamps
+    failed_urls_cache = {}
+    
+    # Direkter Zugriff auf bekannte Produkt-URLs mit Wiederholungsversuchen
+    successful_direct_urls = False
+    for product_url in hardcoded_urls:
+        # Überspringe kürzlich fehlgeschlagene URLs für 1 Stunde
+        if product_url in failed_urls_cache:
+            last_failed_time = failed_urls_cache[product_url]
+            if time.time() - last_failed_time < 3600:  # 1 Stunde Cooldown
+                logger.info(f"⏭️ Überspringe kürzlich fehlgeschlagene URL: {product_url}")
+                continue
+        
+        if product_url in processed_urls:
+            continue
+        
+        processed_urls.add(product_url)
+        product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, max_retries)
+        
+        if product_data:
+            successful_direct_urls = True
+            logger.info(f"✅ Direkter Produktlink erfolgreich verarbeitet: {product_url}")
+            
+            # Produkt zur Liste hinzufügen für sortierte Benachrichtigung
+            if isinstance(product_data, dict):
+                all_products.append(product_data)
+        else:
+            # URL zum Cache der fehlgeschlagenen URLs hinzufügen
+            failed_urls_cache[product_url] = time.time()
     
     # 1. Zuerst: Versuche die WordPress Sitemap für Produkte zu laden
     logger.info("🔍 Versuche Produktdaten über die WP-Sitemap zu laden")
@@ -64,8 +144,27 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
     max_urls_to_process = 20
     if len(sitemap_products) > max_urls_to_process:
         logger.info(f"⚙️ Begrenze Verarbeitung auf {max_urls_to_process} URLs (von {len(sitemap_products)} gefundenen)")
-        # Filter für relevante URLs - bevorzuge URLs mit "journey", "reisegef", "pokemon", "sv09", "kp09"
-        priority_urls = [url for url in sitemap_products if any(kw in url.lower() for kw in ["journey", "reisegef", "pokemon", "sv09", "kp09"])]
+        # Filter für relevante URLs - bevorzuge URLs, die mit den Suchbegriffen übereinstimmen
+        priority_urls = []
+        
+        # Sammle relevante Begriffe aus den Suchbegriffen
+        relevant_terms = []
+        for search_term in keywords_map.keys():
+            # Entferne produktspezifische Begriffe wie "display", "box"
+            cleaned_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
+            relevant_terms.append(cleaned_term)
+            # Füge Begriffe auch in URL-freundlichem Format hinzu
+            relevant_terms.append(cleaned_term.replace(' ', '-'))
+            relevant_terms.append(cleaned_term.replace(' ', ''))
+        
+        # Füge generische Begriffe hinzu
+        relevant_terms.extend(["pokemon", "display", "booster"])
+        
+        # Priorisiere URLs basierend auf relevanten Begriffen
+        for url in sitemap_products:
+            if any(term in url.lower() for term in relevant_terms):
+                priority_urls.append(url)
+                
         # Wenn nicht genug prioritäre URLs, fülle mit anderen auf
         if len(priority_urls) < max_urls_to_process:
             remaining_urls = [url for url in sitemap_products if url not in priority_urls]
@@ -140,7 +239,7 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
                     found_product_ids.add(product_id)
                     logger.info(f"✅ Neuer Treffer gefunden (Suche): {product_data['title']} - {product_data['status_text']}")
     
-    # 5. Zuletzt: Fallback auf hardcoded URLs, wenn keine Produkte gefunden wurden
+    # 5. Zuletzt: Fallback auf hardcodierte URLs, wenn keine Produkte gefunden wurden
     if not all_products:
         logger.info(f"🔍 Keine Produkte gefunden. Prüfe {len(hardcoded_urls)} bekannte Produkt-URLs als Fallback")
         for product_url in hardcoded_urls:
@@ -203,7 +302,7 @@ def fetch_products_from_sitemap(headers):
                     if loc_tag:
                         product_url = loc_tag.text
                         if any(keyword in product_url.lower() for keyword in 
-                              ["shop/", "pokemon", "journey", "togehter", "together", "reisegefahrten"]):
+                              ["shop/", "pokemon"]):
                             product_urls.append(product_url)
             
             # Wenn es sich um einen Sitemap-Index handelt, prüfe auch die verlinkten Sitemaps
@@ -230,7 +329,7 @@ def fetch_products_from_sitemap(headers):
                                         if loc_tag:
                                             url = loc_tag.text
                                             if any(keyword in url.lower() for keyword in 
-                                                  ["shop/", "pokemon", "journey", "togehter", "together", "reisegefahrten"]):
+                                                  ["shop/", "pokemon"]):
                                                 product_urls.append(url)
                         except Exception as e:
                             logger.warning(f"⚠️ Fehler beim Laden der Sub-Sitemap {loc_tag.text}: {e}")
@@ -242,7 +341,7 @@ def fetch_products_from_sitemap(headers):
                 for link in soup.find_all("a", href=True):
                     href = link.get("href")
                     if any(keyword in href.lower() for keyword in 
-                          ["shop/", "pokemon", "journey", "togehter", "together", "reisegefahrten"]):
+                          ["shop/", "pokemon"]):
                         if href.startswith("http"):
                             product_urls.append(href)
                         else:
@@ -258,11 +357,11 @@ def fetch_products_from_sitemap(headers):
         except Exception as e:
             logger.warning(f"⚠️ Fehler beim Abrufen oder Parsen der Sitemap {sitemap_url}: {e}")
     
-    # Spezielle Kategorie hinzufügen, wenn aus Logs bekannt
-    journey_category_url = "https://www.mighty-cards.de/pokemon/reisegefahrten-journey-together/"
-    if journey_category_url not in product_urls:
-        product_urls.append(journey_category_url)
-        logger.info("Spezielle Kategorieseite für Reisegefährten hinzugefügt")
+    # Spezielle Kategorie hinzufügen
+    pokemon_category_url = "https://www.mighty-cards.de/pokemon/"
+    if pokemon_category_url not in product_urls:
+        product_urls.append(pokemon_category_url)
+        logger.info("Spezielle Kategorieseite für Pokemon hinzugefügt")
     
     return product_urls
 
@@ -292,7 +391,9 @@ def fetch_products_from_ecwid(keywords_map, headers):
 
         for search_term in keywords_map.keys():
             # Bereinige den Suchbegriff
-            clean_term = search_term.lower().replace("display", " ").strip()
+            clean_term = search_term.lower()
+            # Entferne produktspezifische Begriffe wie "display", "box"
+            clean_term = re.sub(r'\s+(display|box|tin|etb)$', '', clean_term)
             
             # 1. Versuche über die Bootstrap-API
             try:
@@ -323,10 +424,15 @@ def fetch_products_from_ecwid(keywords_map, headers):
                                 product_id = item.get('id')
                                 product_name = item.get('name', '').lower()
                                 
+                                # Generalisierte Relevanzprüfung
+                                is_relevant = False
+                                for search_term, tokens in keywords_map.items():
+                                    if is_keyword_in_text(tokens, product_name, log_level='None'):
+                                        is_relevant = True
+                                        break
+                                
                                 # Filtern nach relevanten Produkten
-                                if (product_id and 
-                                    ('journey' in product_name or 'reisegef' in product_name or 
-                                     'sv09' in product_name or 'kp09' in product_name)):
+                                if product_id and is_relevant:
                                     product_url = f"https://www.mighty-cards.de/shop/p{product_id}"
                                     product_urls.append(product_url)
                     except (ValueError, KeyError) as e:
@@ -373,7 +479,7 @@ def fetch_products_from_categories(headers):
         "https://www.mighty-cards.de/shop/Pokemon-c165637849/",  # Pokemon-Kategorie
         "https://www.mighty-cards.de/shop/Displays-c165638577/",  # Displays-Kategorie
         "https://www.mighty-cards.de/shop/Vorbestellung-c166467816/",  # Vorbestellungen
-        "https://www.mighty-cards.de/pokemon/reisegefahrten-journey-together/"  # Spezifische Reisegefährten-Kategorie
+        "https://www.mighty-cards.de/pokemon/"  # Spezifische Pokemon-Kategorie
     ]
     
     for category_url in category_urls:
@@ -440,8 +546,12 @@ def search_mighty_cards_products(search_term, headers):
     try:
         logger.info(f"🔍 Suche nach Produkten mit Begriff: {search_term}")
         
+        # Bereinige Suchbegriff - entferne produktspezifische Begriffe wie "display", "box"
+        clean_term = search_term.lower()
+        clean_term = re.sub(r'\s+(display|box|tin|etb)$', '', clean_term)
+        
         # URL-Encoding für die Suche
-        encoded_term = quote_plus(search_term)
+        encoded_term = quote_plus(clean_term)
         search_url = f"https://www.mighty-cards.de/shop/search?keyword={encoded_term}"
         
         response = requests.get(search_url, headers=headers, timeout=15)
@@ -521,10 +631,6 @@ def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, 
             if not title:
                 title = extract_title_from_url(product_url)
                 
-            # Korrigiere bekannte Tippfehler
-            if "Togehter" in title:
-                title = title.replace("Togehter", "Together")
-                
             is_available = js_data.get("available", False)
             price = js_data.get("price", "Preis nicht verfügbar")
             if isinstance(price, (int, float)):
@@ -551,10 +657,6 @@ def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, 
             else:
                 title = title_elem.text.strip()
             
-            # Korrigiere bekannte Tippfehler
-            if "Togehter" in title:
-                title = title.replace("Togehter", "Together")
-            
             # Basierend auf der HTML-Analyse: Extrahiere Preis aus dem entsprechenden Element
             price_elem = soup.find('span', {'class': 'details-product-price__value'})
             price = price_elem.text.strip() if price_elem else "Preis nicht verfügbar"
@@ -578,6 +680,9 @@ def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, 
         # Extrahiere Produkttyp aus dem Titel
         title_product_type = extract_product_type_from_text(title)
         
+        # Laden der Ausschlusslisten für die Filterfunktion
+        exclusion_sets = load_exclusion_sets()
+        
         # Prüfe den Titel gegen alle Suchbegriffe
         matched_term = None
         for search_term, tokens in keywords_map.items():
@@ -590,19 +695,29 @@ def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, 
                 
             # Prüfe, ob der Titel den Suchbegriff enthält
             if is_keyword_in_text(tokens, title, log_level='None'):
-                matched_term = search_term
-                break
+                # Prüfe, ob das Produkt in den Ausschlusslisten enthalten ist
+                should_exclude = False
+                for exclusion in exclusion_sets:
+                    if exclusion in title.lower():
+                        should_exclude = True
+                        break
+                
+                if not should_exclude:
+                    matched_term = search_term
+                    break
         
-        # Wenn kein Match gefunden, versuche Fallback basierend auf URL
+        # Wenn kein Match gefunden und keine Ausschlussbegriffe zutreffen, versuche Fallback
         if not matched_term:
-            if "SV09" in product_url or "Journey" in product_url:
-                matched_term = "Journey Together display"
-            elif "KP09" in product_url or "Reisegef" in product_url:
-                matched_term = "Reisegefährten display"
-            elif "SV10" in product_url or "Destined" in product_url or "destined" in title.lower():
-                matched_term = "Journey Together display"  # Als Fallback für neue Sets
-            elif "KP10" in product_url or "Ewige" in product_url or "ewige" in title.lower() or "rivalen" in title.lower():
-                matched_term = "Reisegefährten display"  # Als Fallback für neue Sets
+            # Generische Relevanzprüfung für den Titel
+            normalized_title = title.lower()
+            for search_term, tokens in keywords_map.items():
+                search_term_type = extract_product_type_from_text(search_term)
+                
+                # Entferne produktspezifische Begriffe für den Vergleich
+                clean_search_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
+                if clean_search_term in normalized_title and (search_term_type == title_product_type or search_term_type == "unknown"):
+                    matched_term = search_term
+                    break
         
         # Wenn immer noch kein passender Suchbegriff gefunden wurde
         if not matched_term:
@@ -671,10 +786,6 @@ def process_fallback_product(product_url, keywords_map, seen, out_of_stock, only
             title_part = product_slug.split('-p')[0]
             title = title_part.replace('-', ' ')
             
-            # Korrigiere bekannte Tippfehler
-            if "Togehter" in title:
-                title = title.replace("Togehter", "Together")
-                
             # Stelle sicher, dass "Pokemon" im Titel ist
             if "Pokemon" not in title:
                 title += " Pokemon"
@@ -687,15 +798,29 @@ def process_fallback_product(product_url, keywords_map, seen, out_of_stock, only
                     break
                     
             if matched_term:
+                # Extraktion des Produkttyps
+                product_type = extract_product_type_from_text(title)
+                
                 # Vereinfachter Fallback: Annahme, dass Produkt verfügbar ist mit Standard-Preis
+                price_map = {
+                    "display": "159,99€",  # Standard-Preis für Display
+                    "etb": "49,99€",      # Standard-Preis für Elite Trainer Box
+                    "box": "49,99€",      # Standard-Preis für Box
+                    "tin": "24,99€",      # Standard-Preis für Tin
+                    "blister": "14,99€",  # Standard-Preis für Blister
+                }
+                
+                # Preis basierend auf Produkttyp
+                product_price = price_map.get(product_type, "Preis nicht verfügbar")
+                
                 product_data = {
                     "title": title,
                     "url": product_url,
-                    "price": "159,99€",  # Standard-Preis für Display
+                    "price": product_price,
                     "status_text": "✅ Verfügbar (Fallback)",
                     "is_available": True,
                     "matched_term": matched_term,
-                    "product_type": "display",
+                    "product_type": product_type,
                     "shop": "mighty-cards.de"
                 }
                 
@@ -822,7 +947,7 @@ def extract_title_from_url(url):
         # Für URLs ohne -p Format (Kategorien), versuche vorherige Teile
         if not (path.endswith('.html') or '-p' in path or path.startswith('p')):
             for part in reversed(path_parts):
-                if "journey" in part.lower() or "reisegef" in part.lower() or "pokemon" in part.lower():
+                if "pokemon" in part.lower():
                     path = part
                     break
         
@@ -841,30 +966,26 @@ def extract_title_from_url(url):
         # Wenn immer noch leer, setze Standard-Titel
         if not title.strip():
             if "pokemon" in url.lower():
-                if "journey" in url.lower() or "sv09" in url.lower():
-                    title = "Journey Together Pokemon Display"
-                elif "reisegef" in url.lower() or "kp09" in url.lower():
-                    title = "Reisegefährten Pokemon Display"
-                else:
-                    title = "Pokemon TCG Produkt"
+                return "Pokemon TCG Produkt"
             else:
-                title = "Mighty Cards Produkt"
+                return "Mighty Cards Produkt"
         
         # Verarbeite Spezialfälle für bekannte Produkte
-        if "SV09" in title or "Journey" in title:
-            if "display" not in title.lower():
+        # Extrahiere den Produkttyp aus dem Titel
+        product_type = extract_product_type_from_text(title)
+        
+        # Wenn kein Produkttyp erkannt wurde, versuche aus der URL zu identifizieren
+        if product_type == "unknown":
+            if "display" in url.lower() or "36er" in url.lower():
                 title += " Display"
-            if "Togehter" in title:
-                title = title.replace("Togehter", "Together")
-        elif "KP09" in title or "Reisegef" in title:
-            if "display" not in title.lower():
-                title += " Display"
-        elif "SV10" in title or "destined" in title.lower() or "Destined" in title:
-            if "display" not in title.lower():
-                title += " Display"
-        elif "KP10" in title or "ewige" in title.lower() or "Ewige" in title or "rivalen" in title.lower():
-            if "display" not in title.lower():
-                title += " Display"
+            elif "etb" in url.lower() or "elite" in url.lower() or "trainer box" in url.lower():
+                title += " Elite Trainer Box"
+            elif "tin" in url.lower():
+                title += " Tin"
+        
+        # Stelle sicher, dass "Pokemon" im Titel vorkommt
+        if "pokemon" not in title.lower():
+            title += " Pokemon"
         
         # Erster Buchstabe groß
         title = title.strip().capitalize()
@@ -872,13 +993,7 @@ def extract_title_from_url(url):
         return title
     except Exception as e:
         logger.warning(f"Fehler bei Titel-Extraktion aus URL {url}: {e}")
-        # Standard-Fallback-Titel
-        if "journey" in url.lower() or "sv09" in url.lower():
-            return "Journey Together Pokemon Display"
-        elif "reisegef" in url.lower() or "kp09" in url.lower():
-            return "Reisegefährten Pokemon Display"
-        else:
-            return "Pokemon TCG Produkt"
+        return "Pokemon TCG Produkt"
 
 def extract_price_value(price_str):
     """
@@ -914,44 +1029,24 @@ def create_product_id(title, base_id="mightycards"):
     title_lower = title.lower()
     
     # Sprache (DE/EN)
-    if "deutsch" in title_lower or "karmesin" in title_lower or "purpur" in title_lower:
+    if "deutsch" in title_lower:
         language = "DE"
-    elif "english" in title_lower or "scarlet" in title_lower or "violet" in title_lower:
+    elif "english" in title_lower or "eng" in title_lower:
         language = "EN"
     else:
         # Betrachte bekannte deutsche/englische Produktnamen
-        de_sets = ["reisegefährten", "ewige rivalen", "verborgene schätze"]
-        en_sets = ["journey together", "destined rivals", "hidden treasures"]
-        
-        if any(term in title_lower for term in de_sets):
-            language = "DE"
-        elif any(term in title_lower for term in en_sets):
-            language = "EN"
-        else:
-            language = "UNK"
+        language = "UNK"
     
     # Produkttyp
     product_type = extract_product_type_from_text(title)
     
-    # Serien-Code erkennen
-    series_code = "unknown"
-    
-    # Suche nach Standardcodes wie SV09, KP09, etc.
-    code_match = re.search(r'(?:sv|kp|op)(?:\s|-)?\d+', title_lower)
-    if code_match:
-        series_code = code_match.group(0).replace(" ", "").replace("-", "")
-    # Bekannte Setnamen auf Codes mappen
-    elif "journey together" in title_lower:
-        series_code = "sv09"
-    elif "reisegefährten" in title_lower:
-        series_code = "kp09"
-    elif "destined rivals" in title_lower:
-        series_code = "sv10"
-    elif "ewige rivalen" in title_lower:
-        series_code = "kp10"
+    # Normalisiere Titel für einen Identifizierer (entferne produktspezifische Begriffe)
+    normalized_title = re.sub(r'\s+(display|box|tin|etb)$', '', title_lower)
+    normalized_title = re.sub(r'\s+', '-', normalized_title)
+    normalized_title = re.sub(r'[^a-z0-9\-]', '', normalized_title)
     
     # Erstelle eine strukturierte ID
-    product_id = f"{base_id}_{series_code}_{product_type}_{language}"
+    product_id = f"{base_id}_{normalized_title}_{product_type}_{language}"
     
     # Zusatzinformationen
     if "18er" in title_lower:
