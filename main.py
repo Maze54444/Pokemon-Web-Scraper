@@ -27,7 +27,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),  # Konsolenausgabe
-        logging.FileHandler("scraper.log")  # Dateiausgabe
+        logging.FileHandler("scraper.log", encoding='utf-8')  # Dateiausgabe
     ]
 )
 
@@ -47,107 +47,83 @@ def run_once(only_available=False, reset_seen=False):
         logger.info("[RESET] Setze Liste der gesehenen Produkte zurück")
         save_seen(set())
     
-    # Lade Konfiguration und Zustände mit den neuen Funktionen
+    # Lade Konfiguration und Zustände
     seen = load_seen()
     out_of_stock = load_out_of_stock()
     products = load_products()
     urls = load_urls()
+    
+    # Bereite Keywords vor - WICHTIG: Nutzt die neue Matcher-Logik
     keywords_map = prepare_keywords(products)
     
     logger.info(f"[INFO] Durchlauf: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"[INFO] Suchbegriffe: {list(keywords_map.keys())}")
+    logger.info(f"[INFO] Aktive Suchbegriffe: {list(keywords_map.keys())}")
     logger.info(f"[INFO] {len(out_of_stock)} ausverkaufte Produkte werden überwacht")
+    logger.info(f"[INFO] {len(urls)} URLs werden geprüft")
     
     all_matches = []
-    all_urls = urls.copy()  # Kopie erstellen, damit die Originalliste intakt bleibt
+    all_urls = urls.copy()
     
-    # Sapphire-Cards spezifischer Scraper (wichtig: keine URLs mehr entfernen)
-    sapphire_urls = [url for url in all_urls if "sapphire-cards.de" in url]
-    if sapphire_urls:
-        try:
-            logger.info("[SCRAPER] Starte Sapphire-Cards Scraper")
-            sapphire_matches = scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available)
-            if sapphire_matches:
-                logger.info(f"[SUCCESS] {len(sapphire_matches)} neue Treffer bei Sapphire-Cards gefunden")
-                all_matches.extend(sapphire_matches)
-            else:
-                logger.info("[INFO] Keine neuen Treffer bei Sapphire-Cards")
-        except Exception as e:
-            logger.error(f"[ERROR] Fehler beim Sapphire-Cards Scraping: {str(e)}")
-            logger.debug(traceback.format_exc())
+    # Gruppiere URLs nach Domain für bessere Fehlerbehandlung
+    domain_groups = {}
+    for url in all_urls:
+        domain = url.split('/')[2]
+        if domain not in domain_groups:
+            domain_groups[domain] = []
+        domain_groups[domain].append(url)
     
-    # TCGViert-spezifischer Scraper (wichtig: keine URLs mehr entfernen)
-    tcgviert_urls = [url for url in all_urls if "tcgviert.com" in url]
-    if tcgviert_urls:
-        try:
-            logger.info("[SCRAPER] Starte TCGViert Scraper")
-            tcgviert_matches = scrape_tcgviert(keywords_map, seen, out_of_stock, only_available)
-            if tcgviert_matches:
-                logger.info(f"[SUCCESS] {len(tcgviert_matches)} neue Treffer bei TCGViert gefunden")
-                all_matches.extend(tcgviert_matches)
-            else:
-                logger.info("[INFO] Keine neuen Treffer bei TCGViert")
-        except Exception as e:
-            logger.error(f"[ERROR] Fehler beim TCGViert Scraping: {str(e)}")
-            logger.debug(traceback.format_exc())
-    
-    # Mighty-cards spezifischer Scraper
-    mighty_cards_urls = [url for url in all_urls if "mighty-cards.de" in url]
-    if mighty_cards_urls:
-        try:
-            logger.info("[SCRAPER] Starte Mighty-Cards Scraper")
-            mighty_cards_matches = scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available)
-            if mighty_cards_matches:
-                logger.info(f"[SUCCESS] {len(mighty_cards_matches)} neue Treffer bei Mighty-Cards gefunden")
-                all_matches.extend(mighty_cards_matches)
-            else:
-                logger.info("[INFO] Keine neuen Treffer bei Mighty-Cards")
-        except Exception as e:
-            logger.error(f"[ERROR] Fehler beim Mighty-Cards Scraping: {str(e)}")
-            logger.debug(traceback.format_exc())
-    
-    # Generische URLs - immer alle scannen, aber jetzt auch Mighty-Cards ausschließen
-    generic_urls = [url for url in all_urls if not ("sapphire-cards.de" in url or "tcgviert.com" in url or "mighty-cards.de" in url)]
-    if generic_urls:
-        logger.info(f"[INFO] Starte generische Scraper für {len(generic_urls)} URLs")
+    # Verarbeite jede Domain einzeln
+    for domain, domain_urls in domain_groups.items():
+        logger.info(f"[DOMAIN] Verarbeite {domain} mit {len(domain_urls)} URLs")
         
-        # Parallele Verarbeitung mit ThreadPoolExecutor
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(generic_urls)) as executor:
-            # Dictionary zum Speichern der Future-Objekte mit ihren URLs
-            future_to_url = {
-                executor.submit(
-                    scrape_generic, url, keywords_map, seen, out_of_stock, 
-                    check_availability=True, only_available=only_available
-                ): url for url in generic_urls
-            }
+        try:
+            # Spezielle Scraper aufrufen
+            if "sapphire-cards.de" in domain:
+                matches = scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available)
+                if matches:
+                    logger.info(f"[SUCCESS] {len(matches)} neue Treffer bei Sapphire-Cards")
+                    all_matches.extend(matches)
             
-            # Ergebnisse sammeln
-            for future in concurrent.futures.as_completed(future_to_url):
-                url = future_to_url[future]
-                try:
-                    new_url_matches = future.result()
-                    if new_url_matches:
-                        logger.info(f"[SUCCESS] {len(new_url_matches)} neue Treffer bei {url} gefunden")
-                        all_matches.extend(new_url_matches)
-                    else:
-                        logger.info(f"[INFO] Keine neuen Treffer bei {url}")
-                except Exception as e:
-                    logger.error(f"[ERROR] Fehler beim Scraping von {url}: {str(e)}")
-                    logger.debug(traceback.format_exc())
-
+            elif "tcgviert.com" in domain:
+                matches = scrape_tcgviert(keywords_map, seen, out_of_stock, only_available)
+                if matches:
+                    logger.info(f"[SUCCESS] {len(matches)} neue Treffer bei TCGViert")
+                    all_matches.extend(matches)
+            
+            elif "mighty-cards.de" in domain:
+                matches = scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available)
+                if matches:
+                    logger.info(f"[SUCCESS] {len(matches)} neue Treffer bei Mighty-Cards")
+                    all_matches.extend(matches)
+            
+            else:
+                # Generischer Scraper für alle anderen Seiten
+                for url in domain_urls:
+                    try:
+                        matches = scrape_generic(url, keywords_map, seen, out_of_stock, 
+                                               check_availability=True, only_available=only_available)
+                        if matches:
+                            logger.info(f"[SUCCESS] {len(matches)} neue Treffer bei {url}")
+                            all_matches.extend(matches)
+                    except Exception as e:
+                        logger.error(f"[ERROR] Fehler beim Scraping von {url}: {str(e)}")
+                        if logger.level == logging.DEBUG:
+                            logger.debug(traceback.format_exc())
+        
+        except Exception as e:
+            logger.error(f"[ERROR] Fehler bei Domain {domain}: {str(e)}")
+            if logger.level == logging.DEBUG:
+                logger.debug(traceback.format_exc())
+    
     # Speichere aktualisierte Zustände
     save_seen(seen)
     save_out_of_stock(out_of_stock)
     
-    # Erfolgsmeldung senden, wenn mindestens ein Treffer gefunden wurde
-    if all_matches:
-        success_message = f"✅ Scraper-Durchlauf erfolgreich! {len(all_matches)} neue Treffer gefunden."
-        logger.info(f"[SUCCESS] {success_message}")
-    else:
-        logger.info("[INFO] Keine neuen Treffer in diesem Durchlauf")
+    # Zusammenfassung
+    logger.info(f"[SUMMARY] Scan abgeschlossen. {len(all_matches)} neue Treffer gefunden.")
     
     interval = get_current_interval()
-    logger.info(f"[DONE] Fertig. Nächster Durchlauf in {interval} Sekunden")
+    logger.info(f"[DONE] Nächster Durchlauf in {interval} Sekunden")
     return interval
 
 def run_loop(only_available=False):
@@ -165,9 +141,10 @@ def run_loop(only_available=False):
             interval = run_once(only_available=only_available)
             consecutive_errors = 0  # Fehler zurücksetzen bei erfolgreichem Durchlauf
             time.sleep(interval)
+            
         except Exception as e:
             consecutive_errors += 1
-            logger.error(f"[ERROR] Fehler im Hauptloop: {str(e)}")
+            logger.error(f"[ERROR] Fehler im Hauptloop ({consecutive_errors}/{max_consecutive_errors}): {str(e)}")
             logger.error(traceback.format_exc())
             
             # Exponentielles Backoff bei wiederholten Fehlern
@@ -175,7 +152,11 @@ def run_loop(only_available=False):
             
             # Bei zu vielen aufeinanderfolgenden Fehlern, Benachrichtigung senden
             if consecutive_errors >= max_consecutive_errors:
-                error_msg = f"⚠️ *WARNUNG*: Der Scraper hat {consecutive_errors} Fehler in Folge. Letzte Fehlermeldung: {str(e)}"
+                error_msg = (
+                    f"⚠️ WARNUNG: Der Scraper hatte {consecutive_errors} Fehler in Folge.\n"
+                    f"Letzter Fehler: {str(e)}\n"
+                    f"Neustart in {retry_time} Sekunden..."
+                )
                 send_telegram_message(error_msg)
                 consecutive_errors = 0  # Zähler zurücksetzen nach Benachrichtigung
             
@@ -185,7 +166,12 @@ def run_loop(only_available=False):
 def test_telegram():
     """Testet die Telegram-Benachrichtigungsfunktion"""
     logger.info("[TEST] Starte Telegram-Test")
-    result = send_telegram_message("[TEST] Test-Nachricht vom TCG-Scraper")
+    test_message = (
+        "🧪 TEST-NACHRICHT\n"
+        f"Zeit: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        "Status: Telegram-Integration funktioniert!"
+    )
+    result = send_telegram_message(test_message)
     if result:
         logger.info("[SUCCESS] Telegram-Test erfolgreich")
     else:
@@ -195,193 +181,149 @@ def test_matching():
     """Testet das Matching für bekannte Produktnamen"""
     logger.info("[TEST] Teste Matching-Funktion")
     
+    # Lade aktuelle Produkte aus products.txt
+    products = load_products()
+    keywords_map = prepare_keywords(products)
+    
+    # Test-Titel von verschiedenen Shops
     test_titles = [
-        "Pokémon TCG: Journey Together (SV09) - 36er Display (EN) - max. 1 per person",
-        "Pokémon TCG: Journey Together (SV09) - Checklane Blister (EN) - max. 6 per person",
-        "Pokémon TCG: Journey Together (SV09) - Premium Checklane Blister (EN) - max. 6 per person",
-        "Pokémon TCG: Journey Together (SV09) - Elite Trainer Box (EN) - max. 1 per person",
-        "Pokémon TCG: Journey Together (SV09) - Sleeved Booster (EN) - max. 12 per person",
-        "Pokémon TCG: Reisegefährten (KP09) - 36er Display (DE) - max. 1 pro Person",
-        "Pokémon TCG: Reisegefährten (KP09) - Top Trainer Box (DE) - max. 1 pro Person",
-        "Pokemon Journey Together | Reisegefährten Booster Box (Display)"  # Sapphire-Cards Format
+        "Pokémon TCG: Journey Together (SV09) - 36er Display (EN)",
+        "Pokemon Journey Together | Reisegefährten Booster Box (Display)",
+        "Pokémon Karmesin & Purpur 09: Reisegefährten Display (36 Booster)",
+        "Journey Together Elite Trainer Box EN",
+        "Reisegefährten Top Trainer Box DE",
+        "Pokemon Reisegefährten 3er Blister Pack"
     ]
     
-    test_keywords = [
-        ["journey", "together", "display"],
-        ["reisegefährten", "display"]
-    ]
+    logger.info(f"Aktive Suchbegriffe: {list(keywords_map.keys())}")
     
-    from utils.matcher import is_keyword_in_text, clean_text
+    from utils.matcher import is_keyword_in_text, extract_product_type_from_text
     
     for title in test_titles:
-        logger.info(f"\nTest für Titel: {title}")
-        clean_title = clean_text(title)
-        logger.info(f"  Bereinigter Titel: '{clean_title}'")
-        for keywords in test_keywords:
-            result = is_keyword_in_text(keywords, title)
-            logger.info(f"  Mit Keywords {keywords}: {result}")
-
-def test_availability():
-    """Testet die Verfügbarkeitsprüfung für bekannte URLs"""
-    logger.info("[TEST] Teste Verfügbarkeitsprüfung")
-    
-    from scrapers.generic import check_product_availability
-    from utils.availability import detect_availability
-    import requests
-    from bs4 import BeautifulSoup
-    
-    test_urls = [
-        "https://tcgviert.com/products/pokemon-tcg-journey-together-sv09-36er-display-en-max-1-per-person",
-        "https://www.card-corner.de/pokemon-schwert-und-schild-scarlet-und-violet-151-display-deutsch",
-        "https://sapphire-cards.de/produkt/pokemon-journey-together-reisegefaehrten-booster-box-display/",
-    ]
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    
-    for url in test_urls:
-        logger.info(f"\nTest für URL: {url}")
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "html.parser")
-                is_available, price, status_text = detect_availability(soup, url)
-                logger.info(f"  Verfügbar: {is_available}")
-                logger.info(f"  Preis: {price}")
-                logger.info(f"  Status: {status_text}")
-            else:
-                logger.error(f"  Fehler: HTTP Status {response.status_code}")
-        except Exception as e:
-            logger.error(f"  Fehler: {e}")
-
-def test_sapphire():
-    """Testet den Sapphire-Cards Scraper isoliert"""
-    logger.info("[TEST] Teste Sapphire-Cards Scraper isoliert")
-    
-    products = load_products()
-    keywords_map = prepare_keywords(products)
-    
-    seen = set()
-    out_of_stock = set()
-    
-    from scrapers.sapphire_cards import scrape_sapphire_cards
-    matches = scrape_sapphire_cards(keywords_map, seen, out_of_stock)
-    
-    if matches:
-        logger.info(f"[SUCCESS] Test erfolgreich, {len(matches)} Treffer gefunden")
-    else:
-        logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
-
-def test_mighty_cards():
-    """Testet den Mighty-Cards Scraper isoliert"""
-    logger.info("[TEST] Teste Mighty-Cards Scraper isoliert")
-    
-    products = load_products()
-    keywords_map = prepare_keywords(products)
-    
-    seen = set()
-    out_of_stock = set()
-    
-    from scrapers.mighty_cards import scrape_mighty_cards
-    matches = scrape_mighty_cards(keywords_map, seen, out_of_stock)
-    
-    if matches:
-        logger.info(f"[SUCCESS] Test erfolgreich, {len(matches)} Treffer gefunden")
-    else:
-        logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
-
-def monitor_out_of_stock():
-    """Zeigt die aktuell ausverkauften Produkte an, die überwacht werden"""
-    out_of_stock = load_out_of_stock()
-    
-    if not out_of_stock:
-        logger.info("Keine ausverkauften Produkte werden aktuell überwacht.")
-        return
-    
-    logger.info(f"[INFO] Aktuell werden {len(out_of_stock)} ausverkaufte Produkte überwacht:")
-    for product_id in sorted(out_of_stock):
-        parts = product_id.split('_')
-        site = parts[0]
-        series = parts[1] if len(parts) > 1 else "unknown"
-        type_ = parts[2] if len(parts) > 2 else "unknown"
-        lang = parts[3] if len(parts) > 3 else "unknown"
+        logger.info(f"\nTest für: '{title}'")
+        product_type = extract_product_type_from_text(title)
+        logger.info(f"  Erkannter Produkttyp: {product_type}")
         
-        logger.info(f"  - {site}: {series} {type_} ({lang})")
+        matches = []
+        for search_term, keywords in keywords_map.items():
+            if is_keyword_in_text(keywords, title, log_level='None'):
+                matches.append(search_term)
+        
+        if matches:
+            logger.info(f"  ✅ Treffer für: {matches}")
+        else:
+            logger.info(f"  ❌ Keine Treffer")
+
+def monitor_keywords():
+    """Zeigt die aktuell aktiven Suchbegriffe und ihre Token"""
+    products = load_products()
+    keywords_map = prepare_keywords(products)
+    
+    logger.info("[KEYWORDS] Aktive Suchbegriffe:")
+    for search_term, tokens in keywords_map.items():
+        product_type = extract_product_type_from_text(search_term)
+        logger.info(f"  - '{search_term}' → Tokens: {tokens}, Typ: {product_type}")
+
+def test_shops():
+    """Testet die Verbindung zu allen konfigurierten Shops"""
+    import requests
+    from urllib.parse import urlparse
+    
+    urls = load_urls()
+    logger.info(f"[TEST] Teste {len(urls)} Shop-URLs")
+    
+    for url in urls:
+        try:
+            domain = urlparse(url).netloc
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                logger.info(f"  ✅ {domain} - OK")
+            else:
+                logger.warning(f"  ⚠️ {domain} - Status {response.status_code}")
+        except Exception as e:
+            logger.error(f"  ❌ {domain} - Fehler: {str(e)}")
 
 def clean_database():
-    """Bereinigt die Datenbanken von alten oder fehlerhaften Einträgen"""
+    """Bereinigt die Datenbanken von alten Einträgen"""
     logger.info("[CLEAN] Bereinige Datenbanken")
     
-    # Lade aktuelle Daten
     seen = load_seen()
     out_of_stock = load_out_of_stock()
     
-    # Vor der Bereinigung
-    logger.info(f"[INFO] Vor der Bereinigung: {len(seen)} gesehene Produkte, {len(out_of_stock)} ausverkaufte Produkte")
+    initial_seen = len(seen)
+    initial_oos = len(out_of_stock)
     
-    # Entferne Einträge, die kein korrektes Format haben
+    # Entferne ungültige Einträge
     valid_seen = set()
     for entry in seen:
-        # Gültiges Format: product_id_status_available oder product_id_status_unavailable
         if "_status_" in entry and (entry.endswith("_available") or entry.endswith("_unavailable")):
             valid_seen.add(entry)
     
-    # Entferne veraltete Einträge aus out_of_stock
-    # Wir behalten nur Einträge, die einer der bekannten Domains entsprechen
-    valid_domains = ["tcgviert", "card-corner", "comicplanet", "gameware", 
-                     "kofuku", "mighty-cards", "games-island", "sapphirecards", "mightycards"]
+    # Entferne veraltete out_of_stock Einträge
+    valid_domains = [
+        "tcgviert", "card-corner", "comicplanet", "gameware", 
+        "kofuku", "mighty-cards", "games-island", "sapphirecards", 
+        "mightycards", "fantasiacards"
+    ]
     
     valid_out_of_stock = set()
-    for product_id in out_of_stock:
-        parts = product_id.split('_')
-        if len(parts) >= 2 and parts[0] in valid_domains:
-            valid_out_of_stock.add(product_id)
+    for entry in out_of_stock:
+        parts = entry.split('_')
+        if len(parts) >= 2 and any(domain in parts[0] for domain in valid_domains):
+            valid_out_of_stock.add(entry)
     
     # Speichere bereinigte Daten
     save_seen(valid_seen)
     save_out_of_stock(valid_out_of_stock)
     
-    # Nach der Bereinigung
-    logger.info(f"[INFO] Nach der Bereinigung: {len(valid_seen)} gesehene Produkte, {len(valid_out_of_stock)} ausverkaufte Produkte")
-    logger.info(f"[INFO] Entfernt: {len(seen) - len(valid_seen)} gesehene Produkte, {len(out_of_stock) - len(valid_out_of_stock)} ausverkaufte Produkte")
+    removed_seen = initial_seen - len(valid_seen)
+    removed_oos = initial_oos - len(valid_out_of_stock)
     
-    return len(seen) - len(valid_seen), len(out_of_stock) - len(valid_out_of_stock)
+    logger.info(f"[CLEAN] Entfernt: {removed_seen} seen-Einträge, {removed_oos} out_of_stock-Einträge")
+    logger.info(f"[CLEAN] Verbleibend: {len(valid_seen)} seen, {len(valid_out_of_stock)} out_of_stock")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Pokémon TCG Scraper mit verbesserten Filtern")
-    parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", "availability_test", 
-                                          "sapphire_test", "mighty_cards_test", "show_out_of_stock", "clean"], 
+    parser = argparse.ArgumentParser(description="Pokémon TCG Scraper mit dynamischen Suchbegriffen")
+    parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", 
+                                          "shops_test", "keywords", "clean"], 
                         default="loop", help="Ausführungsmodus")
     parser.add_argument("--only-available", action="store_true", 
-                        help="Nur verfügbare Produkte melden (nicht ausverkaufte)")
+                        help="Nur verfügbare Produkte melden")
     parser.add_argument("--reset", action="store_true",
                         help="Liste der gesehenen Produkte zurücksetzen")
-    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         default="INFO", help="Log-Level einstellen")
     args = parser.parse_args()
 
-    # Log-Level entsprechend setzen
+    # Log-Level setzen
     log_level = getattr(logging, args.log_level)
     logging.getLogger().setLevel(log_level)
+    logger.setLevel(log_level)
     
-    logger.info(f"[START] Modus gewählt: {args.mode} - Log-Level: {args.log_level}")
+    # Logging-Handler aktualisieren
+    for handler in logger.handlers:
+        handler.setLevel(log_level)
     
-    if args.mode == "once":
-        run_once(only_available=args.only_available, reset_seen=args.reset)
-    elif args.mode == "loop":
-        run_loop(only_available=args.only_available)
-    elif args.mode == "test":
-        test_telegram()
-    elif args.mode == "match_test":
-        test_matching()
-    elif args.mode == "availability_test":
-        test_availability()
-    elif args.mode == "sapphire_test":
-        test_sapphire()
-    elif args.mode == "mighty_cards_test":
-        test_mighty_cards()
-    elif args.mode == "show_out_of_stock":
-        monitor_out_of_stock()
-    elif args.mode == "clean":
-        clean_database()
+    logger.info(f"[START] Modus: {args.mode}, Log-Level: {args.log_level}")
+    
+    try:
+        if args.mode == "once":
+            run_once(only_available=args.only_available, reset_seen=args.reset)
+        elif args.mode == "loop":
+            run_loop(only_available=args.only_available)
+        elif args.mode == "test":
+            test_telegram()
+        elif args.mode == "match_test":
+            test_matching()
+        elif args.mode == "shops_test":
+            test_shops()
+        elif args.mode == "keywords":
+            monitor_keywords()
+        elif args.mode == "clean":
+            clean_database()
+    except KeyboardInterrupt:
+        logger.info("[STOP] Programm durch Benutzer beendet")
+    except Exception as e:
+        logger.error(f"[CRITICAL] Kritischer Fehler: {str(e)}")
+        logger.error(traceback.format_exc())
+        sys.exit(1)
