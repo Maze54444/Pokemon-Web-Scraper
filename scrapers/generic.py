@@ -592,14 +592,18 @@ def create_product_id(product_title, site_id="generic"):
 
 def extract_product_info(title):
     """Extrahiert wichtige Produktinformationen aus dem Titel"""
+    # Initialisiere Standardwerte
+    series_code = "unknown"
+    product_type = "unknown"
+    language = "UNK"
+    
+    # Erkenne Sprache
     if "(DE)" in title or "pro Person" in title or "deutsch" in title.lower() or "deu" in title.lower():
         language = "DE"
     elif "(EN)" in title or "per person" in title or "english" in title.lower() or "eng" in title.lower():
         language = "EN"
     elif "(JP)" in title or "japan" in title.lower() or "jpn" in title.lower():
         language = "JP"
-    else:
-        language = "UNK"
     
     # Extrahiere Produkttyp mit der verbesserten Funktion
     detected_type = extract_product_type_from_text(title)
@@ -619,12 +623,15 @@ def extract_product_info(title):
             product_type = "box"
         elif re.search(r'blister|check\s?lane', title.lower()):
             product_type = "blister"
-        else:
-            product_type = "unknown"
     
-    # Extrahiere Tokens und versuche, eine Serie zu identifizieren
+    # Extrahiere Seriencode (oder versuche es)
+    code_match = re.search(r'(?:sv|kp|op)(?:\s|-)?\d+', title.lower())
+    if code_match:
+        series_code = code_match.group(0).replace(" ", "").replace("-", "")
+    else:
+        # Fallback: Verwende bereinigten Titel als Seriencode
         tokens = clean_text(title).split()
-        # Entferne allgemeine Begriffe wie "Pokemon", "Trainer", "Box", etc.
+        # Entferne allgemeine Begriffe
         exclude_tokens = ["pokemon", "pokémon", "display", "box", "elite", "top", "trainer", 
                           "etb", "ttb", "booster", "pack", "box", "tin", "blister"]
         product_tokens = [t for t in tokens if t.lower() not in exclude_tokens and len(t) > 2]
