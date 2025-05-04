@@ -35,7 +35,7 @@ def extract_product_type_from_text(text):
             r'\bbooster\s+display\b', 
             r'\bbox\s+display\b',
             r'\b36\s+(pack|packs)\b',
-            r'\bbooster\s+box\b(?!\s+trainer)',  # Booster Box ohne "Trainer"
+            r'\bbooster\s+box\b',
             r'\b18er\s+booster\s+display\b',
             r'\b36er\s+display\b'
         ],
@@ -67,60 +67,129 @@ def extract_product_type_from_text(text):
         ],
         "single_booster": [
             r'\bsingle\s+booster\b', 
-            r'\bbooster\s+pack\b(?!\s+display)',  # Booster Pack ohne Display
-            r'\beinzelbooster\b'
+            r'\bbooster\s+pack\b'
         ],
         "tin": [
-            r'\btin\b(?!\s+display)', 
-            r'\bmetal\s+box\b',
-            r'\bpokeball\s+tin\b'
+            r'\btin\b', 
+            r'\bmetal\s+box\b'
         ],
         "premium": [
-            r'\bpremium\s+collection\b', 
-            r'\bcollector\s+box\b',
-            r'\bspecial\s+collection\b'
+            r'\bpremium\b', 
+            r'\bcollection\b', 
+            r'\bcollector\b'
         ]
     }
     
-    # Prüfe zuerst auf eindeutige Kombinationen
-    if re.search(r'\bdisplay\b.*\b36\b|\b36\b.*\bdisplay\b', text):
+    # Stark hervorheben: Wenn "display" und "36" oder "18" im Text vorkommen, ist es definitiv ein Display 
+    # - höchste Priorität, wird immer zuerst geprüft
+    if (re.search(r'\bdisplay\b', text) and 
+        (re.search(r'\b36\b|\b36er\b|\b18\b|\b18er\b', text) or re.search(r'\bbooster\s+box\b', text))):
         return "display"
+        
+    # Spezifische Codes-Muster, die üblicherweise mit bestimmten Produkttypen verbunden sind
+    # SVXX/KPXX + (36er/18er oder Display)
+    if (re.search(r'\b(sv\d+|kp\d+)\b', text) and 
+        (re.search(r'\b36er\b|\b18er\b|\bdisplay\b|\bbooster box\b', text))):
+        return "display"
+        
+    # Explizit nach "booster pack" oder "pack" suchen, um single booster von displays zu unterscheiden
+    has_booster_pack_pattern = r'\bbooster\s+pack\b|\bpack\b|\beinzelpack\b|\bsingle\s*pack\b'
+    has_booster_pack = re.search(has_booster_pack_pattern, text) is not None
     
-    if re.search(r'\belite\b.*\btrainer\b.*\bbox\b', text):
-        return "etb"
+    # Explizit nach "3er", "3-pack", etc. suchen, um blister zu identifizieren
+    blister_pattern = r'\b3er\b|\b3-pack\b|\b3\s+pack\b|\bblister\b|\b3\s*er\b|\bchecklane\b'
+    has_3pack_or_blister = re.search(blister_pattern, text) is not None
     
-    if re.search(r'\btop\b.*\btrainer\b.*\bbox\b', text):
-        return "ttb"
-    
-    # Dann prüfe einzelne Muster
+    # Jedes Muster prüfen und den ersten Treffer zurückgeben
     for product_type, patterns in product_patterns.items():
         for pattern in patterns:
             if re.search(pattern, text):
-                # Zusätzliche Validierung für bestimmte Typen
-                if product_type == "display" and re.search(r'\btrainer\s+box\b', text):
-                    continue  # Trainer Box ist kein Display
-                    
-                if product_type == "single_booster" and re.search(r'\b(display|36er)\b', text):
-                    continue  # Wenn Display erwähnt wird, ist es kein Single Booster
-                    
+                # Vermeidung von Fehlklassifikationen:
+                
+                # Wenn wir "display" gefunden haben, prüfen wir ob auch "3er"/"blister" vorhanden ist
+                if product_type == "display" and has_3pack_or_blister:
+                    # In diesem Fall handelt es sich wahrscheinlich um ein Blister-Produkt
+                    logger.debug(f"Produkt enthält 'display', aber auch blister/3er: '{text}' → als blister klassifiziert")
+                    return "blister"
+                
+                # Wenn wir "display" gefunden haben und einzelne Booster-Muster definitiv im Titel stehen, 
+                # dann ist es kein Display, sondern einzelne Booster
+                if product_type == "display" and has_booster_pack:
+                    # Check für spezielle Display-Kennzeichen, die stärker sind als Booster-Pack
+                    if re.search(r'\b36er\b|\b36\s+booster\b|\b18er\b|\b18\s+booster\b', text):
+                        # Bei expliziter Anzahl von Boostern (36/18) ist es ein Display trotz "Pack" im Namen
+                        return "display"
+                    logger.debug(f"Produkt enthält 'display', aber auch 'booster pack': '{text}' → als single_booster klassifiziert")
+                    return "single_booster"
+                
+                # Wenn "booster" und "Preis unter 10€" gefunden wird, ist es sehr wahrscheinlich ein einzelner Booster
+                if product_type == "display" and re.search(r'\b\d[,\.]\d{2}\s*[€$]', text):
+                    # Extrahiere Preis und prüfe, ob er unter 10€ liegt
+                    price_match = re.search(r'(\d+[,\.]\d{2})\s*[€$]', text)
+                    if price_match:
+                        price_str = price_match.group(1).replace(',', '.')
+                        try:
+                            price = float(price_str)
+                            if price < 10.0:
+                                logger.debug(f"Produkt enthält 'display', aber Preis unter 10€ ({price}€): '{text}' → als single_booster klassifiziert")
+                                return "single_booster"
+                        except ValueError:
+                            pass
+                
                 return product_type
     
-    return "unknown"
+    # Spezialfall für einzelne Booster erkennen (ohne "display" im Text)
+    if has_booster_pack or (re.search(r'\bbooster\b', text) and not re.search(r'display|36er|box', text)):
+        # Wenn "Booster" alleine steht, ohne "display" oder "36er", dann ist es ein einzelner Booster
+        return "single_booster"
+    
+    # Wenn wir hier sind, haben wir keinen eindeutigen Produkttyp erkannt
+    # Nochmal spezifische Muster für Display-Produkte prüfen
+    if re.search(r'36\s*(x|\*)', text) or re.search(r'booster\s*box', text, re.IGNORECASE):
+        return "display"
+        
+    return "unknown"  # Default: Wenn kein klarer Produkttyp erkannt wurde
+
+def is_product_type_match(search_type, text_type):
+    """
+    Prüft, ob der Produkttyp im Text mit dem gesuchten Produkttyp übereinstimmt
+    
+    :param search_type: Gesuchter Produkttyp
+    :param text_type: Im Text gefundener Produkttyp
+    :return: True wenn übereinstimmend, False sonst
+    """
+    # Wenn kein bestimmter Produkttyp gesucht wird, gilt das als Übereinstimmung
+    if not search_type or search_type == "unknown":
+        return True
+    
+    # Wenn im Text kein Produkttyp erkannt wurde ("unknown"), aber einer gesucht wird
+    if search_type and text_type == "unknown":
+        # Bei "display" sind wir strenger - nur bei expliziter Erwähnung
+        if search_type == "display":
+            return False
+        # Bei anderen Typen sind wir toleranter
+        return True
+    
+    # Exakte Übereinstimmung erforderlich
+    return search_type == text_type
 
 def is_keyword_in_text(keywords, text, log_level='DEBUG'):
     """
-    Verbesserte Prüfung auf exakte Übereinstimmung des Suchbegriffs im Text
+    Strengere Prüfung auf exakte Übereinstimmung des Suchbegriffs im Text
+    mit besonderer Berücksichtigung der Produkttypen
     
     :param keywords: Liste mit einzelnen Wörtern des Suchbegriffs
     :param text: Zu prüfender Text
     :param log_level: Loglevel für Ausgaben (DEBUG, INFO, ERROR, None für keine Ausgabe)
-    :return: True, wenn die Keywords gefunden wurden, sonst False
+    :return: True, wenn die Phrase gefunden wurde und Produkttypen übereinstimmen, sonst False
     """
+    # Kurze Texte sofort ablehnen
     if not text or len(text) < 3:
         return False
         
-    original_keywords = " ".join(keywords)
-    clean_title = clean_text(text)
+    original_keywords = " ".join(keywords)  # für Debug-Ausgaben
+    original_text = text  # Originaltext für Debug-Ausgaben speichern
+    text = clean_text(text)
     
     # Extrahiere den Produkttyp aus dem Suchbegriff
     search_term = " ".join(keywords)
@@ -129,133 +198,96 @@ def is_keyword_in_text(keywords, text, log_level='DEBUG'):
     # Extrahiere den Produkttyp aus dem zu durchsuchenden Text
     text_product_type = extract_product_type_from_text(text)
     
-    # Strikte Produkttyp-Prüfung
-    if search_product_type != "unknown" and text_product_type != "unknown":
-        if search_product_type != text_product_type:
+    # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Text übereinstimmen
+    # Besonders stringente Prüfung für Displays
+    if search_product_type in ["display", "etb", "ttb"]:
+        if text_product_type != search_product_type:
             if log_level and log_level != 'None':
-                logger.debug(f"⚠️ Produkttyp-Konflikt: Suche '{search_product_type}', gefunden '{text_product_type}'")
+                logger.debug(f"⚠️ Produkttyp-Konflikt: Suche nach '{search_product_type}', Text enthält '{text_product_type}': {original_text}")
             return False
     
-    # Laden der Ausschlusslisten
+    # Versuche, eine Konfigurationsdatei mit Ausschlusssets zu laden
     exclusion_sets = load_exclusion_sets()
     
-    # Prüfe auf Ausschluss-Sets
+    # Produktspezifische Keywords aus dem Suchbegriff extrahieren (ohne Produkttyp)
+    product_keywords = extract_product_keywords(search_term)
+    
+    # Prüfe, ob Text Ausschlusssets enthält, die nicht dem gesuchten Produkt entsprechen
     for exclusion in exclusion_sets:
-        if exclusion in text.lower():
-            # Prüfe ob der Ausschlussbegriff Teil des Suchbegriffs ist
-            if exclusion not in search_term.lower():
-                if log_level and log_level != 'None':
-                    logger.debug(f"⚠️ Text enthält ausgeschlossenes Set '{exclusion}'")
-                return False
+        if exclusion in text.lower() and not any(keyword in exclusion for keyword in product_keywords):
+            if log_level and log_level != 'None':
+                logger.debug(f"⚠️ Text enthält ausgeschlossenes Set '{exclusion}': '{original_text}'")
+            return False
     
-    # Strengere Keyword-Überprüfung
-    important_keywords = extract_important_keywords(keywords)
-    
-    if not important_keywords:
-        return False
-    
-    # Erstelle Wortlisten für exakte Überprüfung
-    text_words = set(clean_title.split())
-    
-    # ALLE wichtigen Keywords müssen exakt gefunden werden
-    matched_count = 0
-    for keyword in important_keywords:
-        # Exakte Wortübereinstimmung erforderlich
-        if keyword in text_words:
-            matched_count += 1
+    # Standardisiere Singular/Plural
+    standardized_keywords = []
+    for word in keywords:
+        if word in ["display", "displays"]:
+            standardized_keywords.append("display")
+        elif word in ["booster", "boosters"]:
+            standardized_keywords.append("booster")
+        elif word in ["pack", "packs"]:
+            standardized_keywords.append("pack")
+        elif word in ["box", "boxes"]:
+            standardized_keywords.append("box")
         else:
-            # Prüfe auf Teilübereinstimmungen (mit strengeren Regeln)
-            if not check_partial_match(keyword, text_words):
-                if log_level and log_level != 'None':
-                    logger.debug(f"❌ Keyword '{keyword}' nicht gefunden in '{clean_title}'")
-                return False
+            standardized_keywords.append(word)
     
-    # Erfolg nur wenn ALLE Keywords gefunden wurden
-    if matched_count == len(important_keywords):
-        if log_level == 'INFO':
-            logger.info(f"✅ Treffer für '{original_keywords}' in '{text}'")
-        return True
+    # Standardisiere auch im Text
+    standardized_text = text
+    for singular, plural in [("display", "displays"), ("booster", "boosters"), 
+                            ("pack", "packs"), ("box", "boxes")]:
+        standardized_text = standardized_text.replace(plural, singular)
     
-    return False
-
-def check_partial_match(keyword, text_words):
-    """
-    Prüft auf teilweise Übereinstimmung mit strengeren Regeln
+    # Überprüfe die Übereinstimmung von Schlüsselwörtern
+    # Ignoriere kurze Wörter (< 3 Zeichen) und häufige Füllwörter
+    ignore_words = ["und", "the", "and", "for", "mit", "von", "pro", "per", "der", "die", "das"]
     
-    :param keyword: Einzelnes Keyword zum Prüfen
-    :param text_words: Set von Wörtern im Text
-    :return: True wenn teilweise Übereinstimmung gefunden
-    """
-    # Mindestlänge für Teilübereinstimmungen
-    if len(keyword) < 4:
+    # Wichtige Schlüsselwörter identifizieren, die unterscheiden zwischen Displays und anderen Produkten
+    important_keywords = []
+    
+    # Sammle wichtige Keywords (> 3 Zeichen) und nicht in ignore_words,
+    # aber nicht die Produkttyp-Wörter (die werden separat geprüft)
+    important_keywords = [k for k in standardized_keywords 
+                         if len(k) > 3 and k not in ignore_words and k not in ["display", "booster", "pack", "box", "etb", "ttb", "blister"]]
+    
+    # Wenn es keine wichtigen Keywords gibt, verwende alle
+    if not important_keywords:
+        important_keywords = [k for k in standardized_keywords if k not in ignore_words]
+    
+    # Zähle, wie viele wichtige Keywords gefunden wurden
+    found_count = sum(1 for key_term in important_keywords if key_term in standardized_text)
+    
+    # Bei Suche nach "display", muss "display" oder "36er" oder "box" im Text vorkommen
+    if search_product_type == "display" and not any(term in standardized_text for term in ["display", "36er", "box", "36"]):
+        if log_level and log_level != 'None':
+            logger.debug(f"⚠️ 'display' im Suchbegriff, aber kein Display-Begriff im Text gefunden: '{original_keywords}' in '{original_text}'")
         return False
     
-    # Prüfe ob Keyword als Teil eines längeren Wortes vorkommt
-    for word in text_words:
-        if len(word) >= len(keyword) and keyword in word:
-            # Verhindere falsche Teilübereinstimmungen
-            # z.B. "reis" sollte nicht in "preise" matchen
-            if word.startswith(keyword) or word.endswith(keyword):
-                return True
+    # Bei Suche nach "etb", muss "etb" oder "elite trainer box" im Text vorkommen
+    if search_product_type == "etb" and not any(term in standardized_text for term in ["etb", "elite trainer", "trainer box"]):
+        if log_level and log_level != 'None':
+            logger.debug(f"⚠️ 'etb' im Suchbegriff, aber kein ETB-Begriff im Text gefunden: '{original_keywords}' in '{original_text}'")
+        return False
     
-    return False
-
-def extract_important_keywords(keywords):
-    """
-    Extrahiert wichtige Keywords (ohne Füllwörter und Produkttypen)
-    Mit strengerer Filterung
-    """
-    ignore_words = [
-        # Produkttypen
-        "display", "displays", "booster", "boosters", "pack", "packs", 
-        "box", "boxes", "etb", "ttb", "tin", "tins", "blister", "blisters",
+    # Bei Suche nach "ttb", muss "ttb" oder "top trainer box" im Text vorkommen
+    if search_product_type == "ttb" and not any(term in standardized_text for term in ["ttb", "top trainer", "trainer box"]):
+        if log_level and log_level != 'None':
+            logger.debug(f"⚠️ 'ttb' im Suchbegriff, aber kein TTB-Begriff im Text gefunden: '{original_keywords}' in '{original_text}'")
+        return False
+    
+    # Mindestens 80% der wichtigen Keywords müssen gefunden werden
+    threshold = 0.8
+    required_matches = max(1, int(len(important_keywords) * threshold))
+    
+    if found_count < required_matches:
+        if log_level and log_level != 'None' and important_keywords:
+            logger.debug(f"⚠️ Nicht genug wichtige Begriffe gefunden ({found_count}/{len(important_keywords)}): '{original_keywords}' in '{original_text}'")
+        return False
+    
+    if log_level and log_level == 'INFO':
+        logger.info(f"✅ Treffer für Suchbegriff: '{original_keywords}' in '{original_text}'")
         
-        # Pokémon-spezifische Wörter
-        "pokemon", "pokémon", "tcg", "trading", "card", "cards", "game",
-        
-        # Füllwörter
-        "und", "the", "and", "for", "mit", "von", "pro", "per", 
-        "der", "die", "das", "ein", "eine", "einem", "einen", "einer",
-        
-        # Zahlen und Einheiten
-        "36er", "36", "18er", "18", "3er", "3"
-    ]
-    
-    important = []
-    for keyword in keywords:
-        keyword_lower = keyword.lower()
-        # Strengere Kriterien: Mindestens 3 Zeichen und nicht in Ignorierliste
-        if len(keyword) >= 3 and keyword_lower not in ignore_words:
-            important.append(keyword_lower)
-    
-    # Mindestens ein wichtiges Keyword muss vorhanden sein
-    if not important and keywords:
-        # Fallback: Nimm das längste Keyword das nicht ignoriert wird
-        candidates = [k for k in keywords if k.lower() not in ignore_words]
-        if candidates:
-            important.append(max(candidates, key=len).lower())
-    
-    return important
-
-def validate_specific_keywords(product_type, text):
-    """
-    Validiert spezifische Keywords basierend auf dem Produkttyp
-    """
-    if product_type == "display":
-        # Muss Display- oder 36er-Begriff enthalten
-        if not re.search(r'\b(display|36er|36\s|booster\s+box)\b', text):
-            return False
-    
-    elif product_type == "etb":
-        # Muss ETB- oder Elite Trainer-Begriff enthalten
-        if not re.search(r'\b(etb|elite\s+trainer|trainer\s+box)\b', text):
-            return False
-    
-    elif product_type == "ttb":
-        # Muss TTB- oder Top Trainer-Begriff enthalten
-        if not re.search(r'\b(ttb|top\s+trainer|trainer\s+box)\b', text):
-            return False
-    
     return True
 
 def extract_product_keywords(search_term):
@@ -268,18 +300,14 @@ def extract_product_keywords(search_term):
     search_term = search_term.lower()
     
     # Entferne Produkttyp-Wörter
-    product_type_words = [
-        "display", "etb", "ttb", "elite trainer box", "top trainer box", 
-        "elite-trainer-box", "top-trainer-box", "box", "tin", "blister",
-        "booster", "pack", "36er", "18er", "3er"
-    ]
+    product_type_words = ["display", "etb", "ttb", "elite trainer box", "top trainer box", 
+                          "elite-trainer-box", "top-trainer-box", "box"]
     
-    clean_term = search_term
     for word in product_type_words:
-        clean_term = re.sub(rf'\b{re.escape(word)}\b', '', clean_term)
+        search_term = search_term.replace(word, "")
     
     # Bereinige und teile in Wörter
-    clean_term = clean_text(clean_term)
+    clean_term = clean_text(search_term)
     keywords = [word for word in clean_term.split() if len(word) > 2]
     
     # Entferne häufige Füllwörter
@@ -291,6 +319,7 @@ def extract_product_keywords(search_term):
 def load_exclusion_sets():
     """
     Lädt die Liste der auszuschließenden Sets aus einer Konfigurationsdatei
+    oder verwendet eine Standard-Liste
     
     :return: Liste mit auszuschließenden Sets
     """
@@ -314,166 +343,81 @@ def load_exclusion_sets():
     
     # Standard-Ausschlussliste, wenn keine Konfigurationsdatei gefunden wurde
     exclusion_sets = [
-        "stürmische funken", "sturmi", "paradox rift", "paradox", "prismat", "stellar", 
-        "battle partners", "nebel der sagen", "zeit", "paldea", "obsidian", "151", 
-        "astral", "brilliant", "fusion", "kp01", "kp02", "kp03", "kp04", "kp05", 
-        "kp06", "kp07", "kp08", "sv01", "sv02", "sv03", "sv04", "sv05", "sv06", 
-        "sv07", "sv08", "sv10", "sv11", "sv12", "sv13", "glory of team rocket"
+        "stürmische funken", "sturmi", "paradox rift", "paradox", "prismat", "stellar", "battle partners",
+        "nebel der sagen", "zeit", "paldea", "obsidian", "151", "astral", "brilliant", "fusion", 
+        "kp01", "kp02", "kp03", "kp04", "kp05", "kp06", "kp07", "kp08", "sv01", "sv02", "sv03", "sv04", 
+        "sv05", "sv06", "sv07", "sv08", "sv10", "sv11", "sv12", "sv13", 
+        "glory of team rocket"
     ]
     
     return exclusion_sets
 
 def normalize_product_name(text):
     """
-    Normalisiert einen Produktnamen für konsistenten Vergleich
+    Normalisiert einen Produktnamen für konsistenten Vergleich.
     
     :param text: Zu normalisierender Text
     :return: Normalisierter Text
     """
     text = clean_text(text)
-    
-    # Standardisiere Singular/Plural
-    text = normalize_text_forms(text)
+    # Singular/Plural für häufige Produkttypen standardisieren
+    text = text.replace("displays", "display")
+    text = text.replace("boosters", "booster")
+    text = text.replace("packs", "pack")
+    text = text.replace("boxes", "box")
+    text = text.replace("tins", "tin")
+    text = text.replace("blisters", "blister")
     
     # Korrigiere bekannte Tippfehler
-    corrections = {
-        "togehter": "together",
-        "journy": "journey", 
-        "scarlett": "scarlet",
-        "reisegefärten": "reisegefährten"
-    }
-    
-    for wrong, correct in corrections.items():
-        text = text.replace(wrong, correct)
-    
-    return text
-
-def normalize_text_forms(text):
-    """Normalisiert Singular/Plural-Formen im Text"""
-    replacements = {
-        "displays": "display",
-        "boosters": "booster",
-        "packs": "pack",
-        "boxes": "box",
-        "tins": "tin",
-        "blisters": "blister"
-    }
-    
-    for plural, singular in replacements.items():
-        text = text.replace(plural, singular)
+    text = text.replace("togehter", "together")
     
     return text
 
 def prepare_keywords(products):
     """
-    Zerlegt die products.txt Zeilen in Keyword-Listen
-    und fügt ggf. Synonyme aus synonyms.json hinzu
-    
-    :param products: Liste der Produktzeilen aus products.txt
-    :return: Dictionary mit Suchbegriffen und ihren Tokens
+    Zerlegt die products.txt Zeilen in Keyword-Listen und
+    fügt ggf. Synonyme aus synonyms.json hinzu
     """
     keywords_map = {}
     
-    # Verarbeite jede Zeile aus products.txt
+    # Normale Keywords aus products.txt
     for line in products:
         # Entferne führende/nachfolgende Leerzeichen
         clean_line = line.strip()
         if clean_line:  # Überspringe leere Zeilen
             keywords_map[clean_line] = clean_text(clean_line).split()
     
-    # Lade Synonyme
-    synonyms = load_synonyms()
-    
-    # Füge Synonyme hinzu, aber nur wenn sie zu einem existierenden Produkt gehören
-    for key, synonym_list in synonyms.items():
-        if key in keywords_map:
-            # Füge nur die Synonyme als separate Suchbegriffe hinzu
-            for synonym in synonym_list:
-                if synonym not in keywords_map:  # Vermeide Duplikate
-                    keywords_map[synonym] = clean_text(synonym).split()
-    
-    logger.info(f"ℹ️ Geladene Suchbegriffe: {list(keywords_map.keys())}")
-    
-    return keywords_map
-
-def load_synonyms():
-    """Lädt Synonyme aus der Konfigurationsdatei"""
-    synonyms = {}
-    
+    # Versuche zuerst config/synonyms.json
     synonyms_file_paths = ["config/synonyms.json", "data/synonyms.json"]
+    synonyms_loaded = False
     
     for file_path in synonyms_file_paths:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 synonyms = json.load(f)
+                
+                # Füge jeden Synonym-Eintrag als separaten Suchbegriff hinzu
+                for key, synonym_list in synonyms.items():
+                    # Prüfe, ob der Key selbst ein Suchbegriff ist
+                    if key in keywords_map:
+                        # Füge nur die Synonyme zum Map hinzu
+                        for synonym in synonym_list:
+                            if synonym not in keywords_map:  # Vermeide Duplikate
+                                keywords_map[synonym] = clean_text(synonym).split()
+                    # Wenn der Key kein Suchbegriff ist, ignorieren
+                    # Dies stellt sicher, dass nur Synonyme für tatsächliche Suchbegriffe verwendet werden
+                                
+                synonyms_loaded = True
                 logger.info(f"ℹ️ Synonyme aus {file_path} geladen")
-                return synonyms
+                break  # Wenn erfolgreich geladen, breche die Schleife ab
+                
         except (FileNotFoundError, json.JSONDecodeError) as e:
             logger.debug(f"ℹ️ Synonyme aus {file_path} konnten nicht geladen werden: {e}")
     
-    logger.info("ℹ️ Keine Synonyme gefunden. Nur direkte Suchbegriffe werden verwendet.")
-    return synonyms
-
-def is_product_match(search_terms, product_title):
-    """
-    Hauptfunktion für präzises Produkt-Matching
+    if not synonyms_loaded:
+        logger.info("ℹ️ Keine Synonyme geladen. Nur direkte Suchbegriffe werden verwendet.")
     
-    :param search_terms: String mit Suchbegriff aus products.txt
-    :param product_title: Titel des gefundenen Produkts
-    :return: True wenn das Produkt dem Suchbegriff entspricht, sonst False
-    """
-    # Normalisiere beide Texte
-    normalized_search = normalize_product_name(search_terms)
-    normalized_title = normalize_product_name(product_title)
+    # Debug-Ausgabe der geladenen Suchbegriffe
+    logger.info(f"ℹ️ Geladene Suchbegriffe: {list(keywords_map.keys())}")
     
-    # Extrahiere Produkttypen
-    search_type = extract_product_type_from_text(normalized_search)
-    title_type = extract_product_type_from_text(normalized_title)
-    
-    # Strikte Produkttyp-Validierung
-    if search_type != "unknown" and title_type != "unknown":
-        if search_type != title_type:
-            logger.debug(f"❌ Produkttyp stimmt nicht überein: gesucht '{search_type}', gefunden '{title_type}'")
-            return False
-    
-    # Extrahiere Keywords
-    search_keywords = clean_text(normalized_search).split()
-    
-    # Verwende is_keyword_in_text für konsistente Prüfung
-    return is_keyword_in_text(search_keywords, normalized_title, log_level='None')
-
-def is_strict_match(keywords, text, threshold=1.0):
-    """
-    Führt einen strikten Match durch - eine konfigurierbare Anzahl von Keywords muss übereinstimmen
-    
-    :param keywords: Liste der Keywords
-    :param text: Text zum Durchsuchen
-    :param threshold: Anteil der Keywords die gefunden werden müssen (0.0-1.0)
-    :return: True wenn genug Keywords gefunden wurden
-    """
-    if not keywords or not text:
-        return False
-    
-    text_lower = text.lower()
-    text_words = set(re.findall(r'\b\w+\b', text_lower))
-    
-    # Extrahiere wichtige Keywords
-    important_keywords = extract_important_keywords(keywords)
-    
-    if not important_keywords:
-        return False
-    
-    # Zähle gefundene Keywords
-    found_count = 0
-    for keyword in important_keywords:
-        keyword_lower = keyword.lower()
-        if keyword_lower in text_words:
-            found_count += 1
-        else:
-            # Prüfe auf Teilübereinstimmungen
-            if any(keyword_lower in word for word in text_words):
-                found_count += 1
-    
-    # Berechne ob genug Keywords gefunden wurden
-    required_matches = max(1, int(len(important_keywords) * threshold))
-    return found_count >= required_matches
+    return keywords_map
