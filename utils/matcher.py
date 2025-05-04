@@ -148,92 +148,99 @@ def is_keyword_in_text(keywords, text, log_level='DEBUG'):
                     logger.debug(f"⚠️ Text enthält ausgeschlossenes Set '{exclusion}'")
                 return False
     
-    # Normalisiere Singular/Plural
-    normalized_text = normalize_text_forms(clean_title)
-    normalized_keywords = normalize_keyword_forms(keywords)
-    
-    # Erstelle Token-Sets
-    text_tokens = set(normalized_text.split())
-    keyword_tokens = set(normalized_keywords)
-    
-    # Strikte Keyword-Überprüfung
-    important_keywords = extract_important_keywords(normalized_keywords)
+    # Strengere Keyword-Überprüfung
+    important_keywords = extract_important_keywords(keywords)
     
     if not important_keywords:
         return False
     
-    # Mindestens 80% der wichtigen Keywords müssen gefunden werden
-    found_count = sum(1 for keyword in important_keywords if keyword in text_tokens)
-    required_matches = max(1, int(len(important_keywords) * 0.8))
+    # Erstelle Wortlisten für exakte Überprüfung
+    text_words = set(clean_title.split())
     
-    if found_count >= required_matches:
-        # Zusätzliche Prüfung für spezifische Keywords
-        if not validate_specific_keywords(search_product_type, normalized_text):
-            return False
-            
+    # ALLE wichtigen Keywords müssen exakt gefunden werden
+    matched_count = 0
+    for keyword in important_keywords:
+        # Exakte Wortübereinstimmung erforderlich
+        if keyword in text_words:
+            matched_count += 1
+        else:
+            # Prüfe auf Teilübereinstimmungen (mit strengeren Regeln)
+            if not check_partial_match(keyword, text_words):
+                if log_level and log_level != 'None':
+                    logger.debug(f"❌ Keyword '{keyword}' nicht gefunden in '{clean_title}'")
+                return False
+    
+    # Erfolg nur wenn ALLE Keywords gefunden wurden
+    if matched_count == len(important_keywords):
         if log_level == 'INFO':
             logger.info(f"✅ Treffer für '{original_keywords}' in '{text}'")
         return True
     
-    if log_level and log_level != 'None':
-        logger.debug(f"⚠️ Nicht genug Keywords gefunden ({found_count}/{len(important_keywords)})")
     return False
 
-def normalize_text_forms(text):
-    """Normalisiert Singular/Plural-Formen im Text"""
-    replacements = {
-        "displays": "display",
-        "boosters": "booster",
-        "packs": "pack",
-        "boxes": "box",
-        "tins": "tin",
-        "blisters": "blister"
-    }
+def check_partial_match(keyword, text_words):
+    """
+    Prüft auf teilweise Übereinstimmung mit strengeren Regeln
     
-    for plural, singular in replacements.items():
-        text = text.replace(plural, singular)
+    :param keyword: Einzelnes Keyword zum Prüfen
+    :param text_words: Set von Wörtern im Text
+    :return: True wenn teilweise Übereinstimmung gefunden
+    """
+    # Mindestlänge für Teilübereinstimmungen
+    if len(keyword) < 4:
+        return False
     
-    return text
-
-def normalize_keyword_forms(keywords):
-    """Normalisiert Keywords zu ihrer Standardform"""
-    normalized = []
+    # Prüfe ob Keyword als Teil eines längeren Wortes vorkommt
+    for word in text_words:
+        if len(word) >= len(keyword) and keyword in word:
+            # Verhindere falsche Teilübereinstimmungen
+            # z.B. "reis" sollte nicht in "preise" matchen
+            if word.startswith(keyword) or word.endswith(keyword):
+                return True
     
-    singular_forms = {
-        "displays": "display",
-        "boosters": "booster",
-        "packs": "pack",
-        "boxes": "box",
-        "tins": "tin",
-        "blisters": "blister"
-    }
-    
-    for keyword in keywords:
-        normalized.append(singular_forms.get(keyword, keyword))
-    
-    return normalized
+    return False
 
 def extract_important_keywords(keywords):
-    """Extrahiert wichtige Keywords (ohne Füllwörter und Produkttypen)"""
+    """
+    Extrahiert wichtige Keywords (ohne Füllwörter und Produkttypen)
+    Mit strengerer Filterung
+    """
     ignore_words = [
+        # Produkttypen
+        "display", "displays", "booster", "boosters", "pack", "packs", 
+        "box", "boxes", "etb", "ttb", "tin", "tins", "blister", "blisters",
+        
+        # Pokémon-spezifische Wörter
+        "pokemon", "pokémon", "tcg", "trading", "card", "cards", "game",
+        
+        # Füllwörter
         "und", "the", "and", "for", "mit", "von", "pro", "per", 
-        "der", "die", "das", "display", "booster", "pack", "box", 
-        "etb", "ttb", "tin", "blister"
+        "der", "die", "das", "ein", "eine", "einem", "einen", "einer",
+        
+        # Zahlen und Einheiten
+        "36er", "36", "18er", "18", "3er", "3"
     ]
     
     important = []
     for keyword in keywords:
-        if len(keyword) > 3 and keyword not in ignore_words:
-            important.append(keyword)
+        keyword_lower = keyword.lower()
+        # Strengere Kriterien: Mindestens 3 Zeichen und nicht in Ignorierliste
+        if len(keyword) >= 3 and keyword_lower not in ignore_words:
+            important.append(keyword_lower)
     
-    # Wenn keine wichtigen Keywords übrig sind, nimm alle außer Füllwörter
-    if not important:
-        important = [k for k in keywords if k not in ignore_words[:11]]  # Nur die Füllwörter
+    # Mindestens ein wichtiges Keyword muss vorhanden sein
+    if not important and keywords:
+        # Fallback: Nimm das längste Keyword das nicht ignoriert wird
+        candidates = [k for k in keywords if k.lower() not in ignore_words]
+        if candidates:
+            important.append(max(candidates, key=len).lower())
     
     return important
 
 def validate_specific_keywords(product_type, text):
-    """Validiert spezifische Keywords basierend auf dem Produkttyp"""
+    """
+    Validiert spezifische Keywords basierend auf dem Produkttyp
+    """
     if product_type == "display":
         # Muss Display- oder 36er-Begriff enthalten
         if not re.search(r'\b(display|36er|36\s|booster\s+box)\b', text):
@@ -331,13 +338,29 @@ def normalize_product_name(text):
     # Korrigiere bekannte Tippfehler
     corrections = {
         "togehter": "together",
-        "journy": "journey",
+        "journy": "journey", 
         "scarlett": "scarlet",
         "reisegefärten": "reisegefährten"
     }
     
     for wrong, correct in corrections.items():
         text = text.replace(wrong, correct)
+    
+    return text
+
+def normalize_text_forms(text):
+    """Normalisiert Singular/Plural-Formen im Text"""
+    replacements = {
+        "displays": "display",
+        "boosters": "booster",
+        "packs": "pack",
+        "boxes": "box",
+        "tins": "tin",
+        "blisters": "blister"
+    }
+    
+    for plural, singular in replacements.items():
+        text = text.replace(plural, singular)
     
     return text
 
@@ -415,13 +438,42 @@ def is_product_match(search_terms, product_title):
     
     # Extrahiere Keywords
     search_keywords = clean_text(normalized_search).split()
-    title_keywords = set(clean_text(normalized_title).split())
     
-    # Prüfe ob mindestens 80% der Suchbegriffe im Titel vorkommen
-    important_search_terms = extract_important_keywords(search_keywords)
-    matches = sum(1 for term in important_search_terms if term in title_keywords)
+    # Verwende is_keyword_in_text für konsistente Prüfung
+    return is_keyword_in_text(search_keywords, normalized_title, log_level='None')
+
+def is_strict_match(keywords, text, threshold=1.0):
+    """
+    Führt einen strikten Match durch - eine konfigurierbare Anzahl von Keywords muss übereinstimmen
     
-    if matches >= len(important_search_terms) * 0.8:
-        return True
+    :param keywords: Liste der Keywords
+    :param text: Text zum Durchsuchen
+    :param threshold: Anteil der Keywords die gefunden werden müssen (0.0-1.0)
+    :return: True wenn genug Keywords gefunden wurden
+    """
+    if not keywords or not text:
+        return False
     
-    return False
+    text_lower = text.lower()
+    text_words = set(re.findall(r'\b\w+\b', text_lower))
+    
+    # Extrahiere wichtige Keywords
+    important_keywords = extract_important_keywords(keywords)
+    
+    if not important_keywords:
+        return False
+    
+    # Zähle gefundene Keywords
+    found_count = 0
+    for keyword in important_keywords:
+        keyword_lower = keyword.lower()
+        if keyword_lower in text_words:
+            found_count += 1
+        else:
+            # Prüfe auf Teilübereinstimmungen
+            if any(keyword_lower in word for word in text_words):
+                found_count += 1
+    
+    # Berechne ob genug Keywords gefunden wurden
+    required_matches = max(1, int(len(important_keywords) * threshold))
+    return found_count >= required_matches

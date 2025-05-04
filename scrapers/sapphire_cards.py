@@ -59,83 +59,87 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
     # Cache für fehlgeschlagene URLs mit Timestamps
     failed_urls_cache = {}
     
-    # 1. Versuche zuerst die Hauptseite und Kategorien zu durchsuchen
-    logger.info("🔍 Durchsuche Hauptseite und Kategorien...")
+    # Direkte Suche mit Suchbegriffen durchführen
+    logger.info("🔍 Starte direkte Suche mit spezifischen Suchbegriffen...")
     
-    # Hauptseite Pokemon-Kategorie
-    main_url = "https://sapphire-cards.de/produkt-kategorie/pokemon/"
-    
-    try:
-        response = requests.get(main_url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            # Sammle Produkt-Links
-            product_links = []
-            for link in soup.find_all("a", href=True):
-                href = link.get("href", "")
-                link_text = link.get_text().lower()
-                
-                # Nur Produkt-URLs
-                if "/produkt/" in href and href not in product_links:
-                    # Prüfe ob relevante Keywords im Link-Text
-                    is_relevant = False
-                    for search_term, tokens in keywords_map.items():
-                        if any(token.lower() in link_text for token in tokens):
-                            is_relevant = True
-                            break
-                    
-                    if is_relevant:
-                        product_links.append(href)
-            
-            logger.info(f"🔍 {len(product_links)} relevante Produktlinks gefunden")
-            
-            # Verarbeite gefundene Produkt-Links
-            for product_url in product_links:
-                if product_url in processed_urls:
-                    continue
-                    
-                processed_urls.add(product_url)
-                
-                # Einmaliger Versuch ohne Wiederholungen
-                product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, max_retries=0)
-                
-                if product_data and isinstance(product_data, dict):
-                    all_products.append(product_data)
-            
-    except Exception as e:
-        logger.error(f"❌ Fehler beim Durchsuchen der Pokemon-Kategorie: {e}")
-    
-    # 2. Wenn keine Produkte gefunden wurden, verwende die Suche
-    if not all_products:
-        logger.info("🔍 Keine Produkte auf der Kategorieseite gefunden, verwende die Suche...")
+    for search_term in keywords_map.keys():
+        # Bereinige Suchbegriff
+        clean_term = search_term.lower()
         
-        for search_term in keywords_map.keys():
-            # Bereinige Suchbegriff
-            clean_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
-            
-            # URL-Encoding für die Suche
-            encoded_term = quote_plus(clean_term)
-            search_url = f"https://sapphire-cards.de/?s={encoded_term}&post_type=product"
-            
-            try:
-                response = requests.get(search_url, headers=headers, timeout=15)
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, "html.parser")
+        # URL-Encoding für die Suche
+        encoded_term = quote_plus(clean_term)
+        search_url = f"https://sapphire-cards.de/?s={encoded_term}&post_type=product"
+        
+        try:
+            logger.info(f"🔍 Suche nach: {search_term}")
+            response = requests.get(search_url, headers=headers, timeout=15)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, "html.parser")
+                
+                # Finde alle Produkt-Links
+                product_links = []
+                for link in soup.find_all("a", href=True):
+                    href = link.get("href", "")
+                    link_text = link.get_text().strip()
                     
-                    # Sammle Produkt-Links aus den Suchergebnissen
-                    for link in soup.find_all("a", href=True):
-                        href = link.get("href", "")
-                        if "/produkt/" in href and href not in processed_urls:
+                    # Nur Produkt-URLs
+                    if "/produkt/" in href and href not in processed_urls:
+                        # Strikte Prüfung: Der Link-Text muss mindestens einen der Suchbegriffe enthalten
+                        tokens = keywords_map.get(search_term, [])
+                        if is_keyword_in_text(tokens, link_text, log_level='None'):
                             processed_urls.add(href)
                             
                             product_data = process_product_url(href, keywords_map, seen, out_of_stock, only_available, headers, new_matches, max_retries=0)
                             
                             if product_data and isinstance(product_data, dict):
                                 all_products.append(product_data)
+                                logger.info(f"✅ Neuer Treffer gefunden: {product_data['title']} - {product_data['status_text']}")
                 
-            except Exception as e:
-                logger.error(f"❌ Fehler bei der Suche nach '{search_term}': {e}")
+                logger.info(f"🔍 {len(product_links)} Produkte für '{search_term}' verarbeitet")
+                
+        except Exception as e:
+            logger.error(f"❌ Fehler bei der Suche nach '{search_term}': {e}")
+    
+    # Falls keine Produkte gefunden wurden, versuche Kategorien zu durchsuchen
+    if not all_products:
+        logger.info("🔍 Keine Produkte gefunden, durchsuche Hauptseite und Kategorien...")
+        
+        # Hauptseite Pokemon-Kategorie
+        main_url = "https://sapphire-cards.de/produkt-kategorie/pokemon/"
+        
+        try:
+            response = requests.get(main_url, headers=headers, timeout=15)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, "html.parser")
+                
+                # Sammle Produkt-Links
+                product_links = []
+                for link in soup.find_all("a", href=True):
+                    href = link.get("href", "")
+                    link_text = link.get_text().strip()
+                    
+                    # Nur Produkt-URLs
+                    if "/produkt/" in href and href not in product_links:
+                        # WICHTIG: Strikte Prüfung gegen alle Keywords
+                        is_relevant = False
+                        matched_term = None
+                        for search_term, tokens in keywords_map.items():
+                            if is_keyword_in_text(tokens, link_text, log_level='None'):
+                                is_relevant = True
+                                matched_term = search_term
+                                break
+                        
+                        if is_relevant:
+                            processed_urls.add(href)
+                            
+                            product_data = process_product_url(href, keywords_map, seen, out_of_stock, only_available, headers, new_matches, max_retries=0)
+                            
+                            if product_data and isinstance(product_data, dict):
+                                all_products.append(product_data)
+                                logger.info(f"✅ Neuer Treffer gefunden: {product_data['title']} - {product_data['status_text']}")
+                
+        except Exception as e:
+            logger.error(f"❌ Fehler beim Durchsuchen der Pokemon-Kategorie: {e}")
     
     # Sende Benachrichtigungen
     if all_products:
@@ -184,16 +188,28 @@ def process_product_url(product_url, keywords_map, seen, out_of_stock, only_avai
         title = title_elem.text.strip()
         logger.info(f"📝 Gefundener Produkttitel: '{title}'")
         
-        # Prüfe gegen Suchbegriffe
+        # STRIKTE PRÜFUNG: Titel muss explizit einem Suchbegriff entsprechen
         matched_term = None
         for search_term, tokens in keywords_map.items():
-            if is_keyword_in_text(tokens, title, log_level='None'):
+            # Erweiterte strikte Prüfung
+            match_result = is_strict_match(tokens, title)
+            if match_result:
                 matched_term = search_term
+                logger.info(f"✅ Strikter Match für '{search_term}' gefunden in '{title}'")
                 break
         
         if not matched_term:
-            logger.debug(f"❌ Kein passender Suchbegriff für {title}")
+            logger.debug(f"❌ Kein passender Suchbegriff für '{title}'")
             return False
+        
+        # Zusätzliche Validierung: Produkttyp muss übereinstimmen
+        search_product_type = extract_product_type_from_text(matched_term)
+        title_product_type = extract_product_type_from_text(title)
+        
+        if search_product_type != "unknown" and title_product_type != "unknown":
+            if search_product_type != title_product_type:
+                logger.debug(f"❌ Produkttyp stimmt nicht überein: gesucht '{search_product_type}', gefunden '{title_product_type}'")
+                return False
         
         # Verfügbarkeitsprüfung
         is_available, price, status_text = detect_availability(soup, product_url)
@@ -222,7 +238,7 @@ def process_product_url(product_url, keywords_map, seen, out_of_stock, only_avai
                 "status_text": status_text,
                 "is_available": is_available,
                 "matched_term": matched_term,
-                "product_type": extract_product_type_from_text(title),
+                "product_type": title_product_type,
                 "shop": "sapphire-cards.de"
             }
             
@@ -236,6 +252,41 @@ def process_product_url(product_url, keywords_map, seen, out_of_stock, only_avai
     except Exception as e:
         logger.error(f"❌ Fehler beim Prüfen des Produkts {product_url}: {e}")
         return False
+
+def is_strict_match(tokens, title):
+    """
+    Führt einen strikten Match durch - ALLE wichtigen Keywords müssen im Titel vorkommen
+    
+    :param tokens: Liste der Keywords aus dem Suchbegriff
+    :param title: Produkttitel
+    :return: True wenn strikter Match erfolgt, False sonst
+    """
+    # Bereinige den Titel
+    title_lower = title.lower()
+    title_words = set(re.findall(r'\b\w+\b', title_lower))
+    
+    # Entferne unwichtige Tokens (Produkttypen, Füllwörter)
+    important_tokens = []
+    ignore_words = ["display", "box", "booster", "etb", "ttb", "pokemon", "pokémon", "the", "of", "and", "or"]
+    
+    for token in tokens:
+        if len(token) > 2 and token.lower() not in ignore_words:
+            important_tokens.append(token.lower())
+    
+    # Wenn keine wichtigen Tokens, dann ist es kein strikter Match
+    if not important_tokens:
+        return False
+    
+    # ALLE wichtigen Tokens müssen gefunden werden
+    for token in important_tokens:
+        if token not in title_words:
+            # Prüfe auch auf Teilstrings (z.B. "reisegefährten" in "reisegefährten-display")
+            if not any(token in word for word in title_words):
+                logger.debug(f"❌ Token '{token}' nicht im Titel '{title}' gefunden")
+                return False
+    
+    logger.debug(f"✅ Alle wichtigen Tokens {important_tokens} im Titel '{title}' gefunden")
+    return True
 
 def create_product_id(product_url, title):
     """Erzeugt eine eindeutige, stabile Produkt-ID"""

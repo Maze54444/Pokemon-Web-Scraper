@@ -11,7 +11,7 @@ from urllib.parse import urlparse, urljoin
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
-from utils.matcher import clean_text, is_keyword_in_text, normalize_product_name, extract_product_type_from_text
+from utils.matcher import clean_text, is_keyword_in_text, normalize_product_name, extract_product_type_from_text, is_strict_match
 from utils.telegram import send_telegram_message, escape_markdown, send_product_notification, send_batch_notification
 from utils.stock import get_status_text, update_product_status
 from utils.availability import detect_availability
@@ -340,14 +340,8 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     
                     tokens = keywords_map.get(matched_term, [])
                     
-                    search_term_type = extract_product_type_from_search_term(matched_term)
-                    title_product_type = extract_product_type_from_text(link_text)
-                    
-                    if search_term_type in ["display", "etb", "ttb"] and title_product_type != search_term_type:
-                        logger.debug(f"⚠️ Produkttyp-Diskrepanz: Suche nach '{search_term_type}', aber Produkt ist '{title_product_type}': {link_text}")
-                        continue
-                    
-                    if not is_keyword_in_text(tokens, link_text, log_level='None'):
+                    # Verwende strengeres Matching
+                    if not is_strict_match(tokens, link_text, threshold=0.8):
                         logger.debug(f"⚠️ Produkt entspricht nicht mehr dem Suchbegriff '{matched_term}': {link_text}")
                         continue
                     
@@ -379,7 +373,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                                 "status_text": status_text,
                                 "is_available": is_available,
                                 "matched_term": matched_term,
-                                "product_type": title_product_type,
+                                "product_type": extract_product_type_from_text(link_text),
                                 "shop": site_id
                             }
                             
@@ -436,19 +430,8 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     continue
                 
                 for search_term, tokens in keywords_map.items():
-                    search_term_type = extract_product_type_from_search_term(search_term)
-                    
-                    if search_term_type == "display":
-                        if not any(term in link_text for term in ["display", "36er", "booster box"]):
-                            continue
-                    elif search_term_type == "etb":
-                        if not any(term in link_text for term in ["etb", "elite trainer", "trainer box"]):
-                            continue
-                    elif search_term_type == "ttb":
-                        if not any(term in link_text for term in ["ttb", "top trainer", "trainer box"]):
-                            continue
-                    
-                    if is_keyword_in_text(tokens, link_text, log_level='None'):
+                    # Verwende strengeres Matching
+                    if is_strict_match(tokens, link_text, threshold=0.7):
                         potential_product_links.append((href, a_tag.get_text().strip()))
                         break
             
@@ -470,18 +453,8 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 
                 matched_term = None
                 for search_term, tokens in keywords_map.items():
-                    search_term_type = extract_product_type_from_search_term(search_term)
-                    link_product_type = extract_product_type_from_text(link_text)
-                    
-                    if search_term_type in ["display", "etb", "ttb"] and link_product_type != search_term_type:
-                        logger.debug(f"❌ Produkttyp-Konflikt: Suche nach '{search_term_type}', aber Link ist '{link_product_type}': {link_text}")
-                        continue
-                    
-                    match_result = is_keyword_in_text(tokens, link_text, log_level='None')
-                    
-                    if match_result:
+                    if is_strict_match(tokens, link_text, threshold=0.7):
                         matched_term = search_term
-                        logger.debug(f"🔍 Treffer für '{search_term}' im Link: {link_text}")
                         break
                 
                 if not matched_term:
@@ -508,14 +481,8 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                             detail_title_text = detail_title.text.strip()
                             tokens = keywords_map.get(matched_term, [])
                             
-                            detail_product_type = extract_product_type_from_text(detail_title_text)
-                            search_term_type = extract_product_type_from_search_term(matched_term)
-                            
-                            if search_term_type in ["display", "etb", "ttb"] and detail_product_type != search_term_type:
-                                logger.debug(f"❌ Detailseite ist kein {search_term_type}, obwohl danach gesucht wurde: {detail_title_text}")
-                                continue
-                            
-                            if not is_keyword_in_text(tokens, detail_title_text, log_level='None'):
+                            # Strikte Prüfung auch auf der Detailseite
+                            if not is_strict_match(tokens, detail_title_text, threshold=0.7):
                                 logger.debug(f"❌ Detailseite passt nicht zum Suchbegriff '{matched_term}': {detail_title_text}")
                                 continue
                             
@@ -528,7 +495,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                         if detail_soup:
                             html_content = str(detail_soup)
                             fingerprint = create_fingerprint(html_content)
-                            
+                        
                         product_cache[site_id][product_id] = {
                             "url": product_url,
                             "term": matched_term,
@@ -574,7 +541,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
             product_cache[cache_key] = current_keywords
             
             save_product_cache(product_cache)
-    
+        
         if all_products:
             send_batch_notification(all_products)
     
@@ -655,15 +622,7 @@ def extract_product_info(title):
         else:
             product_type = "unknown"
     
-    # Extrahiere Serien-/Set-Code
-    series_code = "unknown"
-    # Suche nach Standard-Codes wie SV09, KP09, etc.
-    code_match = re.search(r'(?:sv|kp|op)(?:\s|-)?\d+', title.lower())
-    if code_match:
-        series_code = code_match.group(0).replace(" ", "").replace("-", "")
-    # Ansonsten versuche, aus dem Titel abzuleiten
-    else:
-        # Extrahiere Tokens und versuche, eine Serie zu identifizieren
+    # Extrahiere Tokens und versuche, eine Serie zu identifizieren
         tokens = clean_text(title).split()
         # Entferne allgemeine Begriffe wie "Pokemon", "Trainer", "Box", etc.
         exclude_tokens = ["pokemon", "pokémon", "display", "box", "elite", "top", "trainer", 
