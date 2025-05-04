@@ -1,9 +1,9 @@
 https://tcgviert.com/
-https://kofuku.de/
+https://kofuku.de/search?options%5Bprefix%5D=last&q=reisegef%C3%A4hrten
+https://kofuku.de/search?options%5Bprefix%5D=last&q=journey+together
 https://www.card-corner.de/search/?qs=journey+together
 https://games-island.eu/
 https://sapphire-cards.de/
-https://www.mighty-cards.de/
 https://www.mighty-cards.de/
 https://www.gameware.at/info/spaces/gameware/gamewareSearch?query=reisegef%E4hrten&actionTag=search
 https://fantasiacards.de/search?q=journey+together&options%5Bprefix%5D=last
