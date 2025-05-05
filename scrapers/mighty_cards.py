@@ -4,7 +4,6 @@ import re
 import time
 import json
 import hashlib
-import random  # Fehlender Import hinzugefügt
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote_plus, urlparse
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text, load_exclusion_sets
@@ -109,12 +108,6 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
     
     # Cache für fehlgeschlagene URLs mit Timestamps
     failed_urls_cache = {}
-    
-    # Set für Deduplizierung von verarbeiteten URLs
-    processed_urls = set()  # Deklaration hinzugefügt
-    
-    # Maximale Anzahl von Wiederholungsversuchen
-    max_retries = 3  # Deklaration hinzugefügt
     
     # Direkter Zugriff auf bekannte Produkt-URLs mit Wiederholungsversuchen
     successful_direct_urls = False
@@ -534,10 +527,10 @@ def fetch_products_from_categories(headers):
             logger.error(f"❌ Fehler beim Durchsuchen der Kategorie {category_url}: {e}")
     
     # Dedupliziere die URLs
-product_urls = list(set(product_urls))
-logger.info(f"✅ {len(product_urls)} Produkt-URLs aus Kategorien extrahiert")
+    product_urls = list(set(product_urls))
+    logger.info(f"✅ {len(product_urls)} Produkt-URLs aus Kategorien extrahiert")
     
-return product_urls
+    return product_urls
 
 def search_mighty_cards_products(search_term, headers):
     """
@@ -600,62 +593,6 @@ def search_mighty_cards_products(search_term, headers):
         logger.warning(f"⚠️ Fehler bei der Suche nach '{search_term}': {e}")
     
     return product_urls
-
-def process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, max_retries=3):
-    """
-    Hilfsfunktion zum Verarbeiten einer einzelnen Produkt-URL
-    
-    :param product_url: URL zur Produktseite
-    :param keywords_map: Keywords für die Suche
-    :param seen: Set bereits gesehener Produkte
-    :param out_of_stock: Set ausverkaufter Produkte
-    :param only_available: Ob nur verfügbare Produkte angezeigt werden sollen
-    :param headers: HTTP-Headers für Anfragen
-    :param new_matches: Liste für neue Treffer
-    :param max_retries: Maximale Anzahl von Wiederholungsversuchen
-    :return: Produktdaten bei Erfolg oder False bei Fehler
-    """
-    try:
-        # Produktdetails abrufen und prüfen
-        product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers)
-        
-        if product_data and isinstance(product_data, dict):
-            product_id = create_product_id(product_data["title"])
-            new_matches.append(product_id)
-            logger.info(f"✅ Produkt gefunden: {product_data['title']} - {product_data['status_text']}")
-            return product_data
-        elif product_data:
-            logger.debug(f"✓ Produkt erfolgreich verarbeitet, aber keine Benachrichtigung nötig: {product_url}")
-            return True
-        else:
-            logger.debug(f"✕ Produkt entspricht nicht den Suchkriterien: {product_url}")
-            return False
-    except Exception as e:
-        logger.warning(f"⚠️ Fehler beim Verarbeiten der Produkt-URL {product_url}: {e}")
-        retry_count = 0
-        
-        # Bei Fehler mehrere Versuche unternehmen
-        while retry_count < max_retries:
-            retry_count += 1
-            logger.info(f"🔄 Wiederholungsversuch {retry_count}/{max_retries} für {product_url}")
-            
-            try:
-                time.sleep(2 * retry_count)  # Zunehmendes Backoff
-                
-                # Versuche erneut, das Produkt zu verarbeiten
-                product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers)
-                
-                if product_data:
-                    if isinstance(product_data, dict):
-                        product_id = create_product_id(product_data["title"])
-                        new_matches.append(product_id)
-                        logger.info(f"✅ Produkt gefunden (nach {retry_count} Versuchen): {product_data['title']}")
-                    return product_data
-            except Exception as retry_error:
-                logger.warning(f"⚠️ Fehler bei Wiederholungsversuch {retry_count}: {retry_error}")
-        
-        logger.error(f"❌ Maximale Anzahl an Wiederholungsversuchen erreicht für {product_url}")
-        return False
 
 def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price=None, max_price=None):
     """
