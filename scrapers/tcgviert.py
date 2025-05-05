@@ -642,7 +642,7 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                             
                             # Verwende das neue Modul zur Verfügbarkeitsprüfung
 is_available, price, status_text = detect_availability(detail_soup, product_url)
-                                
+                            
 # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
 should_notify, is_back_in_stock = update_product_status(
     product_id, is_available, seen, out_of_stock
