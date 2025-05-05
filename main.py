@@ -6,13 +6,14 @@ from datetime import datetime
 import concurrent.futures
 import random
 
-# Neue Importe für verbesserte Konfigurationsverwaltung
+# Neue Importe für verbesserte Konfigurationsverwaltung und Request-Handling
 from utils.config_manager import (
     load_products, load_urls, load_seen, save_seen,
     load_out_of_stock, save_out_of_stock, get_current_interval
 )
 from utils.telegram import send_telegram_message
 from utils.matcher import prepare_keywords
+from utils.requests_handler import get_page_content, fetch_url
 
 # Scraper-Module
 from scrapers.tcgviert import scrape_tcgviert
@@ -227,8 +228,7 @@ def test_availability():
     
     from scrapers.generic import check_product_availability
     from utils.availability import detect_availability
-    import requests
-    from bs4 import BeautifulSoup
+    from utils.requests_handler import get_default_headers, get_page_content
     
     test_urls = [
         "https://tcgviert.com/products/pokemon-tcg-journey-together-sv09-36er-display-en-max-1-per-person",
@@ -236,24 +236,81 @@ def test_availability():
         "https://sapphire-cards.de/produkt/pokemon-journey-together-reisegefaehrten-booster-box-display/",
     ]
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+    # Verwende verbesserten Request-Handler
+    headers = get_default_headers()
     
     for url in test_urls:
         logger.info(f"\nTest für URL: {url}")
         try:
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "html.parser")
+            # Verwende robuste HTTP-Anfragen
+            success, soup, status_code, error = get_page_content(
+                url,
+                headers=headers,
+                verify_ssl=True if "gameware.at" not in url and "games-island.eu" not in url else False,
+                timeout=30 if "games-island.eu" in url else 15
+            )
+            
+            if success:
                 is_available, price, status_text = detect_availability(soup, url)
                 logger.info(f"  Verfügbar: {is_available}")
                 logger.info(f"  Preis: {price}")
                 logger.info(f"  Status: {status_text}")
             else:
-                logger.error(f"  Fehler: HTTP Status {response.status_code}")
+                logger.error(f"  Fehler: {error}")
         except Exception as e:
             logger.error(f"  Fehler: {e}")
+
+def test_request_handler():
+    """Testet den verbesserten Request-Handler mit problematischen URLs"""
+    logger.info("[TEST] Teste verbesserten Request-Handler")
+    
+    from utils.requests_handler import fetch_url, get_page_content, get_default_headers
+    
+    # URLs mit bekannten Problemen
+    test_urls = [
+        "https://www.gameware.at/info/spaces/gameware/gamewareSearch?query=reisegef%E4hrten&actionTag=search",
+        "https://games-island.eu/",
+        "https://tcgviert.com/",  # Referenz-URL ohne bekannte Probleme
+    ]
+    
+    headers = get_default_headers()
+    
+    for url in test_urls:
+        logger.info(f"\nTest für URL: {url}")
+        try:
+            # Verwende verbesserte fetch_url Funktion
+            verify_ssl = True if "gameware.at" not in url and "games-island.eu" not in url else False
+            timeout = 30 if "games-island.eu" in url else 15
+            
+            response, error = fetch_url(
+                url,
+                headers=headers,
+                verify_ssl=verify_ssl,
+                timeout=timeout
+            )
+            
+            if response:
+                logger.info(f"  ✅ Erfolgreich abgerufen: Status {response.status_code}")
+            else:
+                logger.error(f"  ❌ Fehler: {error}")
+                
+            # Teste auch die get_page_content Funktion
+            success, soup, status_code, error = get_page_content(
+                url,
+                headers=headers,
+                verify_ssl=verify_ssl,
+                timeout=timeout
+            )
+            
+            if success:
+                logger.info(f"  ✅ Seite erfolgreich geladen und geparst")
+                title = soup.title.text if soup.title else "Kein Titel gefunden"
+                logger.info(f"  Titel: {title[:50]}...")
+            else:
+                logger.error(f"  ❌ Fehler beim Parsen: {error}")
+                
+        except Exception as e:
+            logger.error(f"  Fehler bei manuellem Test: {e}")
 
 def test_sapphire():
     """Testet den Sapphire-Cards Scraper isoliert"""
@@ -351,7 +408,7 @@ def clean_database():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pokémon TCG Scraper mit verbesserten Filtern")
     parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", "availability_test", 
-                                          "sapphire_test", "mighty_cards_test", "show_out_of_stock", "clean"], 
+                                          "sapphire_test", "mighty_cards_test", "request_test", "show_out_of_stock", "clean"], 
                         default="loop", help="Ausführungsmodus")
     parser.add_argument("--only-available", action="store_true", 
                         help="Nur verfügbare Produkte melden (nicht ausverkaufte)")
@@ -381,6 +438,8 @@ if __name__ == "__main__":
         test_sapphire()
     elif args.mode == "mighty_cards_test":
         test_mighty_cards()
+    elif args.mode == "request_test":
+        test_request_handler()
     elif args.mode == "show_out_of_stock":
         monitor_out_of_stock()
     elif args.mode == "clean":

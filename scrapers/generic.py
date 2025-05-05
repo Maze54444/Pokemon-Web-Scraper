@@ -13,6 +13,7 @@ from utils.matcher import clean_text, is_keyword_in_text, normalize_product_name
 from utils.telegram import send_telegram_message, escape_markdown, send_product_notification, send_batch_notification
 from utils.stock import get_status_text, update_product_status
 from utils.availability import detect_availability
+from utils.requests_handler import fetch_url, get_page_content, get_default_headers
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
@@ -148,7 +149,12 @@ def extract_product_type_from_search_term(search_term):
     return extract_product_type_from_text(search_term)
 
 def get_domain(url):
-    """Extrahiert die Domain aus einer URL ohne www. Präfix"""
+    """
+    Extrahiert die Domain aus einer URL ohne www. Präfix
+    
+    :param url: Die zu analysierende URL
+    :return: Normalisierte Domain ohne www. Präfix
+    """
     try:
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
@@ -250,10 +256,8 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
     found_product_ids = set()
     
     try:
-        # User-Agent setzen, um Blockierung zu vermeiden
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
+        # Verwende verbesserten Request-Handler für robuste HTTP-Anfragen 
+        headers = get_default_headers()
         
         # Prüfen, ob wir gecachte Produktpfade für diese Domain haben
         domain_paths = product_cache.get(site_id, {})
@@ -333,98 +337,96 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                     logger.debug(f"⏱️ Überspringe kürzlich geprüftes Produkt: {product_url}")
                     continue
                 
-                # Produktseite direkt besuchen
-                try:
-                    response = requests.get(product_url, headers=headers, timeout=10)
-                    if response.status_code != 200:
-                        logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: Status {response.status_code}")
+                # Produktseite direkt besuchen mit dem verbesserten Request-Handler
+                success, soup, status_code, error = get_page_content(
+                    product_url, 
+                    headers=headers, 
+                    verify_ssl=True if "gameware.at" not in product_url else False
+                )
+                
+                if not success:
+                    logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: {error}")
+                    
+                    # Wenn Seite nicht mehr erreichbar, aus Cache entfernen
+                    if status_code in (404, 410):
+                        logger.info(f"🗑️ Entferne nicht mehr verfügbare Produktpfad: {product_url}")
+                        domain_paths.pop(product_id, None)
+                    continue
+                
+                # Fingerprint des aktuellen Inhalts erstellen
+                current_fingerprint = create_fingerprint(str(soup))
+                stored_fingerprint = product_info.get("fingerprint", "")
+                
+                # Titel extrahieren
+                title_elem = soup.find('title')
+                link_text = title_elem.text.strip() if title_elem else ""
+                
+                # VERBESSERT: Strikte Prüfung auf exakte Übereinstimmung mit dem Suchbegriff
+                tokens = keywords_map.get(matched_term, [])
+                
+                # Extrahiere Produkttyp aus Suchbegriff und Titel
+                search_term_type = extract_product_type_from_search_term(matched_term)
+                title_product_type = extract_product_type_from_text(link_text)
+                
+                # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Titel übereinstimmen
+                if search_term_type in ["display", "etb", "ttb"] and title_product_type != search_term_type:
+                    logger.debug(f"⚠️ Produkttyp-Diskrepanz: Suche nach '{search_term_type}', aber Produkt ist '{title_product_type}': {link_text}")
+                    continue
+                
+                # Strengere Keyword-Prüfung mit Berücksichtigung des Produkttyps
+                if not is_keyword_in_text(tokens, link_text, log_level='None'):
+                    logger.debug(f"⚠️ Produkt entspricht nicht mehr dem Suchbegriff '{matched_term}': {link_text}")
+                    continue
+                
+                # Aktualisiere die letzte Prüfzeit
+                domain_paths[product_id]["last_checked"] = time.time()
+                
+                # Wenn der Fingerprint sich geändert hat oder wir keinen haben, führe vollständige Verfügbarkeitsprüfung durch
+                if current_fingerprint != stored_fingerprint or not stored_fingerprint:
+                    logger.info(f"🔄 Änderung erkannt oder erste Prüfung: {product_url}")
+                    domain_paths[product_id]["fingerprint"] = current_fingerprint
+                    
+                    # Prüfe Verfügbarkeit
+                    is_available, price, status_text = detect_availability(soup, product_url)
+                    
+                    # Aktualisiere Cache-Eintrag
+                    domain_paths[product_id]["is_available"] = is_available
+                    domain_paths[product_id]["price"] = price
+                    
+                    # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
+                    should_notify, is_back_in_stock = update_product_status(
+                        product_id, is_available, seen, out_of_stock
+                    )
+                    
+                    if should_notify and (not only_available or is_available):
+                        # Wenn Produkt wieder verfügbar ist, anpassen
+                        if is_back_in_stock:
+                            status_text = "🎉 Wieder verfügbar!"
+                        # Wenn kein Status-Text vorhanden ist, erstellen
+                        elif not status_text:
+                            status_text = get_status_text(is_available, is_back_in_stock)
                         
-                        # Wenn Seite nicht mehr erreichbar, aus Cache entfernen
-                        if response.status_code in (404, 410):
-                            logger.info(f"🗑️ Entferne nicht mehr verfügbare Produktpfad: {product_url}")
-                            domain_paths.pop(product_id, None)
-                        continue
-                    
-                    # Fingerprint des aktuellen Inhalts erstellen
-                    current_fingerprint = create_fingerprint(response.text)
-                    stored_fingerprint = product_info.get("fingerprint", "")
-                    
-                    # HTML parsen
-                    soup = BeautifulSoup(response.text, "html.parser")
-                    
-                    # Titel extrahieren
-                    title_elem = soup.find('title')
-                    link_text = title_elem.text.strip() if title_elem else ""
-                    
-                    # VERBESSERT: Strikte Prüfung auf exakte Übereinstimmung mit dem Suchbegriff
-                    tokens = keywords_map.get(matched_term, [])
-                    
-                    # Extrahiere Produkttyp aus Suchbegriff und Titel
-                    search_term_type = extract_product_type_from_search_term(matched_term)
-                    title_product_type = extract_product_type_from_text(link_text)
-                    
-                    # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Titel übereinstimmen
-                    if search_term_type in ["display", "etb", "ttb"] and title_product_type != search_term_type:
-                        logger.debug(f"⚠️ Produkttyp-Diskrepanz: Suche nach '{search_term_type}', aber Produkt ist '{title_product_type}': {link_text}")
-                        continue
-                    
-                    # Strengere Keyword-Prüfung mit Berücksichtigung des Produkttyps
-                    if not is_keyword_in_text(tokens, link_text, log_level='None'):
-                        logger.debug(f"⚠️ Produkt entspricht nicht mehr dem Suchbegriff '{matched_term}': {link_text}")
-                        continue
-                    
-                    # Aktualisiere die letzte Prüfzeit
-                    domain_paths[product_id]["last_checked"] = time.time()
-                    
-                    # Wenn der Fingerprint sich geändert hat oder wir keinen haben, führe vollständige Verfügbarkeitsprüfung durch
-                    if current_fingerprint != stored_fingerprint or not stored_fingerprint:
-                        logger.info(f"🔄 Änderung erkannt oder erste Prüfung: {product_url}")
-                        domain_paths[product_id]["fingerprint"] = current_fingerprint
+                        # Produkt-Informationen sammeln für Batch-Benachrichtigung
+                        product_data = {
+                            "title": link_text,
+                            "url": product_url,
+                            "price": price,
+                            "status_text": status_text,
+                            "is_available": is_available,
+                            "matched_term": matched_term,
+                            "product_type": title_product_type,
+                            "shop": site_id
+                        }
                         
-                        # Prüfe Verfügbarkeit
-                        is_available, price, status_text = detect_availability(soup, product_url)
-                        
-                        # Aktualisiere Cache-Eintrag
-                        domain_paths[product_id]["is_available"] = is_available
-                        domain_paths[product_id]["price"] = price
-                        
-                        # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
-                        should_notify, is_back_in_stock = update_product_status(
-                            product_id, is_available, seen, out_of_stock
-                        )
-                        
-                        if should_notify and (not only_available or is_available):
-                            # Wenn Produkt wieder verfügbar ist, anpassen
-                            if is_back_in_stock:
-                                status_text = "🎉 Wieder verfügbar!"
-                            # Wenn kein Status-Text vorhanden ist, erstellen
-                            elif not status_text:
-                                status_text = get_status_text(is_available, is_back_in_stock)
-                            
-                            # Produkt-Informationen sammeln für Batch-Benachrichtigung
-                            product_data = {
-                                "title": link_text,
-                                "url": product_url,
-                                "price": price,
-                                "status_text": status_text,
-                                "is_available": is_available,
-                                "matched_term": matched_term,
-                                "product_type": title_product_type,
-                                "shop": site_id
-                            }
-                            
-                            # Deduplizierung innerhalb eines Durchlaufs
-                            if product_id not in found_product_ids:
-                                all_products.append(product_data)
-                                new_matches.append(product_id)
-                                found_product_ids.add(product_id)
-                                logger.info(f"✅ Cache-Treffer: {link_text} - {status_text}")
-                    else:
-                        logger.debug(f"✓ Keine Änderung für {product_url}")
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ Fehler bei der Verarbeitung von {product_url}: {e}")
-            
+                        # Deduplizierung innerhalb eines Durchlaufs
+                        if product_id not in found_product_ids:
+                            all_products.append(product_data)
+                            new_matches.append(product_id)
+                            found_product_ids.add(product_id)
+                            logger.info(f"✅ Cache-Treffer: {link_text} - {status_text}")
+                else:
+                    logger.debug(f"✓ Keine Änderung für {product_url}")
+                    
             # Cache mit den aktualisierten Zeitstempeln speichern
             product_cache[site_id] = domain_paths
             save_product_cache(product_cache)
@@ -433,17 +435,17 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
         if full_scan_needed or not domain_paths:
             logger.info(f"🔍 Durchführung eines vollständigen Scans für {url}")
             
-            try:
-                response = requests.get(url, headers=headers, timeout=15)
-                if response.status_code != 200:
-                    logger.warning(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}")
-                    return new_matches
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"⚠️ Netzwerkfehler beim Abrufen von {url}: {e}")
-                return new_matches
+            # Verwende den verbesserten Request-Handler
+            success, soup, status_code, error = get_page_content(
+                url, 
+                headers=headers, 
+                verify_ssl=True if "gameware.at" not in url and "games-island.eu" not in url else False,
+                timeout=30 if "games-island.eu" in url else 15
+            )
             
-            # HTML parsen
-            soup = BeautifulSoup(response.text, "html.parser")
+            if not success:
+                logger.warning(f"⚠️ Fehler beim Abrufen von {url}: {error}")
+                return new_matches
             
             # Titel der Seite extrahieren
             page_title = soup.title.text.strip() if soup.title else url
@@ -546,64 +548,64 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
                 detail_soup = None
                 
                 if check_availability:
-                    try:
-                        # Produktdetails abrufen
-                        detail_response = requests.get(product_url, headers=headers, timeout=10)
-                        if detail_response.status_code != 200:
-                            logger.warning(f"⚠️ Fehler beim Abrufen der Produktdetails: Status {detail_response.status_code}")
+                    # Verwende den verbesserten Request-Handler für die Produktdetails
+                    success, detail_soup, status_code, error = get_page_content(
+                        product_url, 
+                        headers=headers, 
+                        verify_ssl=True if "gameware.at" not in product_url and "games-island.eu" not in product_url else False,
+                        timeout=30 if "games-island.eu" in product_url else 15
+                    )
+                    
+                    if not success:
+                        logger.warning(f"⚠️ Fehler beim Abrufen der Produktdetails: {error}")
+                        continue
+                    
+                    # Verwende das Availability-Modul für die Verfügbarkeitsprüfung
+                    is_available, price, status_text = detect_availability(detail_soup, product_url)
+                    
+                    # VERBESSERT: Nochmals prüfen, ob der Produktdetailseiten-Titel dem Suchbegriff entspricht
+                    detail_title = detail_soup.find('title')
+                    if detail_title:
+                        detail_title_text = detail_title.text.strip()
+                        tokens = keywords_map.get(matched_term, [])
+                        
+                        # Extrahiere Produkttyp aus dem Detailtitel
+                        detail_product_type = extract_product_type_from_text(detail_title_text)
+                        search_term_type = extract_product_type_from_search_term(matched_term)
+                        
+                        # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Detailtitel übereinstimmen
+                        if search_term_type in ["display", "etb", "ttb"] and detail_product_type != search_term_type:
+                            logger.debug(f"❌ Detailseite ist kein {search_term_type}, obwohl danach gesucht wurde: {detail_title_text}")
                             continue
-                            
-                        detail_soup = BeautifulSoup(detail_response.text, "html.parser")
                         
-                        # Verwende das Availability-Modul für die Verfügbarkeitsprüfung
-                        is_available, price, status_text = detect_availability(detail_soup, product_url)
+                        # Generelle Keyword-Übereinstimmungsprüfung
+                        if not is_keyword_in_text(tokens, detail_title_text, log_level='None'):
+                            logger.debug(f"❌ Detailseite passt nicht zum Suchbegriff '{matched_term}': {detail_title_text}")
+                            continue
                         
-                        # VERBESSERT: Nochmals prüfen, ob der Produktdetailseiten-Titel dem Suchbegriff entspricht
-                        detail_title = detail_soup.find('title')
-                        if detail_title:
-                            detail_title_text = detail_title.text.strip()
-                            tokens = keywords_map.get(matched_term, [])
-                            
-                            # Extrahiere Produkttyp aus dem Detailtitel
-                            detail_product_type = extract_product_type_from_text(detail_title_text)
-                            search_term_type = extract_product_type_from_search_term(matched_term)
-                            
-                            # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Detailtitel übereinstimmen
-                            if search_term_type in ["display", "etb", "ttb"] and detail_product_type != search_term_type:
-                                logger.debug(f"❌ Detailseite ist kein {search_term_type}, obwohl danach gesucht wurde: {detail_title_text}")
-                                continue
-                            
-                            # Generelle Keyword-Übereinstimmungsprüfung
-                            if not is_keyword_in_text(tokens, detail_title_text, log_level='None'):
-                                logger.debug(f"❌ Detailseite passt nicht zum Suchbegriff '{matched_term}': {detail_title_text}")
-                                continue
-                            
-                            # Wenn Detailtitel verfügbar ist, verwende ihn für die Nachricht
-                            link_text = detail_title_text
+                        # Wenn Detailtitel verfügbar ist, verwende ihn für die Nachricht
+                        link_text = detail_title_text
+                    
+                    # Für den Cache: Speichere die URL und den erkannten Term
+                    if site_id not in product_cache:
+                        product_cache[site_id] = {}
+                    
+                    # Speichere Produktinfos im Cache
+                    fingerprint = ""
+                    if detail_soup:
+                        html_content = str(detail_soup)
+                        fingerprint = create_fingerprint(html_content)
                         
-                        # Für den Cache: Speichere die URL und den erkannten Term
-                        if site_id not in product_cache:
-                            product_cache[site_id] = {}
-                        
-                        # Speichere Produktinfos im Cache
-                        fingerprint = ""
-                        if detail_soup:
-                            html_content = str(detail_soup)
-                            fingerprint = create_fingerprint(html_content)
-                            
-                        product_cache[site_id][product_id] = {
-                            "url": product_url,
-                            "term": matched_term,
-                            "is_available": is_available,
-                            "price": price,
-                            "last_checked": time.time(),
-                            "fingerprint": fingerprint,
-                            "product_type": extract_product_type_from_text(link_text)  # Speichere auch den Produkttyp
-                        }
-                        
-                    except Exception as e:
-                        logger.warning(f"⚠️ Fehler beim Prüfen der Verfügbarkeit für {product_url}: {e}")
-                
+                    product_cache[site_id][product_id] = {
+                        "url": product_url,
+                        "term": matched_term,
+                        "is_available": is_available,
+                        "price": price,
+                        "last_checked": time.time(),
+                        "fingerprint": fingerprint,
+                        "product_type": extract_product_type_from_text(link_text)  # Speichere auch den Produkttyp
+                    }
+                    
                 # Benachrichtigungslogik
                 should_notify, is_back_in_stock = update_product_status(
                     product_id, is_available, seen, out_of_stock
@@ -646,6 +648,7 @@ def scrape_generic(url, keywords_map, seen, out_of_stock, check_availability=Tru
     
         # Sende Benachrichtigungen sortiert nach Verfügbarkeit
         if all_products:
+            from utils.telegram import send_batch_notification
             send_batch_notification(all_products)
     
     except Exception as e:
@@ -663,15 +666,17 @@ def check_product_availability(url, headers):
     """
     logger.info(f"🔍 Prüfe Produktdetails für {url}")
     
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return None, False, "Preis nicht verfügbar", "❌ Ausverkauft (Fehler beim Laden)"
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"⚠️ Netzwerkfehler beim Abrufen von {url}: {e}")
-        return None, False, "Preis nicht verfügbar", "❌ Ausverkauft (Fehler beim Laden)"
+    # Verwende den verbesserten Request-Handler
+    success, soup, status_code, error = get_page_content(
+        url, 
+        headers=headers, 
+        verify_ssl=True if "gameware.at" not in url and "games-island.eu" not in url else False,
+        timeout=30 if "games-island.eu" in url else 15
+    )
     
-    soup = BeautifulSoup(response.text, "html.parser")
+    if not success:
+        logger.warning(f"⚠️ Fehler beim Abrufen der Produktdetails: {error}")
+        return None, False, "Preis nicht verfügbar", "❌ Ausverkauft (Fehler beim Laden)"
     
     # Verwende das Availability-Modul für webseitenspezifische Erkennung
     is_available, price, status_text = detect_availability(soup, url)
