@@ -102,8 +102,9 @@ def create_session_with_retries(retries=MAX_RETRIES, backoff_factor=BACKOFF_FACT
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     
-    # Setze einen globalen Timeout für alle Anfragen
-    session.request = lambda method, url, **kwargs: super(requests.Session, session).request(
+    # Fehler behoben: Die originale request-Methode speichern und dann überschreiben
+    original_request = session.request
+    session.request = lambda method, url, **kwargs: original_request(
         method=method, url=url, timeout=kwargs.pop('timeout', timeout), **kwargs
     )
     
