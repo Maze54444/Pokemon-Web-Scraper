@@ -55,12 +55,6 @@ def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
     except Exception as e:
         logger.error(f"❌ Fehler beim JSON-Scraping: {e}", exc_info=True)
     
-    # Bekannte URLs überprüfen, die 404 zurückgegeben haben
-    try:
-        check_known_404_urls(keywords_map, seen, out_of_stock, only_available, all_products, found_product_ids)
-    except Exception as e:
-        logger.error(f"❌ Fehler beim Überprüfen bekannter 404-URLs: {e}", exc_info=True)
-    
     # HTML-Scraping immer durchführen, auch wenn JSON-Scraping Treffer liefert
     try:
         # Hauptseite scrapen, um die richtigen Collection-URLs zu finden
@@ -86,159 +80,6 @@ def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
         send_batch_notification(all_products)
     
     return all_matches
-
-def check_known_404_urls(keywords_map, seen, out_of_stock, only_available, all_products, found_product_ids):
-    """
-    Überprüft bekannte URLs, die zuvor einen 404-Status zurückgegeben haben
-    
-    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
-    :param seen: Set mit bereits gesehenen Produkttiteln
-    :param out_of_stock: Set mit ausverkauften Produkten
-    :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
-    :param all_products: Liste für gefundene Produkte
-    :param found_product_ids: Set für Deduplizierung
-    """
-    global _product_404_cache
-    current_time = time.time()
-
-    # Bekannte Produktmuster ohne spezifische Seriennummern
-    product_patterns = {
-        "display": [
-            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-en-max-1-per-person",
-            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-de-max-1-pro-person"
-        ]
-    }
-
-    # Erstelle dynamische URLs basierend auf aktuellen Suchbegriffen
-    hardcoded_urls = []
-    
-    # Für jedes Schlüsselwort in der Suchbegriffskarte
-    for search_term in keywords_map.keys():
-        # Extrahiere den Produkttyp
-        product_type = extract_product_type_from_text(search_term)
-        
-        # Wenn ein passender Produkttyp und Muster vorhanden sind
-        if product_type in product_patterns:
-            normalized_search_term = search_term.lower().replace(' display', '').strip()
-            
-            # Erstelle URLs basierend auf den vorhandenen Mustern
-            for pattern in product_patterns[product_type]:
-                url = pattern.format(normalized_search_term.replace(' ', '-'))
-                if url not in hardcoded_urls:
-                    hardcoded_urls.append(url)
-    
-    # Füge die generierten URLs in den 404-Cache, wenn sie noch nicht drin sind
-    for url in hardcoded_urls:
-        if url not in _product_404_cache:
-            _product_404_cache[url] = {
-                "last_checked": 0,  # 0 erzwingt eine erste Überprüfung
-                "attempts": 0
-            }
-    
-    # Bereite User-Agent für Anfragen vor
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    
-    # Überprüfe alle bekannten 404-URLs
-    for url, info in list(_product_404_cache.items()):
-        # Überprüfe nur alle 6 Stunden (oder angepasst je nach Häufigkeit der Durchläufe)
-        check_interval = 6 * 3600  # 6 Stunden in Sekunden
-        
-        # Für URLs mit mehr Fehlversuchen, erhöhe das Intervall exponentiell
-        if info["attempts"] > 3:
-            check_interval = min(24 * 3600, 6 * 3600 * (2 ** (info["attempts"] - 3)))  # Max 24 Stunden
-        
-        if current_time - info["last_checked"] < check_interval:
-            logger.debug(f"⏱️ Überspringe kürzlich geprüfte 404-URL: {url} (wird in {(info['last_checked'] + check_interval - current_time) / 3600:.1f} Stunden wieder geprüft)")
-            continue
-        
-        # Aktualisiere den Zeitstempel und die Anzahl der Versuche
-        _product_404_cache[url]["last_checked"] = current_time
-        _product_404_cache[url]["attempts"] += 1
-        
-        # Versuche, die Seite abzurufen
-        logger.info(f"🔍 Überprüfe zuvor 404-URL: {url}")
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            
-            # Wenn die URL jetzt funktioniert
-            if response.status_code == 200:
-                logger.info(f"✅ Zuvor 404-URL ist jetzt verfügbar: {url}")
-                
-                # Entferne aus dem 404-Cache
-                _product_404_cache.pop(url, None)
-                
-                # Verarbeite die Seite wie ein normales Produkt
-                soup = BeautifulSoup(response.text, "html.parser")
-                
-                # Extrahiere den Titel
-                title_elem = soup.find('h1', {'class': 'product-single__title'}) or soup.find('h1')
-                if title_elem:
-                    title = title_elem.text.strip()
-                    
-                    # Erstelle eine eindeutige ID
-                    product_id = create_product_id(title)
-                    
-                    # Deduplizierung
-                    if product_id in found_product_ids:
-                        continue
-                    
-                    # Prüfe jeden Suchbegriff gegen den Titel
-                    matched_term = None
-                    for search_term, tokens in keywords_map.items():
-                        # Extrahiere Produkttyp aus Suchbegriff und Titel
-                        search_term_type = extract_product_type_from_text(search_term)
-                        title_product_type = extract_product_type_from_text(title)
-                        
-                        # Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
-                        if search_term_type == "display" and title_product_type != "display":
-                            continue
-                        
-                        # Strikte Keyword-Prüfung
-                        if is_keyword_in_text(tokens, title, log_level='None'):
-                            matched_term = search_term
-                            break
-                    
-                    if matched_term:
-                        # Verfügbarkeit prüfen
-                        is_available, price, status_text = detect_availability(soup, url)
-                        
-                        # Aktualisiere Produkt-Status
-                        should_notify, is_back_in_stock = update_product_status(
-                            product_id, is_available, seen, out_of_stock
-                        )
-                        
-                        if should_notify and (not only_available or is_available):
-                            # Status-Text aktualisieren, wenn Produkt wieder verfügbar ist
-                            if is_back_in_stock:
-                                status_text = "🎉 Wieder verfügbar!"
-                            
-                            # Produkt-Informationen für Batch-Benachrichtigung
-                            product_type = extract_product_type_from_text(title)
-                            
-                            product_data = {
-                                "title": title,
-                                "url": url,
-                                "price": price,
-                                "status_text": status_text,
-                                "is_available": is_available,
-                                "matched_term": matched_term,
-                                "product_type": product_type,
-                                "shop": "tcgviert.com"
-                            }
-                            
-                            all_products.append(product_data)
-                            found_product_ids.add(product_id)
-                            logger.info(f"✅ Produkt ist jetzt aktiv: {title} - {status_text}")
-            else:
-                # Seite ist immer noch nicht verfügbar, Logging
-                if _product_404_cache[url]["attempts"] <= 3 or _product_404_cache[url]["attempts"] % 5 == 0:
-                    logger.info(f"⚠️ URL ist weiterhin nicht verfügbar: {url} (Versuch {_product_404_cache[url]['attempts']})")
-                else:
-                    logger.debug(f"⚠️ URL ist weiterhin nicht verfügbar: {url} (Versuch {_product_404_cache[url]['attempts']})")
-        except Exception as e:
-            logger.warning(f"⚠️ Fehler beim Prüfen der zuvor 404-URL {url}: {e}")
 
 def extract_product_info(title):
     """
@@ -339,40 +180,6 @@ def discover_collection_urls():
         
         # Bei Fehlern direkt zu diesen URLs wechseln
         fallback_urls = ["https://tcgviert.com/collections/all"]
-        
-        # Generiere dynamische Produktmuster-URLs
-        display_specific_urls = []
-        
-        # Erstelle dynamische Produktmuster-URLs basierend auf bekannten URL-Strukturen
-        base_display_patterns = [
-            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-en-max-1-per-person",
-            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-de-max-1-pro-person"
-        ]
-        
-        # Verwende generische Produktnamen für Muster
-        common_product_names = ["newest-series", "current-set", "latest-expansion"]
-        
-        # Erstelle generische URLs
-        for pattern in base_display_patterns:
-            for product_name in common_product_names:
-                url = pattern.format(product_name)
-                if url not in display_specific_urls:
-                    display_specific_urls.append(url)
-        
-        # Diese direkt zu den validen URLs hinzufügen
-        for url in display_specific_urls:
-            if url not in valid_urls:
-                valid_urls.append(url)
-                
-                # 404-URLs für spätere Prüfung merken
-                global _product_404_cache
-                if url not in _product_404_cache:
-                    _product_404_cache[url] = {
-                        "last_checked": 0,
-                        "attempts": 0
-                    }
-                
-                logger.info(f"✅ Direkte Produkt-URL hinzugefügt: {url}")
         
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -588,17 +395,7 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
                     
                     # URL erstellen
                     url = f"https://tcgviert.com/products/{handle}"
-                    
-                    # Produkt-URL zum 404-Cache hinzufügen, wenn es nicht verfügbar ist
-                    # Dies sorgt dafür, dass wir auch nach 404-Fehlern diese URL überwachen
-                    if not available:
-                        global _product_404_cache
-                        if url not in _product_404_cache:
-                            _product_404_cache[url] = {
-                                "last_checked": time.time(),
-                                "attempts": 0
-                            }
-                    
+                                        
                     # Produkt-Informationen für Batch-Benachrichtigung
                     product_type = extract_product_type_from_text(title)
                     
@@ -658,16 +455,6 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                 response = requests.get(url, headers=headers, timeout=10)
                 if response.status_code != 200:
                     logger.warning(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}")
-                    
-                    # 404-URLs für spätere Überprüfungen speichern
-                    if response.status_code == 404 and is_product_url:
-                        global _product_404_cache
-                        if url not in _product_404_cache:
-                            _product_404_cache[url] = {
-                                "last_checked": time.time(),
-                                "attempts": 0
-                            }
-                            logger.info(f"📌 404-URL für spätere Überprüfung gespeichert: {url}")
                     continue
             except requests.exceptions.RequestException as e:
                 logger.warning(f"⚠️ Fehler beim Abrufen von {url}: {e}")
@@ -836,20 +623,12 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                             try:
                                 detail_response = requests.get(product_url, headers=headers, timeout=8)
                                 if detail_response.status_code != 200:
-                                    # 404-URLs für spätere Überprüfungen speichern
-                                    if detail_response.status_code == 404 and '/products/' in product_url:
-                                        if product_url not in _product_404_cache:
-                                            _product_404_cache[product_url] = {
-                                                "last_checked": time.time(),
-                                                "attempts": 0
-                                            }
-                                            logger.info(f"📌 404-URL für spätere Überprüfung gespeichert: {product_url}")
                                     continue
                                 detail_soup = BeautifulSoup(detail_response.text, "html.parser")
                             except requests.exceptions.RequestException:
                                 continue
                             
-                            # Wenn Detailseite geladen werden konnte, Titel aus der Detailseite extrahieren
+                            # Nochmal den Titel aus der Detailseite extrahieren (ist oft genauer)
                             detail_title = detail_soup.find("title")
                             if detail_title:
                                 detail_title_text = detail_title.text.strip()
@@ -861,37 +640,37 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                                 # Wenn Titel verfügbar ist, verwende diesen für die Nachricht
                                 text = detail_title_text
                             
-                            # Verfügbarkeit prüfen
+                            # Verwende das neue Modul zur Verfügbarkeitsprüfung
                             is_available, price, status_text = detect_availability(detail_soup, product_url)
                                 
-                            # Aktualisiere Produkt-Status
-                            should_notify, is_back_in_stock = update_product_status(
-                                product_id, is_available, seen, out_of_stock
-                            )
+                            # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
+should_notify, is_back_in_stock = update_product_status(
+    product_id, is_available, seen, out_of_stock
+)
                             
-                            if should_notify and (not only_available or is_available):
-                                # Status anpassen wenn wieder verfügbar
-                                if is_back_in_stock:
-                                    status_text = "🎉 Wieder verfügbar!"
-                                
-                                # Produkt-Informationen für Batch-Benachrichtigung
-                                product_type = extract_product_type_from_text(text)
-                                
-                                product_data = {
-                                    "title": text,
-                                    "url": product_url,
-                                    "price": price,
-                                    "status_text": status_text,
-                                    "is_available": is_available,
-                                    "matched_term": matched_term,
-                                    "product_type": product_type,
-                                    "shop": "tcgviert.com"
-                                }
-                                
-                                all_products.append(product_data)
-                                new_matches.append(product_id)
-                                found_product_ids.add(product_id)
-                                logger.info(f"✅ Neuer Treffer gefunden (HTML-Link): {text} - {status_text}")
+if should_notify and (not only_available or is_available):
+    # Status anpassen wenn wieder verfügbar
+    if is_back_in_stock:
+        status_text = "🎉 Wieder verfügbar!"
+    
+    # Produkt-Informationen für Batch-Benachrichtigung
+    product_type = extract_product_type_from_text(text)
+    
+    product_data = {
+        "title": text,
+        "url": product_url,
+        "price": price,
+        "status_text": status_text,
+        "is_available": is_available,
+        "matched_term": matched_term,
+        "product_type": product_type,
+        "shop": "tcgviert.com"
+    }
+    
+    all_products.append(product_data)
+    new_matches.append(product_id)
+    found_product_ids.add(product_id)
+    logger.info(f"✅ Neuer Treffer gefunden (HTML-Link): {text} - {status_text}")
                         except Exception as e:
                             logger.warning(f"Fehler beim Prüfen der Produktdetails: {e}")
                 
@@ -965,14 +744,6 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                         try:
                             detail_response = requests.get(product_url, headers=headers, timeout=8)
                             if detail_response.status_code != 200:
-                                # 404-URLs für spätere Überprüfungen speichern
-                                if detail_response.status_code == 404 and '/products/' in product_url:
-                                    if product_url not in _product_404_cache:
-                                        _product_404_cache[product_url] = {
-                                            "last_checked": time.time(),
-                                            "attempts": 0
-                                        }
-                                        logger.info(f"📌 404-URL für spätere Überprüfung gespeichert: {product_url}")
                                 continue
                             detail_soup = BeautifulSoup(detail_response.text, "html.parser")
                         except requests.exceptions.RequestException:
