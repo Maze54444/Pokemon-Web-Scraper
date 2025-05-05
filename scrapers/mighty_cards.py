@@ -4,7 +4,7 @@ import re
 import time
 import json
 import hashlib
-import random  # Fehlender Import hinzugefügt
+import random
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote_plus, urlparse
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text, load_exclusion_sets
@@ -534,11 +534,10 @@ def fetch_products_from_categories(headers):
             logger.error(f"❌ Fehler beim Durchsuchen der Kategorie {category_url}: {e}")
     
     # Dedupliziere die URLs
-product_urls = list(set(product_urls))
-logger.info(f"✅ {len(product_urls)} Produkt-URLs aus Kategorien extrahiert")
+    product_urls = list(set(product_urls))
+    logger.info(f"✅ {len(product_urls)} Produkt-URLs aus Kategorien extrahiert")
     
-return product_urls
-
+    return product_urls
 def search_mighty_cards_products(search_term, headers):
     """
     Führt eine Suche auf der Website durch und extrahiert Produkt-URLs.
