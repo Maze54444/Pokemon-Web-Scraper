@@ -14,7 +14,7 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from urllib3.exceptions import SSLError, ConnectTimeoutError
-from urllib.parse import urlparse  # Import hinzugefügt, um den Fehler zu beheben
+from urllib.parse import urlparse
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
@@ -30,11 +30,23 @@ SSL_PROBLEMATIC_DOMAINS = [
     "gameware.at"
 ]
 
-# Liste von Domains mit bekannten Timeout-Problemen, die längere Timeouts benötigen
+# Liste von Domains mit bekannten Timeout-Problemen, die spezielle Behandlung benötigen
 SLOW_DOMAINS = [
     "games-island.eu",
     "www.games-island.eu"
 ]
+
+# Spezielle Timeouts für problematische Seiten
+DOMAIN_TIMEOUTS = {
+    "games-island.eu": 20,  # Niedrigeres Timeout, aber mehr Wiederholungsversuche
+    "www.games-island.eu": 20
+}
+
+# Maximale Retry-Versuche für problematische Domains
+DOMAIN_MAX_RETRIES = {
+    "games-island.eu": 5,  # Mehr Wiederholungsversuche für games-island
+    "www.games-island.eu": 5
+}
 
 def get_random_user_agent():
     """
@@ -67,13 +79,14 @@ def get_default_headers():
     }
 
 def create_session_with_retries(retries=MAX_RETRIES, backoff_factor=BACKOFF_FACTOR, 
-                                status_forcelist=(500, 502, 503, 504)):
+                                status_forcelist=(500, 502, 503, 504), timeout=DEFAULT_TIMEOUT):
     """
     Erstellt eine Session mit Retry-Mechanismus
     
     :param retries: Anzahl der Wiederholungsversuche
     :param backoff_factor: Faktor für exponentielles Backoff
     :param status_forcelist: Liste von HTTP-Statuscodes, die wiederholt werden sollen
+    :param timeout: Timeout für die Session
     :return: Konfigurierte requests.Session
     """
     session = requests.Session()
@@ -89,17 +102,42 @@ def create_session_with_retries(retries=MAX_RETRIES, backoff_factor=BACKOFF_FACT
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     
+    # Setze einen globalen Timeout für alle Anfragen
+    session.request = lambda method, url, **kwargs: super(requests.Session, session).request(
+        method=method, url=url, timeout=kwargs.pop('timeout', timeout), **kwargs
+    )
+    
     return session
 
-def fetch_url(url, headers=None, timeout=DEFAULT_TIMEOUT, max_retries=MAX_RETRIES, 
+def extract_domain(url):
+    """
+    Extrahiert die Domain aus einer URL
+    
+    :param url: Die zu analysierende URL
+    :return: Domain ohne Protokoll und Pfad
+    """
+    try:
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc
+        
+        # Entferne www. Präfix, falls vorhanden
+        if domain.startswith('www.'):
+            domain = domain[4:]
+            
+        return domain.lower()
+    except Exception as e:
+        logger.debug(f"Fehler beim Extrahieren der Domain aus {url}: {e}")
+        return None
+
+def fetch_url(url, headers=None, timeout=None, max_retries=None, 
               verify_ssl=True, allow_redirects=True):
     """
     Robuste Funktion zum Abrufen einer URL mit erweiterter Fehlerbehandlung
     
     :param url: Die abzurufende URL
     :param headers: Optional - HTTP-Headers für die Anfrage
-    :param timeout: Timeout in Sekunden
-    :param max_retries: Maximale Anzahl von Wiederholungsversuchen
+    :param timeout: Timeout in Sekunden (Domain-spezifische Werte haben Vorrang)
+    :param max_retries: Maximale Anzahl von Wiederholungsversuchen (Domain-spezifische Werte haben Vorrang)
     :param verify_ssl: SSL-Zertifikate überprüfen (True/False)
     :param allow_redirects: Weiterleitungen folgen (True/False)
     :return: Tuple (response, error_message)
@@ -110,6 +148,30 @@ def fetch_url(url, headers=None, timeout=DEFAULT_TIMEOUT, max_retries=MAX_RETRIE
     # Extrahiere Domain aus URL
     domain = extract_domain(url)
     
+    # Domain-spezifische Einstellungen
+    if domain in DOMAIN_TIMEOUTS:
+        domain_timeout = DOMAIN_TIMEOUTS[domain]
+        # Verwende den Domain-spezifischen Timeout, wenn keiner explizit angegeben wurde
+        if timeout is None or timeout > domain_timeout:
+            timeout = domain_timeout
+            logger.debug(f"Verwende Domain-spezifischen Timeout für {domain}: {timeout}s")
+    else:
+        # Standard-Timeout, wenn nichts anderes angegeben wurde
+        if timeout is None:
+            timeout = DEFAULT_TIMEOUT
+    
+    # Domain-spezifische Wiederholungsversuche
+    if domain in DOMAIN_MAX_RETRIES:
+        domain_max_retries = DOMAIN_MAX_RETRIES[domain]
+        # Verwende die Domain-spezifische Anzahl, wenn keine explizit angegeben wurde
+        if max_retries is None or max_retries < domain_max_retries:
+            max_retries = domain_max_retries
+            logger.debug(f"Verwende Domain-spezifische Wiederholungsversuche für {domain}: {max_retries}")
+    else:
+        # Standard-Wiederholungsversuche, wenn nichts anderes angegeben wurde
+        if max_retries is None:
+            max_retries = MAX_RETRIES
+    
     # Prüfe, ob die Domain in der Liste der problematischen SSL-Domains ist
     if domain in SSL_PROBLEMATIC_DOMAINS:
         verify_ssl = False
@@ -117,9 +179,34 @@ def fetch_url(url, headers=None, timeout=DEFAULT_TIMEOUT, max_retries=MAX_RETRIE
         requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
     
     # Prüfe, ob die Domain in der Liste der langsamen Domains ist
-    if domain in SLOW_DOMAINS:
-        # Erhöhe Timeout für langsame Domains
+    if domain in SLOW_DOMAINS and "games-island.eu" not in domain:
+        # Für andere langsame Domains, die nicht games-island sind, erhöhe das Timeout
         timeout = timeout * 1.5
+    
+    # Spezielle Behandlung für games-island.eu
+    if "games-island.eu" in domain:
+        # Spezielle Session mit angepassten Einstellungen für games-island.eu
+        session = create_session_with_retries(
+            retries=max_retries, 
+            backoff_factor=1.0,  # Schnellere Wiederholungsversuche
+            status_forcelist=(500, 502, 503, 504, 429),  # Auch bei Rate-Limiting wiederholen
+            timeout=timeout
+        )
+        
+        try:
+            # Versuche, die Anfrage mit angepassten Einstellungen durchzuführen
+            logger.info(f"Spezielle Behandlung für games-island.eu mit Timeout={timeout}s und {max_retries} Versuchen")
+            response = session.get(
+                url, 
+                headers=headers,
+                verify=verify_ssl,
+                allow_redirects=allow_redirects
+            )
+            return response, None
+        except requests.exceptions.RequestException as e:
+            error_message = f"Fehler bei der Spezialbehandlung für games-island.eu: {str(e)}"
+            logger.warning(f"⚠️ {error_message}")
+            return None, error_message
     
     # Füge einen Referer-Header hinzu, wenn nicht vorhanden
     if "Referer" not in headers:
@@ -137,13 +224,12 @@ def fetch_url(url, headers=None, timeout=DEFAULT_TIMEOUT, max_retries=MAX_RETRIE
     while retry_count <= max_retries:
         try:
             # Verwende Session für bessere Performance und Retry-Mechanismus
-            session = create_session_with_retries(retries=max_retries)
+            session = create_session_with_retries(retries=1, timeout=timeout)  # Weniger interne Retries
             
             # Führe die Anfrage aus
             response = session.get(
                 url, 
                 headers=headers, 
-                timeout=timeout,
                 verify=verify_ssl,
                 allow_redirects=allow_redirects
             )
@@ -170,7 +256,9 @@ def fetch_url(url, headers=None, timeout=DEFAULT_TIMEOUT, max_retries=MAX_RETRIE
             logger.warning(f"⚠️ Timeout beim Abrufen von {url}: {e}")
             
             # Bei Timeout erhöhen wir den Timeout-Wert für den nächsten Versuch
-            timeout = timeout * 1.5
+            # Aber nicht für games-island.eu, da wir dort bereits spezielle Einstellungen haben
+            if "games-island.eu" not in domain:
+                timeout = min(timeout * 1.5, 60)  # Erhöhe Timeout, max. 60 Sekunden
             
         except requests.exceptions.ConnectionError as e:
             connection_error = True
@@ -186,7 +274,9 @@ def fetch_url(url, headers=None, timeout=DEFAULT_TIMEOUT, max_retries=MAX_RETRIE
         
         if retry_count <= max_retries:
             # Exponentielles Backoff zwischen Wiederholungsversuchen
-            wait_time = BACKOFF_FACTOR * (2 ** (retry_count - 1))
+            # Mehr Zufälligkeit für games-island.eu, um Rate-Limiting zu vermeiden
+            jitter = random.uniform(0.8, 1.2) if "games-island.eu" in domain else 1.0
+            wait_time = BACKOFF_FACTOR * (2 ** (retry_count - 1)) * jitter
             logger.info(f"🔄 Wiederholungsversuch {retry_count}/{max_retries} für {url} in {wait_time:.1f} Sekunden")
             time.sleep(wait_time)
         else:
@@ -202,26 +292,6 @@ def fetch_url(url, headers=None, timeout=DEFAULT_TIMEOUT, max_retries=MAX_RETRIE
     
     # Alle Wiederholungsversuche fehlgeschlagen
     return None, error_message
-
-def extract_domain(url):
-    """
-    Extrahiert die Domain aus einer URL
-    
-    :param url: Die zu analysierende URL
-    :return: Domain ohne Protokoll und Pfad
-    """
-    try:
-        parsed_url = urlparse(url)
-        domain = parsed_url.netloc
-        
-        # Entferne www. Präfix, falls vorhanden
-        if domain.startswith('www.'):
-            domain = domain[4:]
-            
-        return domain.lower()
-    except Exception as e:
-        logger.debug(f"Fehler beim Extrahieren der Domain aus {url}: {e}")
-        return None
 
 def parse_html(html_content, parser="html.parser"):
     """
@@ -252,15 +322,15 @@ def parse_html(html_content, parser="html.parser"):
         # Leeres BeautifulSoup-Objekt als Fallback
         return BeautifulSoup("", "html.parser")
 
-def get_page_content(url, headers=None, timeout=DEFAULT_TIMEOUT, max_retries=MAX_RETRIES, 
+def get_page_content(url, headers=None, timeout=None, max_retries=None, 
                      verify_ssl=True, parser="html.parser"):
     """
     Kombinierte Funktion zum Abrufen und Parsen einer Webseite
     
     :param url: Die abzurufende URL
     :param headers: Optional - HTTP-Headers für die Anfrage
-    :param timeout: Timeout in Sekunden
-    :param max_retries: Maximale Anzahl von Wiederholungsversuchen
+    :param timeout: Timeout in Sekunden (Domain-spezifische Werte haben Vorrang)
+    :param max_retries: Maximale Anzahl von Wiederholungsversuchen (Domain-spezifische Werte haben Vorrang)
     :param verify_ssl: SSL-Zertifikate überprüfen (True/False)
     :param parser: HTML-Parser für BeautifulSoup
     :return: Tuple (success, soup, status_code, error_message)
@@ -268,6 +338,21 @@ def get_page_content(url, headers=None, timeout=DEFAULT_TIMEOUT, max_retries=MAX
     # Setze Header, falls nicht übergeben
     if headers is None:
         headers = get_default_headers()
+    
+    # Extrahiere Domain für spezifische Einstellungen
+    domain = extract_domain(url)
+    
+    # Spezielle Behandlung für games-island.eu
+    if domain == "games-island.eu" or domain == "www.games-island.eu":
+        # Wenn nicht explizit ein Timeout gesetzt wurde, verwende das Domain-spezifische
+        if timeout is None and domain in DOMAIN_TIMEOUTS:
+            timeout = DOMAIN_TIMEOUTS[domain]
+        
+        # Wenn nicht explizit eine Retry-Anzahl gesetzt wurde, verwende die Domain-spezifische
+        if max_retries is None and domain in DOMAIN_MAX_RETRIES:
+            max_retries = DOMAIN_MAX_RETRIES[domain]
+            
+        logger.info(f"Spezielle Einstellungen für {domain}: Timeout={timeout}s, Retries={max_retries}")
     
     # URL abrufen mit robuster Fehlerbehandlung
     response, error = fetch_url(
