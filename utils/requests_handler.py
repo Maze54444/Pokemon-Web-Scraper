@@ -14,6 +14,7 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from urllib3.exceptions import SSLError, ConnectTimeoutError
+from urllib.parse import urlparse  # Import hinzugefügt, um den Fehler zu beheben
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
@@ -210,7 +211,6 @@ def extract_domain(url):
     :return: Domain ohne Protokoll und Pfad
     """
     try:
-        from urllib.parse import urlparse
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
         
