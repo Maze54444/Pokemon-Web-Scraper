@@ -1,3 +1,10 @@
+"""
+Spezieller Scraper für mighty-cards.de mit universeller Produkterkennung
+
+Dieses Modul bietet verbesserte Methoden zum Scrapen von mighty-cards.de,
+ohne hartcodierte Produktnamen zu verwenden.
+"""
+
 import requests
 import logging
 import re
@@ -44,49 +51,75 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
         search_product_type = extract_product_type_from_text(sample_search_term)
         logger.debug(f"🔍 Suche nach Produkttyp: '{search_product_type}'")
     
-    # Generiere dynamische URL-Muster basierend auf den Suchbegriffen
+    # Generiere dynamische URL-Muster für verschiedene Produkttypen
+    url_patterns = []
+    
+    # URLs für alle möglichen Formate abdecken
+    if search_product_type == "display":
+        url_patterns = [
+            # Allgemeine URL-Muster für Displays
+            "https://www.mighty-cards.de/shop/{}-36er-Booster-Display-Pokemon-p{}",
+            "https://www.mighty-cards.de/shop/{}-18er-Booster-Display-Pokemon-p{}",
+            # Muster mit möglichen Präfixen für unterschiedliche Editionen
+            "https://www.mighty-cards.de/shop/*-{}-36er-Booster-Display-Pokemon-p{}",
+            "https://www.mighty-cards.de/shop/*-{}-18er-Booster-Display-Pokemon-p{}"
+        ]
+    elif search_product_type == "etb" or search_product_type == "box":
+        url_patterns = [
+            "https://www.mighty-cards.de/shop/{}-Top-Trainer-Box-Pokemon-p{}",
+            "https://www.mighty-cards.de/shop/{}-Elite-Trainer-Box-Pokemon-p{}",
+            "https://www.mighty-cards.de/shop/*-{}-Elite-Trainer-Box-Pokemon-p{}",
+            "https://www.mighty-cards.de/shop/*-{}-Top-Trainer-Box-Pokemon-p{}"
+        ]
+    else:
+        # Fallback für andere Produkttypen
+        url_patterns = [
+            "https://www.mighty-cards.de/shop/{}-Pokemon-p{}",
+            "https://www.mighty-cards.de/shop/*-{}-Pokemon-p{}"
+        ]
+    
+    # Liste für alle URLs, die wir überprüfen werden
     hardcoded_urls = []
     
-    # URL-Muster für verschiedene Produkttypen
-    url_patterns = {
-        "display": [
-            "https://www.mighty-cards.de/shop/{}-36er-Booster-Display-Pokemon-p{}",
-            "https://www.mighty-cards.de/shop/{}-18er-Booster-Display-Pokemon-p{}"
-        ],
-        "box": [
-            "https://www.mighty-cards.de/shop/{}-Top-Trainer-Box-Pokemon-p{}",
-            "https://www.mighty-cards.de/shop/{}-Elite-Trainer-Box-Pokemon-p{}"
-        ]
-    }
+    # Füge wichtige Kategorieseiten hinzu
+    category_urls = [
+        "https://www.mighty-cards.de/pokemon/",
+        "https://www.mighty-cards.de/shop/Pokemon-c165637849/",
+        "https://www.mighty-cards.de/shop/Displays-c165638577/",
+        "https://www.mighty-cards.de/shop/Vorbestellung-c166467816/"
+    ]
+    hardcoded_urls.extend(category_urls)
     
-    # Füge allgemeine Pokemon-Kategorie-URL hinzu
-    hardcoded_urls.append("https://www.mighty-cards.de/pokemon/")
-    
-    # Generiere URLs basierend auf Suchbegriffen und Produkttypen
+    # Generiere URLs basierend auf Suchbegriffen und URL-Mustern
     for search_term, tokens in keywords_map.items():
         product_type = extract_product_type_from_text(search_term)
         
-        # Normalisiere den Suchbegriff für die URL
-        normalized_term = search_term.lower()
-        for suffix in [" display", " box", " etb", " tin"]:
-            normalized_term = normalized_term.replace(suffix, "")
-        normalized_term = normalized_term.strip().replace(" ", "-")
+        # Liste von möglichen Formatierungen des Suchbegriffs
+        term_variations = generate_term_variations(search_term)
         
-        # Wenn wir passende Muster für den Produkttyp haben, generiere URLs
-        if product_type in url_patterns:
-            for pattern in url_patterns[product_type]:
-                # Placeholder-ID für die URL (wird später mit echten IDs ersetzt)
-                placeholder_id = str(random.randint(700000000, 799999999))
-                product_url = pattern.format(normalized_term, placeholder_id)
-                hardcoded_urls.append(product_url)
-                
-                # Variante mit anderem Formatierungsstil
-                alt_term = normalized_term.replace("-", "")
-                alt_url = pattern.format(alt_term, placeholder_id)
-                hardcoded_urls.append(alt_url)
-        
-        # Füge auch eine produktspezifische Seite hinzu
-        hardcoded_urls.append(f"https://www.mighty-cards.de/pokemon/{normalized_term}/")
+        # Generiere URLs mit verschiedenen Mustern und Variationen
+        for pattern in url_patterns:
+            for term in term_variations:
+                # Ersetzt * mit verschiedenen möglichen Präfixen
+                if "*-" in pattern:
+                    # Versuche verschiedene mögliche Präfixe (2-5 Zeichen + Zahl)
+                    for prefix in ["", "SV", "KP", "OP", "PG", "SS", "SW"]:
+                        for num in range(1, 15):  # Zahlen 1-14 abdecken
+                            prefix_pattern = pattern.replace("*-", f"{prefix}{num}-" if prefix else "")
+                            
+                            # Placeholder-ID für die URL
+                            placeholder_id = str(random.randint(700000000, 799999999))
+                            product_url = prefix_pattern.format(term, placeholder_id)
+                            
+                            if product_url not in hardcoded_urls:
+                                hardcoded_urls.append(product_url)
+                else:
+                    # Einfaches Muster ohne Präfix
+                    placeholder_id = str(random.randint(700000000, 799999999))
+                    product_url = pattern.format(term, placeholder_id)
+                    
+                    if product_url not in hardcoded_urls:
+                        hardcoded_urls.append(product_url)
     
     # User-Agent-Rotation zur Vermeidung von Bot-Erkennung
     user_agents = [
@@ -105,7 +138,13 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
         "Upgrade-Insecure-Requests": "1"
     }
     
-    logger.info(f"🔍 Prüfe {len(hardcoded_urls)} bekannte Produkt-URLs")
+    # Begrenze die Anzahl der URLs, um die Performance zu verbessern
+    max_generated_urls = 50
+    if len(hardcoded_urls) > max_generated_urls:
+        logger.info(f"⚙️ Begrenze die Anzahl der URLs auf {max_generated_urls} (von {len(hardcoded_urls)})")
+        hardcoded_urls = hardcoded_urls[:max_generated_urls]
+    
+    logger.info(f"🔍 Prüfe {len(hardcoded_urls)} generierte Produkt-URLs")
     
     # Cache für fehlgeschlagene URLs mit Timestamps
     failed_urls_cache = {}
@@ -116,14 +155,14 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
     # Maximale Anzahl von Wiederholungsversuchen
     max_retries = 3
     
-    # Direkter Zugriff auf bekannte Produkt-URLs mit Wiederholungsversuchen
+    # Direkter Zugriff auf generierte Produkt-URLs mit Wiederholungsversuchen
     successful_direct_urls = False
     for product_url in hardcoded_urls:
         # Überspringe kürzlich fehlgeschlagene URLs für 1 Stunde
         if product_url in failed_urls_cache:
             last_failed_time = failed_urls_cache[product_url]
             if time.time() - last_failed_time < 3600:  # 1 Stunde Cooldown
-                logger.info(f"⏭️ Überspringe kürzlich fehlgeschlagene URL: {product_url}")
+                logger.debug(f"⏭️ Überspringe kürzlich fehlgeschlagene URL: {product_url}")
                 continue
         
         if product_url in processed_urls:
@@ -143,7 +182,24 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
             # URL zum Cache der fehlgeschlagenen URLs hinzufügen
             failed_urls_cache[product_url] = time.time()
     
-    # 1. Zuerst: Versuche die WordPress Sitemap für Produkte zu laden
+    # 1. Versuche eine direkte Suche nach den Produktbezeichnungen mit dem Shop-Suchfeld
+    # Verwende die exakten Suchbegriffe aus der products.txt
+    for search_term in keywords_map.keys():
+        # Generiere verschiedene Suchvarianten
+        search_variants = generate_search_variants(search_term)
+        
+        for variant in search_variants:
+            search_results = direct_shop_search(variant, headers)
+            if search_results:
+                logger.info(f"🔍 Direktsuche '{variant}' erfolgreich: {len(search_results)} gefunden")
+                for product_url in search_results:
+                    if product_url not in processed_urls:
+                        processed_urls.add(product_url)
+                        product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, max_retries)
+                        if isinstance(product_data, dict):
+                            all_products.append(product_data)
+    
+    # 2. Zuerst: Versuche die WordPress Sitemap für Produkte zu laden
     logger.info("🔍 Versuche Produktdaten über die WP-Sitemap zu laden")
     sitemap_products = fetch_products_from_sitemap(headers)
     
@@ -182,7 +238,8 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
     # Verarbeite Sitemap-Produkte
     for product_url in sitemap_products:
         logger.debug(f"Verarbeite Sitemap-Produkt: {product_url}")
-        if product_url not in found_product_ids:
+        if product_url not in processed_urls:
+            processed_urls.add(product_url)
             product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
             if product_data and isinstance(product_data, dict):
                 product_id = create_product_id(product_data["title"])
@@ -192,14 +249,15 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
                     found_product_ids.add(product_id)
                     logger.info(f"✅ Neuer Treffer gefunden (Sitemap): {product_data['title']} - {product_data['status_text']}")
     
-    # 2. Dann: Versuche die Ecwid-API direkt zu nutzen
+    # 3. Dann: Versuche die Ecwid-API direkt zu nutzen
     logger.info("🔍 Versuche Produktdaten über die Ecwid-Integration zu laden")
     ecwid_products = fetch_products_from_ecwid(keywords_map, headers)
     
     # Verarbeite Ecwid-Produkte
     for product_url in ecwid_products:
         logger.debug(f"Verarbeite Ecwid-Produkt: {product_url}")
-        if product_url not in found_product_ids:
+        if product_url not in processed_urls:
+            processed_urls.add(product_url)
             product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
             if product_data and isinstance(product_data, dict):
                 product_id = create_product_id(product_data["title"])
@@ -209,14 +267,15 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
                     found_product_ids.add(product_id)
                     logger.info(f"✅ Neuer Treffer gefunden (Ecwid): {product_data['title']} - {product_data['status_text']}")
     
-    # 3. Dann: Durchsuche wichtige Kategorie-Seiten
+    # 4. Dann: Durchsuche wichtige Kategorie-Seiten
     logger.info("🔍 Durchsuche Pokemon-Kategorie und Unterkategorien")
     category_products = fetch_products_from_categories(headers)
     
     # Verarbeite Kategorie-Produkte
     for product_url in category_products:
         logger.debug(f"Verarbeite Kategorie-Produkt: {product_url}")
-        if product_url not in found_product_ids:
+        if product_url not in processed_urls:
+            processed_urls.add(product_url)
             product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
             if product_data and isinstance(product_data, dict):
                 product_id = create_product_id(product_data["title"])
@@ -226,7 +285,7 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
                     found_product_ids.add(product_id)
                     logger.info(f"✅ Neuer Treffer gefunden (Kategorie): {product_data['title']} - {product_data['status_text']}")
     
-    # 4. Dann: Suche mit Suchbegriffen durchführen
+    # 5. Dann: Suche mit Suchbegriffen durchführen
     # Dynamische Erstellung von Suchanfragen basierend auf den Keywords
     search_products = []
     for search_term in keywords_map.keys():
@@ -236,7 +295,8 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
     # Verarbeite Produkte aus der Suche
     for product_url in search_products:
         logger.debug(f"Verarbeite Produkt aus Suche: {product_url}")
-        if product_url not in found_product_ids:
+        if product_url not in processed_urls:
+            processed_urls.add(product_url)
             product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
             if product_data and isinstance(product_data, dict):
                 product_id = create_product_id(product_data["title"])
@@ -246,11 +306,29 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
                     found_product_ids.add(product_id)
                     logger.info(f"✅ Neuer Treffer gefunden (Suche): {product_data['title']} - {product_data['status_text']}")
     
-    # 5. Zuletzt: Fallback auf hardcodierte URLs, wenn keine Produkte gefunden wurden
+    # 6. Crawle generische Produktlisten nach relevanten Produkten
+    crawled_products = crawl_product_listings(headers, keywords_map)
+    
+    # Verarbeite Produkte aus dem Crawling
+    for product_url in crawled_products:
+        logger.debug(f"Verarbeite Produkt aus Crawling: {product_url}")
+        if product_url not in processed_urls:
+            processed_urls.add(product_url)
+            product_data = process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
+            if product_data and isinstance(product_data, dict):
+                product_id = create_product_id(product_data["title"])
+                if product_id not in found_product_ids:
+                    all_products.append(product_data)
+                    new_matches.append(product_id)
+                    found_product_ids.add(product_id)
+                    logger.info(f"✅ Neuer Treffer gefunden (Crawling): {product_data['title']} - {product_data['status_text']}")
+    
+    # 7. Zuletzt: Fallback auf generierte URLs, wenn keine Produkte gefunden wurden
     if not all_products:
-        logger.info(f"🔍 Keine Produkte gefunden. Prüfe {len(hardcoded_urls)} bekannte Produkt-URLs als Fallback")
+        logger.info(f"🔍 Keine Produkte gefunden. Prüfe {len(hardcoded_urls)} generierte Produkt-URLs als Fallback")
         for product_url in hardcoded_urls:
-            if product_url not in found_product_ids:
+            if product_url not in processed_urls:
+                processed_urls.add(product_url)
                 product_data = process_fallback_product(product_url, keywords_map, seen, out_of_stock, only_available, headers, min_price, max_price)
                 if product_data and isinstance(product_data, dict):
                     product_id = create_product_id(product_data["title"])
@@ -266,6 +344,177 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False, 
         send_batch_notification(all_products)
     
     return new_matches
+
+def generate_term_variations(search_term):
+    """
+    Erzeugt verschiedene Variationen eines Suchbegriffs für die URL-Generierung
+    
+    :param search_term: Originaler Suchbegriff
+    :return: Liste mit Variationen des Suchbegriffs
+    """
+    variations = []
+    
+    # Bereinige den Suchbegriff
+    clean_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
+    
+    # Basis-Variation: Bindestriche statt Leerzeichen, entferne Sonderzeichen
+    base_variation = clean_term.replace(' ', '-')
+    base_variation = re.sub(r'[^a-zA-Z0-9\-]', '', base_variation)
+    variations.append(base_variation)
+    
+    # Variation ohne Bindestriche (zusammengeschrieben)
+    no_dash_variation = base_variation.replace('-', '')
+    variations.append(no_dash_variation)
+    
+    # Variation mit Unterstrichen statt Leerzeichen
+    underscore_variation = clean_term.replace(' ', '_')
+    underscore_variation = re.sub(r'[^a-zA-Z0-9\_]', '', underscore_variation)
+    variations.append(underscore_variation)
+    
+    # Variation ohne Umlaute (ä->ae, ö->oe, ü->ue)
+    no_umlauts_variation = base_variation.replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue')
+    if no_umlauts_variation != base_variation:
+        variations.append(no_umlauts_variation)
+    
+    # Variation ohne Umlaute und ohne Bindestriche
+    no_umlauts_no_dash = no_umlauts_variation.replace('-', '')
+    if no_umlauts_no_dash != no_dash_variation:
+        variations.append(no_umlauts_no_dash)
+    
+    # Entferne Duplikate
+    return list(set(variations))
+
+def generate_search_variants(search_term):
+    """
+    Erzeugt verschiedene Varianten für die Suche
+    
+    :param search_term: Originaler Suchbegriff
+    :return: Liste mit Suchvarianten
+    """
+    variants = []
+    
+    # Originalbegriff
+    variants.append(search_term)
+    
+    # Bereinige den Suchbegriff
+    clean_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
+    variants.append(clean_term)
+    
+    # Versuche mit und ohne "Pokemon" am Anfang
+    if not clean_term.startswith("pokemon"):
+        variants.append(f"pokemon {clean_term}")
+    
+    # Variante mit "booster" falls nicht vorhanden
+    if "booster" not in clean_term and "display" in search_term.lower():
+        variants.append(f"{clean_term} booster")
+    
+    # Variante mit Produkttyp
+    if "display" not in clean_term and "display" in search_term.lower():
+        variants.append(f"{clean_term} display")
+    
+    # Varianten ohne Umlaute
+    no_umlauts = clean_term.replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue')
+    if no_umlauts != clean_term:
+        variants.append(no_umlauts)
+    
+    return list(set(variants))
+
+def direct_shop_search(search_term, headers):
+    """
+    Führt eine direkte Suche im Shop durch
+    
+    :param search_term: Der Suchbegriff
+    :param headers: HTTP-Headers für die Anfrage
+    :return: Liste mit gefundenen Produkt-URLs
+    """
+    found_urls = []
+    
+    try:
+        # Direkte Shop-Suche-Anfrage
+        search_url = f"https://www.mighty-cards.de/shop/search?keyword={quote_plus(search_term)}"
+        
+        logger.debug(f"🔍 Direkte Shop-Suche nach '{search_term}'")
+        response = requests.get(search_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Finde alle Produktlinks, die zur Suche passen könnten
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                # Nur Produktlinks betrachten
+                if "/shop/" in href and "-p" in href:
+                    full_url = href if href.startswith('http') else urljoin("https://www.mighty-cards.de", href)
+                    if full_url not in found_urls:
+                        found_urls.append(full_url)
+    except Exception as e:
+        logger.warning(f"⚠️ Fehler bei direkter Shop-Suche nach '{search_term}': {e}")
+    
+    return found_urls
+
+def crawl_product_listings(headers, keywords_map):
+    """
+    Crawlt Produktlisten nach relevanten Artikeln
+    
+    :param headers: HTTP-Headers für die Anfrage
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :return: Liste gefundener Produkt-URLs
+    """
+    found_urls = []
+    
+    # Liste der zu crawlenden Seiten
+    crawl_urls = [
+        "https://www.mighty-cards.de/shop/Pokemon-c165637849/",
+        "https://www.mighty-cards.de/shop/Displays-c165638577/",
+        "https://www.mighty-cards.de/shop/Vorbestellung-c166467816/"
+    ]
+    
+    # Relevante Begriffe aus den Suchbegriffen sammeln
+    relevant_terms = []
+    for search_term in keywords_map.keys():
+        # Entferne produktspezifische Begriffe wie "display", "box"
+        cleaned_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
+        relevant_terms.append(cleaned_term)
+        # Füge Begriffe auch in URL-freundlichem Format hinzu
+        relevant_terms.append(cleaned_term.replace(' ', '-'))
+        relevant_terms.append(cleaned_term.replace(' ', ''))
+        
+        # Variante ohne Umlaute
+        no_umlauts = cleaned_term.replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue')
+        if no_umlauts != cleaned_term:
+            relevant_terms.append(no_umlauts)
+            relevant_terms.append(no_umlauts.replace(' ', '-'))
+    
+    for url in crawl_urls:
+        try:
+            logger.info(f"🔍 Crawle Produktliste: {url}")
+            response = requests.get(url, headers=headers, timeout=15)
+            
+            if response.status_code != 200:
+                logger.warning(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}")
+                continue
+                
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Suche nach allen Links
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                
+                # Überspringe nicht-Produktlinks
+                if not ("/shop/" in href and "-p" in href):
+                    continue
+                
+                # Prüfe, ob der Link zu einem der gesuchten Produkte führt
+                # Erstmal alle potentiellen Produktlinks sammeln
+                full_url = href if href.startswith('http') else urljoin("https://www.mighty-cards.de", href)
+                if full_url not in found_urls:
+                    found_urls.append(full_url)
+        
+        except Exception as e:
+            logger.warning(f"⚠️ Fehler beim Crawlen von {url}: {e}")
+    
+    logger.info(f"🔍 {len(found_urls)} Produkt-URLs beim Crawlen gefunden")
+    return found_urls
 
 def fetch_products_from_sitemap(headers):
     """
@@ -465,7 +714,7 @@ def fetch_products_from_ecwid(keywords_map, headers):
                                 product_urls.append(full_url)
             except Exception as e:
                 logger.debug(f"⚠️ Fehler bei der Such-URL: {e}")
-                
+                    
     except Exception as e:
         logger.warning(f"⚠️ Fehler beim Laden der Ecwid-Daten: {e}")
     
@@ -538,6 +787,7 @@ def fetch_products_from_categories(headers):
     logger.info(f"✅ {len(product_urls)} Produkt-URLs aus Kategorien extrahiert")
     
     return product_urls
+
 def search_mighty_cards_products(search_term, headers):
     """
     Führt eine Suche auf der Website durch und extrahiert Produkt-URLs.
@@ -879,8 +1129,8 @@ def process_fallback_product(product_url, keywords_map, seen, out_of_stock, only
                     "title": title,
                     "url": product_url,
                     "price": product_price,
-                    "status_text": "✅ Verfügbar (Fallback)",
-                    "is_available": True,
+                    "status_text": "❌ Ausverkauft (Fallback)",
+                    "is_available": False,  # Annahme: ausverkauft
                     "matched_term": matched_term,
                     "product_type": product_type,
                     "shop": "mighty-cards.de"
@@ -889,9 +1139,14 @@ def process_fallback_product(product_url, keywords_map, seen, out_of_stock, only
                 product_id = create_product_id(title)
                 
                 # Status aktualisieren, aber keine Verfügbarkeitsprüfung durchführen
-                update_product_status(product_id, True, seen, out_of_stock)
+                should_notify, is_back_in_stock = update_product_status(
+                    product_id, False, seen, out_of_stock
+                )
                 
-                return product_data
+                if should_notify and (not only_available):
+                    return product_data
+                else:
+                    return True  # Erfolgreich verarbeitet, aber keine Benachrichtigung nötig
     except Exception as e:
         logger.warning(f"⚠️ Fehler bei URL-basiertem Fallback: {e}")
     
