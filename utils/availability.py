@@ -359,6 +359,11 @@ def check_mighty_cards(soup):
     # Extrahiere den Preis basierend auf der HTML-Struktur-Analyse
     price = extract_price(soup, ['.details-product-price__value', '.product-details__product-price', '.price'])
     
+    # Prüfe auf Vorbestellung (Preorder)
+    is_preorder = False
+    if soup.find(string=re.compile("Vorbestellung|Pre-Order|Preorder", re.IGNORECASE)):
+        is_preorder = True
+    
     # 1. HTML-basierte Verfügbarkeitsprüfung (basierend auf der Website-Analyse)
     # Suche nach dem "In den Warenkorb"-Button
     cart_button = soup.find('span', {'class': 'form-control__button-text'}, text=re.compile("In den Warenkorb", re.IGNORECASE))
@@ -475,6 +480,11 @@ def check_gameware(soup):
     price = extract_price(soup, ['.price', '.product-price', '.price-box'])
     page_text = soup.get_text().lower()
     
+    # Prüfe auf Vorbestellung (Preorder)
+    is_preorder = False
+    if re.search(r'vorbestellung|pre-?order', page_text):
+        is_preorder = True
+    
     # 1. Prüfe auf "lagernd" oder Lieferzeit-Texte
     if re.search(r"lagernd|in 1-3 werktagen|verfügbar", page_text):
         return True, price, "[V] Verfügbar (Lagernd-Text)"
@@ -526,6 +536,11 @@ def check_generic(soup):
     
     # Extrahiere den Preis
     price = extract_price(soup)
+    
+    # Prüfe auf Vorbestellung (Preorder)
+    is_preorder = False
+    if re.search(r'vorbestellung|pre-?order', page_text):
+        is_preorder = True
     
     # Prüfe auf eindeutige Nichtverfügbarkeits-Signale
     unavailable_patterns = [
