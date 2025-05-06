@@ -35,129 +35,176 @@ def scrape_sapphire_cards(keywords_map, seen, out_of_stock, only_available=False
     # Verwende ein Set, um bereits verarbeitete URLs zu speichern und Duplikate zu vermeiden
     processed_urls = set()
     
-    # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
-    search_product_type = None
-    if keywords_map:
-        sample_search_term = list(keywords_map.keys())[0]
-        search_product_type = extract_product_type_from_text(sample_search_term)
-        logger.debug(f"🔍 Suche nach Produkttyp: '{search_product_type}'")
+    # Extrahiere den Produkttyp aus den Suchbegriffen für spätere Verwendung
+    search_product_types = {}
+    for search_term in keywords_map.keys():
+        search_product_types[search_term] = extract_product_type_from_text(search_term)
     
     # Cache für fehlgeschlagene URLs mit Timestamps
     failed_urls_cache = {}
     
-    # Katalogseite durchsuchen
-    logger.info("🔍 Durchsuche Katalogseiten...")
+    # Generiere Suchbegriffe für die Direktsuche
+    all_search_terms = list(keywords_map.keys())
     
-    # Reduzierte Liste von Katalogseiten-URLs 
-    catalog_urls = [
-        "https://sapphire-cards.de/produkt-kategorie/pokemon/"
-    ]
+    # Generiere sofort Direktsuch-URLs für alle Suchbegriffe
+    direct_search_results = []
     
-    for catalog_url in catalog_urls:
-        try:
-            logger.info(f"🔍 Durchsuche Katalogseite: {catalog_url}")
+    # Direkte Suche für jeden Suchbegriff durchführen - höhere Priorität
+    for search_term in all_search_terms:
+        normalized_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
+        search_urls = search_for_term(normalized_term, get_random_headers())
+        direct_search_results.extend(search_urls)
+        if search_urls:
+            logger.info(f"🔍 Direkte Suche nach '{normalized_term}' ergab {len(search_urls)} Ergebnisse")
+    
+    # Deduplizieren und Sortieren der direkten Suchergebnisse
+    direct_search_results = list(set(direct_search_results))
+    
+    # Verarbeite zuerst die direkten Suchergebnisse
+    logger.info(f"🔍 Prüfe {len(direct_search_results)} Ergebnisse aus direkter Suche")
+    
+    for product_url in direct_search_results:
+        if product_url in processed_urls:
+            continue
             
-            # Nur ein einzelner Versuch pro Katalogseite
+        processed_urls.add(product_url)
+        product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, get_random_headers(), new_matches, max_retries)
+        
+        if isinstance(product_data, dict):
+            all_products.append(product_data)
+    
+    # Katalogseite durchsuchen als Backup
+    if len(all_products) < 1:
+        logger.info("🔍 Durchsuche Katalogseiten als Backup...")
+    
+        # Reduzierte Liste von Katalogseiten-URLs 
+        catalog_urls = [
+            "https://sapphire-cards.de/produkt-kategorie/pokemon/"
+        ]
+        
+        for catalog_url in catalog_urls:
             try:
-                response = requests.get(catalog_url, headers=get_random_headers(), timeout=15)
-                if response.status_code != 200:
-                    logger.warning(f"⚠️ Fehler beim Abrufen von {catalog_url}: Status {response.status_code}")
-                    continue
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"⚠️ Netzwerkfehler bei {catalog_url}: {e}")
-                continue
-            
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            # Sammle alle Links, die auf Produkte verweisen könnten
-            product_links = []
-            
-            # Sammle relevante Begriffe aus den Suchbegriffen
-            relevant_terms = []
-            for search_term in keywords_map.keys():
-                # Entferne produktspezifische Begriffe wie "display", "box"
-                clean_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
-                relevant_terms.append(clean_term)
-                # Füge Begriffe auch in URL-freundlichem Format hinzu
-                relevant_terms.append(clean_term.replace(' ', '-'))
-                relevant_terms.append(clean_term.replace(' ', ''))
-            
-            # Füge generische Begriffe hinzu
-            relevant_terms.append("pokemon")
-            
-            all_links = soup.find_all('a', href=True)
-            
-            for link in all_links:
-                href = link.get('href', '')
-                link_text = link.get_text().lower()
+                logger.info(f"🔍 Durchsuche Katalogseite: {catalog_url}")
                 
-                # Eindeutige Produktlinks
-                if '/produkt/' in href and href not in product_links and href not in processed_urls:
-                    # Prüfe auf relevante Suchbegriffe
-                    if any(term in href.lower() for term in relevant_terms) or any(term in link_text for term in relevant_terms):
-                        # Bei Suche nach Display: Prüfe zusätzlich auf Display-Hinweise im Text/URL
-                        if search_product_type == "display":
-                            if any(display_term in link_text for display_term in ["display", "36er", "box"]) or any(display_term in href for display_term in ["display", "36er", "box"]):
-                                product_links.append(href)
-                        # Bei anderer Suche oder unbekanntem Typ: Nach anderen Produkttypen filtern
-                        elif search_product_type in ["etb", "box"]:
-                            if any(box_term in link_text for box_term in ["trainer", "etb", "box"]) or any(box_term in href for box_term in ["trainer", "etb", "box"]):
-                                product_links.append(href)
-                        else:
+                # Nur ein einzelner Versuch pro Katalogseite
+                try:
+                    response = requests.get(catalog_url, headers=get_random_headers(), timeout=15)
+                    if response.status_code != 200:
+                        logger.warning(f"⚠️ Fehler beim Abrufen von {catalog_url}: Status {response.status_code}")
+                        continue
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"⚠️ Netzwerkfehler bei {catalog_url}: {e}")
+                    continue
+                
+                soup = BeautifulSoup(response.text, "html.parser")
+                
+                # Sammle alle Links, die auf Produkte verweisen könnten
+                product_links = []
+                
+                # Sammle relevante Begriffe aus den Suchbegriffen
+                relevant_terms = []
+                for search_term in keywords_map.keys():
+                    # Entferne produktspezifische Begriffe wie "display", "box"
+                    clean_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
+                    relevant_terms.append(clean_term)
+                    
+                    # Speziell für sapphire-cards.de - auch englische Äquivalente hinzufügen
+                    if "reisegefährten" in clean_term:
+                        relevant_terms.append("journey together")
+                    if "journey together" in clean_term:
+                        relevant_terms.append("reisegefährten")
+                    
+                    # Extrahiere die relevanten Produktidentifikationen (SV09, KP09)
+                    sv_kp_match = re.search(r'(sv\d+|kp\d+)', clean_term, re.IGNORECASE)
+                    if sv_kp_match:
+                        relevant_terms.append(sv_kp_match.group(0).lower())
+                    
+                    # Füge Begriffe auch in URL-freundlichem Format hinzu
+                    relevant_terms.append(clean_term.replace(' ', '-'))
+                    relevant_terms.append(clean_term.replace(' ', ''))
+                
+                all_links = soup.find_all('a', href=True)
+                
+                for link in all_links:
+                    href = link.get('href', '')
+                    link_text = link.get_text().lower()
+                    
+                    # Eindeutige Produktlinks
+                    if '/produkt/' in href and href not in product_links and href not in processed_urls:
+                        # Extrahiere den relevanten Teil der URL für die Prüfung auf Schlüsselwörter
+                        url_path = href.split('/produkt/')[1].replace('-', ' ').lower()
+                        
+                        # Sehr strenge Prüfung auf relevante Suchbegriffe
+                        relevant_found = False
+                        for term in relevant_terms:
+                            # Prüfe sowohl im Linktext als auch in der URL
+                            if term in link_text or term in url_path:
+                                for search_term, tokens in keywords_map.items():
+                                    if is_keyword_in_text(tokens, link_text, log_level='None') or is_keyword_in_text(tokens, url_path, log_level='None'):
+                                        product_type = search_product_types.get(search_term)
+                                        # Bei Suche nach Display: Prüfe zusätzlich auf Display-Hinweise
+                                        if product_type == "display":
+                                            if any(display_term in link_text or display_term in url_path 
+                                                  for display_term in ["display", "36er", "box", "booster box"]):
+                                                relevant_found = True
+                                                break
+                                        # Bei anderer Suche oder unbekanntem Typ
+                                        else:
+                                            relevant_found = True
+                                            break
+                            if relevant_found:
+                                break
+                                
+                        if relevant_found:
                             product_links.append(href)
-            
-            logger.info(f"🔍 {len(product_links)} potenzielle Produktlinks gefunden")
-            
-            # Verarbeite alle gefundenen Links
-            for product_url in product_links:
-                # Überspringe kürzlich fehlgeschlagene URLs
-                if product_url in failed_urls_cache:
-                    if time.time() - failed_urls_cache[product_url] < 3600:
+                
+                logger.info(f"🔍 {len(product_links)} potenzielle Produktlinks gefunden")
+                
+                # Verarbeite alle gefundenen Links
+                for product_url in product_links:
+                    # Überspringe kürzlich fehlgeschlagene URLs
+                    if product_url in failed_urls_cache:
+                        if time.time() - failed_urls_cache[product_url] < 3600:
+                            continue
+                            
+                    # Vollständige URL erstellen, falls nur ein relativer Pfad
+                    if not product_url.startswith('http'):
+                        product_url = urljoin(catalog_url, product_url)
+                    
+                    if product_url in processed_urls:
                         continue
                         
-                # Vollständige URL erstellen, falls nur ein relativer Pfad
-                if not product_url.startswith('http'):
-                    product_url = urljoin(catalog_url, product_url)
+                    processed_urls.add(product_url)
+                    product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, get_random_headers(), new_matches, max_retries)
+                    
+                    if not product_data:
+                        failed_urls_cache[product_url] = time.time()
+                    elif isinstance(product_data, dict):
+                        all_products.append(product_data)
                 
-                processed_urls.add(product_url)
-                product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, get_random_headers(), new_matches, max_retries)
-                
-                if not product_data:
-                    failed_urls_cache[product_url] = time.time()
-                elif isinstance(product_data, dict):
-                    all_products.append(product_data)
-            
-        except Exception as e:
-            logger.error(f"❌ Fehler beim Durchsuchen der Katalogseite {catalog_url}: {e}")
+            except Exception as e:
+                logger.error(f"❌ Fehler beim Durchsuchen der Katalogseite {catalog_url}: {e}")
     
-    # Fallback: Suche nach Produkten
-    if len(all_products) < 2:  # Wenn weniger als 2 Produkte gefunden wurden, versuche zusätzlich die Suche
-        logger.info("🔍 Wenige oder keine Treffer in Katalogseiten, versuche Suche...")
-        search_urls = try_search_fallback(keywords_map, processed_urls, get_random_headers(), max_retries=1)  # Reduzierte Wiederholungen
-        
-        # Begrenze die Anzahl zu prüfender Such-URLs
-        search_limit = 3
-        if len(search_urls) > search_limit:
-            logger.info(f"⚙️ Begrenze die Anzahl der Suchergebnisse auf {search_limit} (von {len(search_urls)})")
-            search_urls = search_urls[:search_limit]
-        
-        # Verarbeite die gefundenen URLs, aber vermeide Duplikate
-        for product_url in search_urls:
-            # Überspringe kürzlich fehlgeschlagene URLs
-            if product_url in failed_urls_cache:
-                if time.time() - failed_urls_cache[product_url] < 3600:
+    # Wenn nach all dem immer noch keine Treffer - Suchfallback verwenden
+    if not all_products:
+        logger.info("🔍 Keine Treffer in direkter Suche und Katalogseiten, versuche Suchfallback...")
+        for search_term in keywords_map.keys():
+            clean_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
+            search_results = try_search_fallback(keywords_map, processed_urls, get_random_headers(), max_retries=1, specific_term=clean_term)
+            
+            for product_url in search_results:
+                if product_url in processed_urls:
                     continue
                     
-            if product_url in processed_urls:
-                continue
-            
-            processed_urls.add(product_url)
-            product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, get_random_headers(), new_matches, 1)  # Minimale Wiederholungen
-            
-            if not product_data:
-                failed_urls_cache[product_url] = time.time()
-            elif isinstance(product_data, dict):
-                all_products.append(product_data)
+                processed_urls.add(product_url)
+                product_data = process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, get_random_headers(), new_matches, 1)
+                
+                if isinstance(product_data, dict):
+                    all_products.append(product_data)
+                    
+            # Wenn wir mit diesem Suchbegriff Ergebnisse gefunden haben, nicht weiter suchen
+            if all_products:
+                break
     
     # Wenn nach all dem immer noch nichts gefunden wurde, generischer Fallback
     if not new_matches:
@@ -209,6 +256,67 @@ def get_random_headers():
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1"
     }
+
+def search_for_term(search_term, headers):
+    """
+    Sucht direkt nach einem bestimmten Suchbegriff
+    
+    :param search_term: Suchbegriff
+    :param headers: HTTP-Headers für die Anfrage
+    :return: Liste gefundener Produkt-URLs
+    """
+    product_urls = []
+    
+    # Parameter für die direkte Produktsuche
+    encoded_term = quote_plus(search_term)
+    search_url = f"https://sapphire-cards.de/?s={encoded_term}&post_type=product&type_aws=true"
+    
+    try:
+        logger.info(f"🔍 Suche nach: {search_term}")
+        response = requests.get(search_url, headers=headers, timeout=15)
+        
+        if response.status_code != 200:
+            logger.warning(f"⚠️ Fehler bei der Suche: Status {response.status_code}")
+            return product_urls
+            
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Sammle Produkt-Links
+        for product in soup.select('.product, article.product, .woocommerce-loop-product__link, .products .product, .product-item'):
+            # Versuche, den Produktlink zu finden
+            link = product.find('a', href=True)
+            if link and '/produkt/' in link['href']:
+                product_urls.append(link['href'])
+        
+        # Auch nach expliziten Produktlistenelementen suchen
+        products = soup.select(".products .product, .products .product-item, .product-item, .product-inner")
+        for product in products:
+            link = product.find('a', href=True)
+            if link and '/produkt/' in link['href']:
+                product_urls.append(link['href'])
+        
+        # Relative URLs zu absoluten machen
+        for i in range(len(product_urls)):
+            if not product_urls[i].startswith('http'):
+                product_urls[i] = urljoin("https://sapphire-cards.de", product_urls[i])
+        
+        # Alle Links nach Produkten durchsuchen
+        all_links = soup.find_all('a', href=True)
+        for link in all_links:
+            href = link.get('href', '')
+            if '/produkt/' in href and href not in product_urls:
+                if not href.startswith('http'):
+                    product_urls.append(urljoin("https://sapphire-cards.de", href))
+                else:
+                    product_urls.append(href)
+        
+        # Entferne Duplikate
+        product_urls = list(set(product_urls))
+        
+    except Exception as e:
+        logger.error(f"❌ Fehler bei der Suche nach '{search_term}': {e}")
+    
+    return product_urls
 
 def process_product_url(product_url, keywords_map, seen, out_of_stock, only_available, headers, new_matches, max_retries=MAX_RETRY_ATTEMPTS):
     """
@@ -311,54 +419,31 @@ def process_product_url(product_url, keywords_map, seen, out_of_stock, only_avai
         
         logger.info(f"📝 Gefundener Produkttitel: '{title}'")
         
-        # Effizientere Keyword-Prüfung mit weniger Logging
         # Extrahiere Produkttyp aus dem Titel für bessere Filterung
         title_product_type = extract_product_type_from_text(title)
         
-        # Bei unklarem Produkttyp: weitere Hinweise suchen
-        if title_product_type == "unknown":
-            # URL-basierte Erkennung
-            if "display" in product_url.lower() or "box" in product_url.lower():
-                title_product_type = "display"
-            
-            # Inhalt der Seite überprüfen (nur ein paar wichtige Elemente)
-            else:
-                product_description = ""
-                desc_elem = soup.select_one('.woocommerce-product-details__short-description, .description')
-                if desc_elem:
-                    product_description = desc_elem.get_text().lower()
-                    
-                if "36 booster" in product_description or "display mit 36" in product_description:
-                    title_product_type = "display"
-        
-        # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
-        search_product_type = None
-        if keywords_map:
-            sample_search_term = list(keywords_map.keys())[0]
-            search_product_type = extract_product_type_from_text(sample_search_term)
-        
-        # Strenge Prüfung: Wenn nach Display gesucht wird, muss es ein Display sein
-        if search_product_type == "display" and title_product_type != "display":
-            logger.debug(f"⚠️ Produkttyp-Konflikt: Suche nach 'display', aber Titel enthält '{title_product_type}': {title}")
-            return False
-        
-        # Laden der Ausschlusslisten für die Filterfunktion
-        exclusion_sets = load_exclusion_sets()
-        
-        # Prüfe jeden Suchbegriff gegen den Titel
+        # Prüfe jeden Suchbegriff gegen den Titel - mit strengerem Matching
         matched_terms = []
         for search_term, tokens in keywords_map.items():
-            # Extrahiere Produkttyp aus Suchbegriff - für strenge Filterung
+            # Extrahiere Produkttyp aus Suchbegriff
             search_term_type = extract_product_type_from_text(search_term)
             
             # Bei Display-Suche: strenge Typ-Überprüfung 
             if search_term_type == "display":
                 if title_product_type != "display":
-                    continue
+                    # Bei Sapphire-Cards sind die Produkttypen manchmal ungenau benannt
+                    # Zusätzliche Überprüfung durch key-phrases
+                    if not any(display_phrase in title.lower() for display_phrase in 
+                              ["box", "36er", "display", "booster box"]):
+                        continue
             
-            # Verbesserte Keywordprüfung
-            if is_keyword_in_text(tokens, title, log_level='None'):
+            # Prüfe genauer auf exakten Namens-Bestandteil
+            search_name_part = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
+            
+            # Verbesserte Keywordprüfung mit speziellem Fokus auf den Produktnamen
+            if is_keyword_in_text(tokens, title, log_level='None') or search_name_part in title.lower():
                 # Prüfe, ob das Produkt in den Ausschlusslisten enthalten ist
+                exclusion_sets = load_exclusion_sets()
                 should_exclude = False
                 for exclusion in exclusion_sets:
                     if exclusion in title.lower():
@@ -366,6 +451,15 @@ def process_product_url(product_url, keywords_map, seen, out_of_stock, only_avai
                         break
                 
                 if not should_exclude:
+                    matched_terms.append(search_term)
+            
+            # Spezielle Prüfung für "reisegefährten" und "journey together"
+            if "reisegefährten" in search_term.lower() and "journey together" in title.lower():
+                if search_term not in matched_terms:
+                    matched_terms.append(search_term)
+                    
+            if "journey together" in search_term.lower() and "reisegefährten" in title.lower():
+                if search_term not in matched_terms:
                     matched_terms.append(search_term)
             
         # Wenn mindestens ein Suchbegriff übereinstimmt
@@ -479,7 +573,7 @@ def create_product_id(product_url, title):
     
     return f"sapphirecards_{normalized_title}_{product_type}_{url_hash}"
 
-def try_search_fallback(keywords_map, processed_urls, headers, max_retries=1):
+def try_search_fallback(keywords_map, processed_urls, headers, max_retries=1, specific_term=None):
     """
     Verbesserte Fallback-Methode für die Suche nach Produkten mit minimalen Ressourcen
     
@@ -487,17 +581,28 @@ def try_search_fallback(keywords_map, processed_urls, headers, max_retries=1):
     :param processed_urls: Set mit bereits verarbeiteten URLs
     :param headers: HTTP-Headers für die Anfrage
     :param max_retries: Maximale Anzahl an Wiederholungsversuchen
+    :param specific_term: Optional - Spezifischer Suchbegriff
     :return: Liste gefundener Produkt-URLs
     """
     # Optimierte Suchbegriffe basierend auf den übergebenen Suchbegriffen
     search_terms = []
     
-    # Erstelle Suchbegriffe basierend auf den übergebenen Keywords
-    for search_term in keywords_map.keys():
-        # Entferne produktspezifische Begriffe wie "display", "box"
-        clean_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
-        if clean_term not in search_terms:
-            search_terms.append(clean_term)
+    # Wenn ein spezifischer Term angegeben wurde, nur diesen verwenden
+    if specific_term:
+        search_terms = [specific_term]
+    else:
+        # Erstelle Suchbegriffe basierend auf den übergebenen Keywords
+        for search_term in keywords_map.keys():
+            # Entferne produktspezifische Begriffe wie "display", "box"
+            clean_term = re.sub(r'\s+(display|box|tin|etb)$', '', search_term.lower())
+            if clean_term not in search_terms:
+                search_terms.append(clean_term)
+                
+                # Bei sapphire-cards.de zusätzlich übersetzen
+                if "reisegefährten" in clean_term:
+                    search_terms.append("journey together")
+                elif "journey together" in clean_term:
+                    search_terms.append("reisegefährten")
     
     result_urls = []
     
@@ -521,7 +626,7 @@ def try_search_fallback(keywords_map, processed_urls, headers, max_retries=1):
             product_links = []
             
             # Nutze spezifischere Selektoren für Produkte
-            products = soup.select('.product, article.product, .woocommerce-loop-product__link')
+            products = soup.select('.product, article.product, .woocommerce-loop-product__link, .products .product, .product-item')
             for product in products:
                 link = product.find('a', href=True)
                 if link and '/produkt/' in link['href'] and link['href'] not in product_links and link['href'] not in processed_urls:
@@ -532,9 +637,15 @@ def try_search_fallback(keywords_map, processed_urls, headers, max_retries=1):
                 if not product_links[i].startswith('http'):
                     product_links[i] = urljoin("https://sapphire-cards.de", product_links[i])
             
+            # Begrenze die Anzahl der zurückgegebenen URLs
+            max_results = 3
+            if len(product_links) > max_results:
+                logger.info(f"⚙️ Begrenze die Anzahl der Suchergebnisse auf {max_results} (von {len(product_links)})")
+                product_links = product_links[:max_results]
+            
             result_urls.extend(product_links)
             
-            # Begrenze die Suche
+            # Bei Erfolg früh abbrechen
             if product_links:
                 break
         
@@ -561,13 +672,23 @@ def create_fallback_product(search_term, product_type):
     normalized_term = re.sub(r'\s+(display|box|tin|etb)$', '', normalized_term)
     url_term = re.sub(r'\s+', '-', normalized_term)
     
+    # Bei sapphire-cards.de spezielle Formulierung verwenden
+    if "reisegefährten" in normalized_term.lower():
+        title_prefix = "Pokemon Journey Together | Reisegefährten"
+        url_term = "pokemon-journey-together-reisegefaehrten"
+    elif "journey together" in normalized_term.lower():
+        title_prefix = "Pokemon Journey Together | Reisegefährten"
+        url_term = "pokemon-journey-together-reisegefaehrten"
+    else:
+        title_prefix = f"Pokemon {normalized_term.title()}"
+    
     # Titel basierend auf Suchbegriff und Produkttyp
     title_map = {
-        "display": f"Pokemon {normalized_term.title()} Booster Box (Display)",
-        "etb": f"Pokemon {normalized_term.title()} Elite Trainer Box",
-        "box": f"Pokemon {normalized_term.title()} Box",
-        "tin": f"Pokemon {normalized_term.title()} Tin",
-        "blister": f"Pokemon {normalized_term.title()} Blister"
+        "display": f"{title_prefix} Booster Box (Display)",
+        "etb": f"{title_prefix} Elite Trainer Box",
+        "box": f"{title_prefix} Box",
+        "tin": f"{title_prefix} Tin",
+        "blister": f"{title_prefix} Booster"
     }
     
     # URL basierend auf Suchbegriff und Produkttyp
@@ -576,7 +697,7 @@ def create_fallback_product(search_term, product_type):
         "etb": f"https://sapphire-cards.de/produkt/{url_term}-elite-trainer-box/",
         "box": f"https://sapphire-cards.de/produkt/{url_term}-box/",
         "tin": f"https://sapphire-cards.de/produkt/{url_term}-tin/",
-        "blister": f"https://sapphire-cards.de/produkt/{url_term}-blister/"
+        "blister": f"https://sapphire-cards.de/produkt/{url_term}-booster/"
     }
     
     # Preis basierend auf Produkttyp
@@ -623,6 +744,14 @@ def generate_title_from_url(url):
         
         # Ersetze bekannte Abkürzungen
         title = title.replace(' Etb ', ' Elite Trainer Box ')
+        
+        # Spezielle Prüfung für sapphire-cards.de
+        if "reisegefaehrten" in title.lower():
+            title = title.replace("Reisegefaehrten", "Reisegefährten")
+            
+        # Bei sapphire-cards.de-URLs spezifisches Format
+        if "journey-together-reisegefaehrten" in url.lower():
+            title = title.replace("Journey Together Reisegefaehrten", "Journey Together | Reisegefährten")
         
         # Analysiere die URL-Struktur, um Produkttyp zu bestimmen
         if any(term in url.lower() for term in ['booster-box', 'display']):
