@@ -38,15 +38,21 @@ SLOW_DOMAINS = [
 
 # Spezielle Timeouts für problematische Seiten
 DOMAIN_TIMEOUTS = {
-    "games-island.eu": 20,  # Niedrigeres Timeout, aber mehr Wiederholungsversuche
-    "www.games-island.eu": 20
+    "games-island.eu": 10,  # Reduziert von 20 auf 10 Sekunden
+    "www.games-island.eu": 10
 }
 
 # Maximale Retry-Versuche für problematische Domains
 DOMAIN_MAX_RETRIES = {
-    "games-island.eu": 5,  # Mehr Wiederholungsversuche für games-island
-    "www.games-island.eu": 5
+    "games-island.eu": 2,  # Reduziert von 5 auf 2
+    "www.games-island.eu": 2
 }
+
+# Liste von URLs, die komplett übersprungen werden sollen
+SKIP_URLS = [
+    "https://games-island.eu/",
+    "https://www.games-island.eu/"
+]
 
 def get_random_user_agent():
     """
@@ -146,6 +152,11 @@ def fetch_url(url, headers=None, timeout=None, max_retries=None,
     if headers is None:
         headers = get_default_headers()
     
+    # Prüfe, ob die URL übersprungen werden soll
+    if url in SKIP_URLS:
+        logger.info(f"⚠️ Überspringe bekannte problematische URL: {url}")
+        return None, "URL wurde übersprungen, da bekannt ist, dass sie Timeouts verursacht"
+    
     # Extrahiere Domain aus URL
     domain = extract_domain(url)
     
@@ -179,33 +190,40 @@ def fetch_url(url, headers=None, timeout=None, max_retries=None,
         # Unterdrücke die InsecureRequestWarning für bekannte problematische Domains
         requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
     
-    # Prüfe, ob die Domain in der Liste der langsamen Domains ist
-    if domain in SLOW_DOMAINS and "games-island.eu" not in domain:
-        # Für andere langsame Domains, die nicht games-island sind, erhöhe das Timeout
-        timeout = timeout * 1.5
-    
     # Spezielle Behandlung für games-island.eu
     if "games-island.eu" in domain:
-        # Spezielle Session mit angepassten Einstellungen für games-island.eu
-        session = create_session_with_retries(
-            retries=max_retries, 
-            backoff_factor=1.0,  # Schnellere Wiederholungsversuche
-            status_forcelist=(500, 502, 503, 504, 429),  # Auch bei Rate-Limiting wiederholen
-            timeout=timeout
-        )
-        
+        # Versuche mit einfachem Request ohne komplexe Session
         try:
-            # Versuche, die Anfrage mit angepassten Einstellungen durchzuführen
-            logger.info(f"Spezielle Behandlung für games-island.eu mit Timeout={timeout}s und {max_retries} Versuchen")
-            response = session.get(
-                url, 
-                headers=headers,
-                verify=verify_ssl,
-                allow_redirects=allow_redirects
-            )
-            return response, None
-        except requests.exceptions.RequestException as e:
-            error_message = f"Fehler bei der Spezialbehandlung für games-island.eu: {str(e)}"
+            logger.info(f"Verwende spezielle Behandlung für games-island.eu: Timeout={timeout}s, Retries={max_retries}")
+            
+            # Maximale Anzahl von Versuchen für games-island.eu
+            retry_attempts = 0
+            while retry_attempts <= max_retries:
+                try:
+                    # Einfacher Request ohne Session
+                    response = requests.get(
+                        url, 
+                        headers=headers,
+                        timeout=timeout,
+                        verify=verify_ssl,
+                        allow_redirects=allow_redirects
+                    )
+                    return response, None
+                except requests.exceptions.RequestException as e:
+                    retry_attempts += 1
+                    if retry_attempts <= max_retries:
+                        # Kurze Wartezeit mit Jitter
+                        jitter = random.uniform(0.8, 1.2)
+                        wait_time = 2 * jitter * retry_attempts
+                        logger.info(f"🔄 Wiederholungsversuch {retry_attempts}/{max_retries} für {url} in {wait_time:.1f} Sekunden")
+                        time.sleep(wait_time)
+                    else:
+                        # Maximale Anzahl von Wiederholungen erreicht
+                        error_message = f"Fehler bei games-island.eu: {str(e)}"
+                        logger.warning(f"⚠️ {error_message}")
+                        return None, error_message
+        except Exception as e:
+            error_message = f"Unerwarteter Fehler bei games-island.eu: {str(e)}"
             logger.warning(f"⚠️ {error_message}")
             return None, error_message
     
@@ -336,6 +354,11 @@ def get_page_content(url, headers=None, timeout=None, max_retries=None,
     :param parser: HTML-Parser für BeautifulSoup
     :return: Tuple (success, soup, status_code, error_message)
     """
+    # Prüfe, ob die URL übersprungen werden soll
+    if url in SKIP_URLS:
+        logger.info(f"⚠️ Überspringe bekannte problematische URL: {url}")
+        return False, None, None, "URL wurde übersprungen, da bekannt ist, dass sie Timeouts verursacht"
+    
     # Setze Header, falls nicht übergeben
     if headers is None:
         headers = get_default_headers()
