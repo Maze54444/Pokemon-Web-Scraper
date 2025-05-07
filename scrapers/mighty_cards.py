@@ -1,7 +1,7 @@
 """
 Spezieller Scraper für mighty-cards.de, der die Sitemap verwendet
 um Produkte zu finden und zu verarbeiten.
-Optimiert mit Multithreading und verbesserten Filterregeln.
+Optimiert mit Multithreading und verbesserter Name-vs-Typ Erkennung.
 """
 
 import requests
@@ -14,7 +14,7 @@ import concurrent.futures
 from threading import Lock
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote_plus
-from utils.matcher import is_keyword_in_text, extract_product_type_from_text
+from utils.matcher import is_keyword_in_text, extract_product_type_from_text, clean_text
 from utils.stock import update_product_status
 from utils.availability import detect_availability
 
@@ -45,6 +45,24 @@ PRODUCT_BLACKLIST = [
     "rise of", "beyond generations", "trial by frost", "beyond the gates"
 ]
 
+# Produkt-Typ Mapping (verschiedene Schreibweisen für die gleichen Produkttypen)
+PRODUCT_TYPE_VARIANTS = {
+    "display": [
+        "display", "36er display", "36-er display", "36 booster", "36er booster",
+        "booster display", "booster box", "36er box", "box", "booster-box"
+    ],
+    "etb": [
+        "etb", "elite trainer box", "elite-trainer-box", "elite trainer", "trainer box"
+    ],
+    "ttb": [
+        "ttb", "top trainer box", "top-trainer-box", "top trainer", "trainer box"
+    ],
+    "blister": [
+        "blister", "3pack", "3-pack", "3er pack", "3er blister", "sleeved booster",
+        "sleeve booster", "check lane", "checklane"
+    ]
+}
+
 # Locks für Thread-sichere Operationen
 url_lock = Lock()
 data_lock = Lock()
@@ -67,6 +85,10 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     all_products = []  # Liste für alle gefundenen Produkte
     found_product_ids = set()  # Set für Deduplizierung von gefundenen Produkten
     
+    # Sammle Produkt-Information aus keywords_map
+    product_info = extract_product_name_type_info(keywords_map)
+    logger.info(f"🔍 Extrahierte Produktinformationen: {len(product_info)} Einträge")
+    
     # Standardheader erstellen
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
@@ -76,7 +98,7 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     
     # 1. Zugriff über die Sitemap mit Vorfilterung
     logger.info("🔍 Lade und filtere Produkte aus der Sitemap")
-    sitemap_products = fetch_filtered_products_from_sitemap(headers, keywords_map)
+    sitemap_products = fetch_filtered_products_from_sitemap(headers, product_info)
     
     if sitemap_products:
         logger.info(f"🔍 Nach Vorfilterung verbleiben {len(sitemap_products)} relevante URLs")
@@ -92,7 +114,7 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
             future_to_url = {
                 executor.submit(
                     process_mighty_cards_product, 
-                    url, keywords_map, seen, out_of_stock, only_available, 
+                    url, product_info, seen, out_of_stock, only_available, 
                     headers, all_products, new_matches, found_product_ids
                 ): url for url in sitemap_products
             }
@@ -120,8 +142,22 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     if len(all_products) < 2:
         logger.info("🔍 Nicht genug Produkte über Sitemap gefunden, versuche direkte Suche")
         
-        # Verwende unterschiedliche Suchbegriffe, um die Chancen zu erhöhen
-        for search_term in keywords_map.keys():
+        # Verwende unterschiedliche Suchbegriffe für die direkte Suche
+        search_terms = []
+        for product_item in product_info:
+            for name_variant in product_item["name_variants"]:
+                if name_variant not in search_terms:
+                    search_terms.append(name_variant)
+                    if len(search_terms) >= 5:  # Begrenze auf max. 5 Suchbegriffe
+                        break
+        
+        # Füge auch immer die Produktcodes hinzu
+        for product_item in product_info:
+            if product_item["product_code"] and product_item["product_code"] not in search_terms:
+                search_terms.append(product_item["product_code"])
+        
+        # Direktsuche mit den generierten Suchbegriffen
+        for search_term in search_terms:
             search_products = search_mighty_cards_products(search_term, headers)
             
             # Verarbeite gefundene Produkte sequentiell (meist weniger)
@@ -130,7 +166,7 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
                     if product_url in sitemap_products:
                         continue  # Vermeidet Duplikate
                 
-                process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, 
+                process_mighty_cards_product(product_url, product_info, seen, out_of_stock, only_available, 
                                              headers, all_products, new_matches, found_product_ids)
     
     # 4. Sende Benachrichtigungen in Batches, um Telegram-Limits zu umgehen
@@ -154,12 +190,80 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     
     return new_matches
 
-def fetch_filtered_products_from_sitemap(headers, keywords_map):
+def extract_product_name_type_info(keywords_map):
+    """
+    Extrahiert detaillierte Produkt-Informationen aus dem Keywords-Map.
+    Trennt Produktnamen von Produkttypen und erstellt Varianten für verschiedene Schreibweisen.
+    
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :return: Liste von Produktinformationen mit Name- und Typ-Varianten
+    """
+    product_info = []
+    
+    for search_term in keywords_map.keys():
+        search_term_lower = search_term.lower()
+        
+        # 1. Extrahiere den Produkttyp
+        product_type = extract_product_type_from_text(search_term_lower)
+        
+        # 2. Extrahiere den Produktnamen (ohne Produkttyp)
+        product_name = re.sub(r'\s+(display|box|tin|etb|ttb|booster|36er)$', '', search_term_lower).strip()
+        
+        # 3. Extrahiere Produktcode (kp09, sv09, etc.) falls vorhanden
+        product_code = None
+        code_match = re.search(r'(kp\d+|sv\d+)', search_term_lower)
+        if code_match:
+            product_code = code_match.group(0)
+        
+        # 4. Erstelle Varianten für den Produktnamen (mit/ohne Bindestriche, etc.)
+        name_variants = [product_name]
+        
+        # Mit Bindestrichen
+        if ' ' in product_name:
+            name_variants.append(product_name.replace(' ', '-'))
+        
+        # Ohne Leerzeichen
+        if ' ' in product_name:
+            name_variants.append(product_name.replace(' ', ''))
+            
+        # Mit Leerzeichen statt Bindestrichen
+        if '-' in product_name:
+            name_variants.append(product_name.replace('-', ' '))
+        
+        # Entferne Leerzeichen und Bindestriche für ein reines Keyword
+        pure_name = re.sub(r'[\s\-]', '', product_name)
+        if pure_name not in name_variants:
+            name_variants.append(pure_name)
+            
+        # 5. Erstelle Varianten für den Produkttyp
+        type_variants = []
+        
+        if product_type in PRODUCT_TYPE_VARIANTS:
+            type_variants = PRODUCT_TYPE_VARIANTS[product_type]
+        else:
+            # Wenn der Typ nicht bekannt ist, verwende den erkannten Typ
+            if product_type != "unknown":
+                type_variants = [product_type]
+        
+        # 6. Füge das Produktinfo-Dictionary hinzu
+        product_info.append({
+            "original_term": search_term,
+            "product_name": product_name,
+            "product_type": product_type,
+            "product_code": product_code,
+            "name_variants": name_variants,
+            "type_variants": type_variants,
+            "tokens": keywords_map[search_term]  # Original-Tokens behalten
+        })
+    
+    return product_info
+
+def fetch_filtered_products_from_sitemap(headers, product_info):
     """
     Extrahiert und filtert Produkt-URLs aus der Sitemap von mighty-cards.de
     
     :param headers: HTTP-Headers für die Anfragen
-    :param keywords_map: Dictionary mit Suchbegriffen für die Filterung
+    :param product_info: Liste mit extrahierten Produktinformationen
     :return: Liste mit vorgefilterterten Produkt-URLs
     """
     sitemap_url = "https://www.mighty-cards.de/wp-sitemap-ecstore-1.xml"
@@ -197,9 +301,21 @@ def fetch_filtered_products_from_sitemap(headers, keywords_map):
         
         logger.info(f"🔍 {len(all_product_urls)} Produkt-URLs aus Sitemap extrahiert")
         
-        # Extrahiere relevante Keywords für die Vorfilterung
-        relevant_keywords = extract_relevant_keywords(keywords_map)
-        logger.info(f"🔍 Verwende relevante Keywords für Vorfilterung: {relevant_keywords}")
+        # Sammle alle relevanten Keyword-Varianten für die Filterung
+        relevant_keywords = []
+        product_codes = []
+        
+        for product in product_info:
+            # Produktnamen-Varianten
+            for variant in product["name_variants"]:
+                if variant and len(variant) > 3 and variant not in relevant_keywords:
+                    relevant_keywords.append(variant)
+            
+            # Produktcodes
+            if product["product_code"] and product["product_code"] not in product_codes:
+                product_codes.append(product["product_code"])
+        
+        logger.info(f"🔍 Filterung mit {len(relevant_keywords)} Namen-Varianten und {len(product_codes)} Produktcodes")
         
         # Vorfilterung der URLs direkt nach dem Laden
         filtered_urls = []
@@ -216,16 +332,27 @@ def fetch_filtered_products_from_sitemap(headers, keywords_map):
             
             # 3. Sollte idealerweise eines der relevanten Keywords enthalten
             relevant_match = False
-            for kw in relevant_keywords:
-                if kw in url_lower:
+            
+            # Prüfe zuerst auf exakte Produktcodes (höchste Priorität)
+            for code in product_codes:
+                if code in url_lower:
                     relevant_match = True
                     break
+            
+            # Wenn kein Code gefunden, prüfe auf Namens-Varianten
+            if not relevant_match:
+                for kw in relevant_keywords:
+                    if kw in url_lower:
+                        relevant_match = True
+                        break
             
             # URLs mit relevanten Keywords werden priorisiert
             if relevant_match:
                 filtered_urls.append(url)
             # URLs, die allgemein Pokemon sind, auch hinzufügen (als Fallback)
-            elif "pokemon" in url_lower:
+            elif "pokemon" in url_lower and ("scarlet" in url_lower or "violet" in url_lower or 
+                                           "karmesin" in url_lower or "purpur" in url_lower):
+                # Aber nur, wenn sie Scarlet/Violet oder Karmesin/Purpur enthalten
                 filtered_urls.append(url)
         
         return filtered_urls
@@ -233,40 +360,6 @@ def fetch_filtered_products_from_sitemap(headers, keywords_map):
     except Exception as e:
         logger.error(f"❌ Fehler beim Laden der Sitemap: {e}")
         return []
-
-def extract_relevant_keywords(keywords_map):
-    """
-    Extrahiert relevante Keywords für die URL-Vorfilterung
-    
-    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
-    :return: Liste mit relevanten Keywords
-    """
-    result = []
-    
-    # Extrahiere Produktcodes und spezifische Namen
-    for search_term in keywords_map.keys():
-        search_term_lower = search_term.lower()
-        
-        # 1. Extrahiere Produktcodes (kp09, sv09, etc.)
-        code_match = re.search(r'(kp\d+|sv\d+)', search_term_lower)
-        if code_match and code_match.group(0) not in result:
-            result.append(code_match.group(0))
-        
-        # 2. Extrahiere spezifische Produkt-/Setnamen (ohne Produkttyp)
-        clean_term = re.sub(r'\s+(display|box|tin|etb|ttb|booster|36er)$', '', search_term_lower)
-        
-        # Spezifische Set-Namen und -Identifikatoren
-        set_keywords = [
-            "reisegefährten", "reisegefahrten", "journey", "together", "togehter",
-            "karmesin", "purpur", "scarlet", "violet", "sv09", "kp09",
-            "temporal", "forces", "paradox", "paldea", "obsidian"
-        ]
-        
-        for kw in set_keywords:
-            if kw in clean_term and kw not in result:
-                result.append(kw)
-                
-    return result
 
 def contains_blacklist_terms(text):
     """
@@ -325,13 +418,14 @@ def search_mighty_cards_products(search_term, headers):
     
     return product_urls
 
-def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, only_available, 
+def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, only_available, 
                                headers, all_products, new_matches, found_product_ids):
     """
-    Verarbeitet ein einzelnes Produkt von mighty-cards.de (Thread-sicher)
+    Verarbeitet ein einzelnes Produkt von mighty-cards.de (Thread-sicher) mit verbesserter
+    Produkttyp- und Produktnamen-Validierung.
     
     :param product_url: URL des Produkts
-    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :param product_info: Liste mit extrahierten Produktinformationen
     :param seen: Set mit bereits gesehenen Produkten
     :param out_of_stock: Set mit ausverkauften Produkten
     :param only_available: Ob nur verfügbare Produkte angezeigt werden sollen
@@ -382,7 +476,7 @@ def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, 
         else:
             title = title_elem.text.strip()
         
-        # Strikte Titel-Validierung
+        # Strikte Titel-Validierung mit verbesserter Typ-vs-Name Unterscheidung
         title_lower = title.lower()
         
         # 1. "Pokemon" muss korrekt im Titel positioniert sein
@@ -415,58 +509,68 @@ def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, 
             return False
         
         # Produkttyp aus dem Titel extrahieren
-        product_type = extract_product_type_from_text(title)
+        detected_product_type = extract_product_type_from_text(title)
         
-        # Prüfe, ob der Titel einem der Suchbegriffe entspricht - hier strenger!
-        matched_term = None
-        matching_score = 0  # Wie gut der Treffer ist
+        # Bereinigter Titel für besseres Matching (ohne Sonderzeichen)
+        clean_title_lower = clean_text(title).lower()
         
-        for search_term, tokens in keywords_map.items():
-            search_term_type = extract_product_type_from_text(search_term)
-            search_term_lower = search_term.lower()
+        # 3. Verbesserte Prüfung: Exakte Übereinstimmung von Produktname + Produkttyp
+        matched_product = None
+        matching_score = 0
+        
+        for product in product_info:
+            current_score = 0
+            name_match = False
+            type_match = False
             
-            # Bei Display-Suche: Nur Displays berücksichtigen
-            if search_term_type == "display" and product_type != "display":
+            # 3.1 Prüfe Produktcode-Match (höchste Priorität)
+            if product["product_code"] and product["product_code"] in clean_title_lower:
+                current_score += 10
+                name_match = True  # Wenn Produktcode stimmt, gilt der Name als übereinstimmend
+            
+            # 3.2 Prüfe Produktnamen-Match in verschiedenen Varianten
+            if not name_match:
+                for name_variant in product["name_variants"]:
+                    if name_variant and name_variant in clean_title_lower:
+                        name_match = True
+                        current_score += 5
+                        break
+            
+            # Wenn kein Name-Match, keine weitere Prüfung
+            if not name_match:
                 continue
-            
-            # Verbesserte Keyword-Prüfung mit Produkttyp-Validierung
-            # Extrahiere Produktcodes (KP09, SV09, etc.)
-            code_match = re.search(r'(kp\d+|sv\d+)', search_term_lower)
-            key_term = None
-            if code_match:
-                key_term = code_match.group(0)
                 
-            # Ist der Produktcode im Titel?
-            if key_term and key_term in title_lower:
-                current_score = 10  # Höchster Score für exakten Produktcode
-                
-                # Wenn auch der Produkttyp übereinstimmt, noch höherer Score
-                if search_term_type == product_type:
+            # 3.3 Prüfe Produkttyp-Match in verschiedenen Varianten
+            for type_variant in product["type_variants"]:
+                # Prüfe, ob der Variantentyp im Titel vorkommt
+                if type_variant and type_variant in clean_title_lower:
+                    type_match = True
                     current_score += 5
+                    break
                 
-                # Nur den Suchbegriff mit dem höchsten Score verwenden
-                if current_score > matching_score:
-                    matched_term = search_term
-                    matching_score = current_score
-                continue  # Weiter mit dem nächsten Suchbegriff
+            # Alternative: Prüfe, ob der erkannte Produkttyp mit dem gesuchten übereinstimmt
+            if not type_match and product["product_type"] == detected_product_type:
+                type_match = True
+                current_score += 3
             
-            # Genereller Check über Token-Matching als Fallback
-            if is_keyword_in_text(tokens, title, log_level='None'):
-                current_score = 5  # Mittlerer Score für Token-Matching
-                
-                # Wenn auch der Produkttyp übereinstimmt, höherer Score
-                if search_term_type == product_type:
-                    current_score += 3
-                
-                # Nur den Suchbegriff mit dem höchsten Score verwenden
-                if current_score > matching_score:
-                    matched_term = search_term
-                    matching_score = current_score
+            # 3.4 Wähle das Produkt mit dem höchsten Score
+            if current_score > matching_score:
+                matched_product = product
+                matching_score = current_score
         
-        # Wenn kein Match mit ausreichendem Score gefunden wurde
-        if not matched_term or matching_score < 3:
+        # Wenn kein passendes Produkt gefunden oder Score zu niedrig
+        # (Ein Match braucht mindestens einen Namen-Match -> mind. Score 5)
+        if not matched_product or matching_score < 5:
             logger.debug(f"❌ Produkt passt nicht zu Suchbegriffen (Score {matching_score}): {title}")
             return False
+        
+        # Bei Produkttyp-Unstimmigkeit: Strengere Prüfung
+        if matching_score >= 5 and matched_product["product_type"] != "unknown" and detected_product_type != "unknown":
+            # Wenn sowohl der gesuchte als auch der erkannte Typ bekannt sind und nicht übereinstimmen
+            if matched_product["product_type"] != detected_product_type:
+                # Beispiel: Wir suchen nach "reisegefährten display", aber gefunden wird "reisegefährten blister"
+                logger.debug(f"❌ Produkttyp stimmt nicht überein: Gesucht {matched_product['product_type']}, gefunden {detected_product_type} - {title}")
+                return False
         
         # Verwende das Availability-Modul für Verfügbarkeitserkennnung
         is_available, price, status_text = detect_availability(soup, product_url)
@@ -500,8 +604,8 @@ def process_mighty_cards_product(product_url, keywords_map, seen, out_of_stock, 
                 "price": price,
                 "status_text": status_text,
                 "is_available": is_available,
-                "matched_term": matched_term,
-                "product_type": product_type,
+                "matched_term": matched_product["original_term"],
+                "product_type": detected_product_type,
                 "shop": "mighty-cards.de"
             }
             
