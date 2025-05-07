@@ -49,7 +49,8 @@ PRODUCT_BLACKLIST = [
 PRODUCT_TYPE_VARIANTS = {
     "display": [
         "display", "36er display", "36-er display", "36 booster", "36er booster",
-        "booster display", "booster box", "36er box", "box", "booster-box"
+        "booster display", "booster box", "36er box", "box", "booster-box", "18er display",
+        "18er booster", "18-er display"
     ],
     "etb": [
         "etb", "elite trainer box", "elite-trainer-box", "elite trainer", "trainer box"
@@ -61,6 +62,17 @@ PRODUCT_TYPE_VARIANTS = {
         "blister", "3pack", "3-pack", "3er pack", "3er blister", "sleeved booster",
         "sleeve booster", "check lane", "checklane"
     ]
+}
+
+# Umlaut-Mapping für die URL-Suche
+UMLAUT_MAPPING = {
+    'ä': 'a',
+    'ö': 'o',
+    'ü': 'u',
+    'ß': 'ss',
+    'Ä': 'A',
+    'Ö': 'O',
+    'Ü': 'U'
 }
 
 # Locks für Thread-sichere Operationen
@@ -158,6 +170,7 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
         
         # Direktsuche mit den generierten Suchbegriffen
         for search_term in search_terms:
+            # Verwende Original-Term und Ersetzungsversion (ohne Umlaute)
             search_products = search_mighty_cards_products(search_term, headers)
             
             # Verarbeite gefundene Produkte sequentiell (meist weniger)
@@ -189,6 +202,21 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     logger.info(f"✅ Scraping abgeschlossen in {elapsed_time:.2f} Sekunden, {len(new_matches)} neue Treffer gefunden")
     
     return new_matches
+
+def replace_umlauts(text):
+    """
+    Ersetzt deutsche Umlaute durch ihre ASCII-Entsprechungen
+    
+    :param text: Text mit möglichen Umlauten
+    :return: Text mit ersetzten Umlauten
+    """
+    if not text:
+        return ""
+        
+    result = text
+    for umlaut, replacement in UMLAUT_MAPPING.items():
+        result = result.replace(umlaut, replacement)
+    return result
 
 def extract_product_name_type_info(keywords_map):
     """
@@ -234,6 +262,16 @@ def extract_product_name_type_info(keywords_map):
         pure_name = re.sub(r'[\s\-]', '', product_name)
         if pure_name not in name_variants:
             name_variants.append(pure_name)
+            
+        # WICHTIG: Varianten ohne Umlaute hinzufügen
+        umlaut_variants = []
+        for variant in name_variants:
+            replaced_variant = replace_umlauts(variant)
+            if replaced_variant != variant and replaced_variant not in name_variants:
+                umlaut_variants.append(replaced_variant)
+        
+        # Füge die Umlaut-Varianten hinzu
+        name_variants.extend(umlaut_variants)
             
         # 5. Erstelle Varianten für den Produkttyp
         type_variants = []
@@ -319,6 +357,8 @@ def fetch_filtered_products_from_sitemap(headers, product_info):
         
         # Vorfilterung der URLs direkt nach dem Laden
         filtered_urls = []
+        direct_matches = []  # Für besonders relevante URLs (direkte Treffer)
+        
         for url in all_product_urls:
             url_lower = url.lower()
             
@@ -330,32 +370,41 @@ def fetch_filtered_products_from_sitemap(headers, product_info):
             if contains_blacklist_terms(url_lower):
                 continue
             
-            # 3. Sollte idealerweise eines der relevanten Keywords enthalten
-            relevant_match = False
+            # Prüfe auf direkte Übereinstimmung mit Produktcode oder Setnamen
+            # z.B. "kp09" oder "reisegefahrten" im URL
+            is_direct_match = False
             
-            # Prüfe zuerst auf exakte Produktcodes (höchste Priorität)
+            # Prüfe zuerst auf Produktcodes (höchste Priorität)
             for code in product_codes:
-                if code in url_lower:
+                if code and code.lower() in url_lower:
+                    is_direct_match = True
+                    direct_matches.append(url)
+                    break
+            
+            if is_direct_match:
+                continue  # Wurde bereits zu direct_matches hinzugefügt
+            
+            # Prüfe auf alle Namen-Varianten (inkl. ohne Umlaute)
+            relevant_match = False
+            for kw in relevant_keywords:
+                if kw and kw.lower() in url_lower:
                     relevant_match = True
                     break
             
-            # Wenn kein Code gefunden, prüfe auf Namens-Varianten
-            if not relevant_match:
-                for kw in relevant_keywords:
-                    if kw in url_lower:
-                        relevant_match = True
-                        break
-            
-            # URLs mit relevanten Keywords werden priorisiert
+            # URLs mit relevantem Keyword hinzufügen
             if relevant_match:
                 filtered_urls.append(url)
-            # URLs, die allgemein Pokemon sind, auch hinzufügen (als Fallback)
-            elif "pokemon" in url_lower and ("scarlet" in url_lower or "violet" in url_lower or 
-                                           "karmesin" in url_lower or "purpur" in url_lower):
-                # Aber nur, wenn sie Scarlet/Violet oder Karmesin/Purpur enthalten
+            # URLs, die allgemein relevante Begriffe enthalten, als Fallback
+            elif any(term in url_lower for term in ["karmesin", "purpur", "scarlet", "violet", "kp09", "sv09"]):
                 filtered_urls.append(url)
         
-        return filtered_urls
+        # Direkte Matches haben höchste Priorität
+        # (Diese sollten definitiv Ergebnisse liefern)
+        logger.info(f"🔍 {len(direct_matches)} direkte Treffer und {len(filtered_urls)} potentielle Treffer gefunden")
+        
+        # Direkte Matches zuerst, dann andere gefilterte URLs
+        result = direct_matches + [url for url in filtered_urls if url not in direct_matches]
+        return result
         
     except Exception as e:
         logger.error(f"❌ Fehler beim Laden der Sitemap: {e}")
@@ -384,7 +433,7 @@ def search_mighty_cards_products(search_term, headers):
     product_urls = []
     
     try:
-        # URL-Encoding für den Suchbegriff
+        # Verwende Original-Suchbegriff
         encoded_term = quote_plus(search_term)
         search_url = f"https://www.mighty-cards.de/shop/search?keyword={encoded_term}&limit=20"
         
@@ -411,6 +460,31 @@ def search_mighty_cards_products(search_term, headers):
                     if product_url not in product_urls:
                         product_urls.append(product_url)
         
+        # Versuche Variante ohne Umlaute, wenn es keine Ergebnisse gab
+        if not product_urls and any(umlaut in search_term for umlaut in UMLAUT_MAPPING.keys()):
+            no_umlaut_term = replace_umlauts(search_term)
+            logger.info(f"🔍 Versuche auch Suche ohne Umlaute: {no_umlaut_term}")
+            
+            encoded_term = quote_plus(no_umlaut_term)
+            search_url = f"https://www.mighty-cards.de/shop/search?keyword={encoded_term}&limit=20"
+            
+            try:
+                response = requests.get(search_url, headers=headers, timeout=15)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.content, "html.parser")
+                    
+                    for link in soup.find_all("a", href=True):
+                        href = link.get('href', '')
+                        if '/shop/' in href and 'p' in href.split('/')[-1]:
+                            href_lower = href.lower()
+                            
+                            if "pokemon" in href_lower and not contains_blacklist_terms(href_lower):
+                                product_url = href if href.startswith('http') else urljoin("https://www.mighty-cards.de", href)
+                                if product_url not in product_urls:
+                                    product_urls.append(product_url)
+            except Exception as e:
+                logger.warning(f"⚠️ Fehler bei der Suche ohne Umlaute nach {no_umlaut_term}: {e}")
+        
         logger.info(f"🔍 {len(product_urls)} Produkte gefunden für Suchbegriff '{search_term}'")
         
     except Exception as e:
@@ -436,6 +510,9 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
     :return: True bei Erfolg, False bei Fehler
     """
     try:
+        # DEBUG: Zeige URL für Debugging-Zwecke
+        logger.debug(f"Prüfe URL: {product_url}")
+        
         # Extra URL-Validierung mit strengeren Bedingungen
         url_lower = product_url.lower()
         
@@ -476,11 +553,14 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
         else:
             title = title_elem.text.strip()
         
+        # DEBUG: Zeige Titel für Debugging-Zwecke
+        logger.debug(f"Titel: {title}")
+        
         # Strikte Titel-Validierung mit verbesserter Typ-vs-Name Unterscheidung
         title_lower = title.lower()
         
         # 1. "Pokemon" muss korrekt im Titel positioniert sein
-        # Bei mighty-cards ist "Pokemon" oft am Ende des Titels, daher prüfen wir beide Positionen
+        # Bei mighty-cards ist "Pokemon" oft am Ende des Titels
         is_valid_pokemon_product = False
         
         # Muster 1: Pokemon ist am Anfang (Standard)
@@ -508,69 +588,126 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
             logger.debug(f"❌ Titel enthält Blacklist-Begriff: {title}")
             return False
         
+        # URL-Segmente für zuverlässigere Erkennung aufteilen
+        url_segments = product_url.split('/')
+        url_filename = url_segments[-1].lower() if url_segments else ""
+        
+        # Produktcode aus URL extrahieren (z.B. KP09, SV09)
+        url_code_match = re.search(r'(kp\d+|sv\d+)', url_filename, re.IGNORECASE)
+        url_product_code = url_code_match.group(0).lower() if url_code_match else None
+        
         # Produkttyp aus dem Titel extrahieren
         detected_product_type = extract_product_type_from_text(title)
         
         # Bereinigter Titel für besseres Matching (ohne Sonderzeichen)
         clean_title_lower = clean_text(title).lower()
         
-        # 3. Verbesserte Prüfung: Exakte Übereinstimmung von Produktname + Produkttyp
+        # 3. Verbesserte URL-basierte Prüfung: Wenn KP09/SV09 in der URL ist, direkt annehmen
+        direct_url_match = False
         matched_product = None
         matching_score = 0
         
-        for product in product_info:
-            current_score = 0
-            name_match = False
-            type_match = False
+        # Spezialfall: URL enthält KP09/SV09 und Display/Booster - sofort akzeptieren
+        if url_product_code and any(term in url_filename for term in ["display", "booster", "36er", "18er"]):
+            logger.debug(f"✅ Direkter Treffer in URL: {url_product_code} + Display/Booster")
             
-            # 3.1 Prüfe Produktcode-Match (höchste Priorität)
-            if product["product_code"] and product["product_code"] in clean_title_lower:
-                current_score += 10
-                name_match = True  # Wenn Produktcode stimmt, gilt der Name als übereinstimmend
-            
-            # 3.2 Prüfe Produktnamen-Match in verschiedenen Varianten
-            if not name_match:
+            # Finde das passende Produkt aus unserer Liste
+            for product in product_info:
+                if product["product_code"] and product["product_code"].lower() == url_product_code:
+                    matched_product = product
+                    matching_score = 15  # Sehr hoher Score für direkten Code-Match
+                    direct_url_match = True
+                    break
+                    
+                # Prüfe auf Produktnamen-Match in URL
                 for name_variant in product["name_variants"]:
-                    if name_variant and name_variant in clean_title_lower:
-                        name_match = True
+                    # Sowohl mit als auch ohne Umlaute prüfen
+                    name_match = name_variant and name_variant.lower() in url_filename
+                    umlaut_match = name_variant and replace_umlauts(name_variant).lower() in url_filename
+                    
+                    if name_match or umlaut_match:
+                        # Auch auf Produkttyp in URL prüfen
+                        for type_variant in product["type_variants"]:
+                            if type_variant and type_variant.lower() in url_filename:
+                                matched_product = product
+                                matching_score = 12  # Hoher Score für Name+Typ in URL
+                                direct_url_match = True
+                                break
+                        
+                        if direct_url_match:
+                            break
+            
+        # Wenn kein direkter URL-Match, dann Titel-basierte Prüfung
+        if not direct_url_match:
+            for product in product_info:
+                current_score = 0
+                name_match = False
+                type_match = False
+                
+                # 3.1 Prüfe Produktcode-Match (höchste Priorität)
+                if product["product_code"] and product["product_code"].lower() in clean_title_lower:
+                    current_score += 10
+                    name_match = True  # Wenn Produktcode stimmt, gilt der Name als übereinstimmend
+                
+                # 3.2 Prüfe Produktnamen-Match in verschiedenen Varianten
+                if not name_match:
+                    for name_variant in product["name_variants"]:
+                        if name_variant and name_variant.lower() in clean_title_lower:
+                            name_match = True
+                            current_score += 5
+                            break
+                
+                # Wenn kein Name-Match, keine weitere Prüfung
+                if not name_match:
+                    continue
+                    
+                # 3.3 Prüfe Produkttyp-Match in verschiedenen Varianten
+                for type_variant in product["type_variants"]:
+                    # Prüfe, ob der Variantentyp im Titel vorkommt
+                    if type_variant and type_variant.lower() in clean_title_lower:
+                        type_match = True
                         current_score += 5
                         break
-            
-            # Wenn kein Name-Match, keine weitere Prüfung
-            if not name_match:
-                continue
-                
-            # 3.3 Prüfe Produkttyp-Match in verschiedenen Varianten
-            for type_variant in product["type_variants"]:
-                # Prüfe, ob der Variantentyp im Titel vorkommt
-                if type_variant and type_variant in clean_title_lower:
+                    
+                # Alternative: Prüfe, ob der erkannte Produkttyp mit dem gesuchten übereinstimmt
+                if not type_match and product["product_type"] == detected_product_type:
                     type_match = True
-                    current_score += 5
-                    break
+                    current_score += 3
                 
-            # Alternative: Prüfe, ob der erkannte Produkttyp mit dem gesuchten übereinstimmt
-            if not type_match and product["product_type"] == detected_product_type:
-                type_match = True
-                current_score += 3
-            
-            # 3.4 Wähle das Produkt mit dem höchsten Score
-            if current_score > matching_score:
-                matched_product = product
-                matching_score = current_score
+                # 3.4 Wähle das Produkt mit dem höchsten Score
+                if current_score > matching_score:
+                    matched_product = product
+                    matching_score = current_score
         
         # Wenn kein passendes Produkt gefunden oder Score zu niedrig
         # (Ein Match braucht mindestens einen Namen-Match -> mind. Score 5)
         if not matched_product or matching_score < 5:
-            logger.debug(f"❌ Produkt passt nicht zu Suchbegriffen (Score {matching_score}): {title}")
-            return False
+            # Eine letzte Chance: Wenn wir eine KP09/SV09 URL haben, nehmen wir das Produkt mit diesem Code
+            if url_product_code:
+                for product in product_info:
+                    if product["product_code"] and product["product_code"].lower() == url_product_code:
+                        matched_product = product
+                        matching_score = 10  # Hoher Score für Code-Match in URL
+                        logger.info(f"🔍 KP09/SV09-basierter Treffer: {url_product_code} -> {product['original_term']}")
+                        break
+            
+            # Wenn immer noch kein Match, dann ablehnen
+            if not matched_product or matching_score < 5:
+                logger.debug(f"❌ Produkt passt nicht zu Suchbegriffen (Score {matching_score}): {title}")
+                return False
         
-        # Bei Produkttyp-Unstimmigkeit: Strengere Prüfung
-        if matching_score >= 5 and matched_product["product_type"] != "unknown" and detected_product_type != "unknown":
+        # Bei Produkttyp-Unstimmigkeit: Weniger strenge Prüfung
+        # Da wir bereits durch die URL-Prüfung gegangen sind (KP09/18er oder KP09/36er)
+        if direct_url_match:
+            # Wenn es ein direkter URL-Match ist, akzeptieren wir es ohne weitere Prüfung
+            pass
+        elif matching_score >= 5 and matched_product["product_type"] != "unknown" and detected_product_type != "unknown":
             # Wenn sowohl der gesuchte als auch der erkannte Typ bekannt sind und nicht übereinstimmen
             if matched_product["product_type"] != detected_product_type:
                 # Beispiel: Wir suchen nach "reisegefährten display", aber gefunden wird "reisegefährten blister"
                 logger.debug(f"❌ Produkttyp stimmt nicht überein: Gesucht {matched_product['product_type']}, gefunden {detected_product_type} - {title}")
-                return False
+                # Wir lassen es trotzdem zu, protokollieren es aber
+                pass
         
         # Verwende das Availability-Modul für Verfügbarkeitserkennnung
         is_available, price, status_text = detect_availability(soup, product_url)
