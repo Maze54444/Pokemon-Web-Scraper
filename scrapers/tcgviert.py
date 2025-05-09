@@ -1,305 +1,97 @@
+"""
+Spezieller Scraper für tcgviert.com mit Cache-System für gefundene Produkte.
+Implementiert JSON-API und HTML-Methoden zur effizienten Überwachung von 
+Pokemon-Produkten mit dauerhafter URL-Speicherung und Verfügbarkeitsüberwachung.
+"""
+
 import requests
 import re
 import logging
 import time
-import random
+import json
+import os
+from pathlib import Path
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from utils.telegram import send_telegram_message, escape_markdown, send_batch_notification
+from utils.telegram import send_batch_notification
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text, load_exclusion_sets
 from utils.stock import get_status_text, update_product_status
 from utils.availability import detect_availability
+from utils.requests_handler import get_page_content, get_default_headers
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
 
-# Cache für 404-Produkt-URLs und deren letzte Überprüfung
-_product_404_cache = {}
+# Cache-Datei für gefundene Produkt-URLs
+PRODUCT_CACHE_FILE = "data/tcgviert_cache.json"
 
-def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
-    """
-    Scraper für tcgviert.com mit verbesserter Produkttyp-Prüfung
-    
-    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
-    :param seen: Set mit bereits gesehenen Produkttiteln
-    :param out_of_stock: Set mit ausverkauften Produkten
-    :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
-    :return: Liste der neuen Treffer
-    """
-    logger.info("🌐 Starte Scraper für tcgviert.com")
-    
-    json_matches = []
-    html_matches = []
-    all_products = []  # Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
-    
-    # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
-    search_product_type = None
-    if keywords_map:
-        sample_search_term = list(keywords_map.keys())[0]
-        search_product_type = extract_product_type_from_text(sample_search_term)
-        logger.debug(f"🔍 Suche nach Produkttyp: '{search_product_type}'")
-    
-    # Set für Deduplizierung von gefundenen Produkten innerhalb eines Durchlaufs
-    found_product_ids = set()
-    
-    # Versuche beide Methoden und kombiniere die Ergebnisse
+def load_product_cache():
+    """Lädt den Cache mit gefundenen Produkt-URLs"""
     try:
-        json_matches, json_products = scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available)
+        Path(PRODUCT_CACHE_FILE).parent.mkdir(parents=True, exist_ok=True)
         
-        # Deduplizierung für die gefundenen Produkte
-        for product in json_products:
-            product_id = create_product_id(product["title"])
-            if product_id not in found_product_ids:
-                all_products.append(product)
-                found_product_ids.add(product_id)
+        if os.path.exists(PRODUCT_CACHE_FILE):
+            with open(PRODUCT_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        
+        logger.info("ℹ️ Produkt-Cache-Datei nicht gefunden. Neuer Cache wird erstellt.")
+        return {"products": {}, "last_update": int(time.time())}
     except Exception as e:
-        logger.error(f"❌ Fehler beim JSON-Scraping: {e}", exc_info=True)
-    
-    # Bekannte URLs überprüfen, die 404 zurückgegeben haben
+        logger.error(f"⚠️ Fehler beim Laden des Produkt-Caches: {e}")
+        return {"products": {}, "last_update": int(time.time())}
+
+def save_product_cache(cache_data):
+    """Speichert den Cache mit gefundenen Produkt-URLs"""
     try:
-        check_known_404_urls(keywords_map, seen, out_of_stock, only_available, all_products, found_product_ids)
+        Path(PRODUCT_CACHE_FILE).parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(PRODUCT_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+        return True
     except Exception as e:
-        logger.error(f"❌ Fehler beim Überprüfen bekannter 404-URLs: {e}", exc_info=True)
-    
-    # HTML-Scraping immer durchführen, auch wenn JSON-Scraping Treffer liefert
-    try:
-        # Hauptseite scrapen, um die richtigen Collection-URLs zu finden
-        main_page_urls = discover_collection_urls()
-        if main_page_urls:
-            html_matches, html_products = scrape_tcgviert_html(main_page_urls, keywords_map, seen, out_of_stock, only_available)
-            
-            # Deduplizierung für die gefundenen Produkte
-            for product in html_products:
-                product_id = create_product_id(product["title"])
-                if product_id not in found_product_ids:
-                    all_products.append(product)
-                    found_product_ids.add(product_id)
-    except Exception as e:
-        logger.error(f"❌ Fehler beim HTML-Scraping: {e}", exc_info=True)
-    
-    # Kombiniere eindeutige Ergebnisse
-    all_matches = list(set(json_matches + html_matches))
-    logger.info(f"✅ Insgesamt {len(all_matches)} einzigartige Treffer gefunden")
-    
-    # Sende Benachrichtigungen sortiert nach Verfügbarkeit
-    if all_products:
-        send_batch_notification(all_products)
-    
-    return all_matches
-
-def check_known_404_urls(keywords_map, seen, out_of_stock, only_available, all_products, found_product_ids):
-    """
-    Überprüft bekannte URLs, die zuvor einen 404-Status zurückgegeben haben
-    
-    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
-    :param seen: Set mit bereits gesehenen Produkttiteln
-    :param out_of_stock: Set mit ausverkauften Produkten
-    :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
-    :param all_products: Liste für gefundene Produkte
-    :param found_product_ids: Set für Deduplizierung
-    """
-    global _product_404_cache
-    current_time = time.time()
-
-    # Bekannte Produktmuster ohne spezifische Seriennummern
-    product_patterns = {
-        "display": [
-            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-en-max-1-per-person",
-            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-de-max-1-pro-person"
-        ]
-    }
-
-    # Erstelle dynamische URLs basierend auf aktuellen Suchbegriffen
-    hardcoded_urls = []
-    
-    # Für jedes Schlüsselwort in der Suchbegriffskarte
-    for search_term in keywords_map.keys():
-        # Extrahiere den Produkttyp
-        product_type = extract_product_type_from_text(search_term)
-        
-        # Wenn ein passender Produkttyp und Muster vorhanden sind
-        if product_type in product_patterns:
-            normalized_search_term = search_term.lower().replace(' display', '').strip()
-            
-            # Erstelle URLs basierend auf den vorhandenen Mustern
-            for pattern in product_patterns[product_type]:
-                url = pattern.format(normalized_search_term.replace(' ', '-'))
-                if url not in hardcoded_urls:
-                    hardcoded_urls.append(url)
-    
-    # Füge die generierten URLs in den 404-Cache, wenn sie noch nicht drin sind
-    for url in hardcoded_urls:
-        if url not in _product_404_cache:
-            _product_404_cache[url] = {
-                "last_checked": 0,  # 0 erzwingt eine erste Überprüfung
-                "attempts": 0
-            }
-    
-    # Bereite User-Agent für Anfragen vor
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    
-    # Überprüfe alle bekannten 404-URLs
-    for url, info in list(_product_404_cache.items()):
-        # Überprüfe nur alle 6 Stunden (oder angepasst je nach Häufigkeit der Durchläufe)
-        check_interval = 6 * 3600  # 6 Stunden in Sekunden
-        
-        # Für URLs mit mehr Fehlversuchen, erhöhe das Intervall exponentiell
-        if info["attempts"] > 3:
-            check_interval = min(24 * 3600, 6 * 3600 * (2 ** (info["attempts"] - 3)))  # Max 24 Stunden
-        
-        if current_time - info["last_checked"] < check_interval:
-            logger.debug(f"⏱️ Überspringe kürzlich geprüfte 404-URL: {url} (wird in {(info['last_checked'] + check_interval - current_time) / 3600:.1f} Stunden wieder geprüft)")
-            continue
-        
-        # Aktualisiere den Zeitstempel und die Anzahl der Versuche
-        _product_404_cache[url]["last_checked"] = current_time
-        _product_404_cache[url]["attempts"] += 1
-        
-        # Versuche, die Seite abzurufen
-        logger.info(f"🔍 Überprüfe zuvor 404-URL: {url}")
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            
-            # Wenn die URL jetzt funktioniert
-            if response.status_code == 200:
-                logger.info(f"✅ Zuvor 404-URL ist jetzt verfügbar: {url}")
-                
-                # Entferne aus dem 404-Cache
-                _product_404_cache.pop(url, None)
-                
-                # Verarbeite die Seite wie ein normales Produkt
-                soup = BeautifulSoup(response.text, "html.parser")
-                
-                # Extrahiere den Titel
-                title_elem = soup.find('h1', {'class': 'product-single__title'}) or soup.find('h1')
-                if title_elem:
-                    title = title_elem.text.strip()
-                    
-                    # Erstelle eine eindeutige ID
-                    product_id = create_product_id(title)
-                    
-                    # Deduplizierung
-                    if product_id in found_product_ids:
-                        continue
-                    
-                    # Prüfe jeden Suchbegriff gegen den Titel
-                    matched_term = None
-                    for search_term, tokens in keywords_map.items():
-                        # Extrahiere Produkttyp aus Suchbegriff und Titel
-                        search_term_type = extract_product_type_from_text(search_term)
-                        title_product_type = extract_product_type_from_text(title)
-                        
-                        # Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
-                        if search_term_type == "display" and title_product_type != "display":
-                            continue
-                        
-                        # Strikte Keyword-Prüfung
-                        if is_keyword_in_text(tokens, title, log_level='None'):
-                            matched_term = search_term
-                            break
-                    
-                    if matched_term:
-                        # Verfügbarkeit prüfen
-                        is_available, price, status_text = detect_availability(soup, url)
-                        
-                        # Aktualisiere Produkt-Status
-                        should_notify, is_back_in_stock = update_product_status(
-                            product_id, is_available, seen, out_of_stock
-                        )
-                        
-                        if should_notify and (not only_available or is_available):
-                            # Status-Text aktualisieren, wenn Produkt wieder verfügbar ist
-                            if is_back_in_stock:
-                                status_text = "🎉 Wieder verfügbar!"
-                            
-                            # Produkt-Informationen für Batch-Benachrichtigung
-                            product_type = extract_product_type_from_text(title)
-                            
-                            product_data = {
-                                "title": title,
-                                "url": url,
-                                "price": price,
-                                "status_text": status_text,
-                                "is_available": is_available,
-                                "matched_term": matched_term,
-                                "product_type": product_type,
-                                "shop": "tcgviert.com"
-                            }
-                            
-                            all_products.append(product_data)
-                            found_product_ids.add(product_id)
-                            logger.info(f"✅ Produkt ist jetzt aktiv: {title} - {status_text}")
-            else:
-                # Seite ist immer noch nicht verfügbar, Logging
-                if _product_404_cache[url]["attempts"] <= 3 or _product_404_cache[url]["attempts"] % 5 == 0:
-                    logger.info(f"⚠️ URL ist weiterhin nicht verfügbar: {url} (Versuch {_product_404_cache[url]['attempts']})")
-                else:
-                    logger.debug(f"⚠️ URL ist weiterhin nicht verfügbar: {url} (Versuch {_product_404_cache[url]['attempts']})")
-        except Exception as e:
-            logger.warning(f"⚠️ Fehler beim Prüfen der zuvor 404-URL {url}: {e}")
+        logger.error(f"⚠️ Fehler beim Speichern des Produkt-Caches: {e}")
+        return False
 
 def extract_product_info(title):
     """
-    Extrahiert wichtige Produktinformationen aus dem Titel für eine präzise ID-Erstellung
+    Extrahiert wichtige Produktinformationen aus dem Titel für die ID-Erstellung
     
     :param title: Produkttitel
     :return: Tupel mit (series_code, product_type, language)
     """
-    # Extrahiere Sprache (DE/EN/JP)
+    # Extrahiere Sprache (DE/EN)
     if "(DE)" in title or "pro Person" in title:
         language = "DE"
     elif "(EN)" in title or "per person" in title:
         language = "EN"
-    elif "(JP)" in title or "japan" in title.lower():
-        language = "JP"
     else:
         language = "UNK"
     
-    # Extrahiere Produkttyp mit der verbesserten Funktion
+    # Extrahiere Produkttyp
     product_type = extract_product_type_from_text(title)
     if product_type == "unknown":
-        # Fallback zur alten Methode
+        # Fallback zur einfachen Methode
         if re.search(r'display|36er', title.lower()):
             product_type = "display"
-        elif re.search(r'booster|pack|sleeve', title.lower()):
+        elif re.search(r'etb|elite trainer box', title.lower()):
+            product_type = "etb"
+        elif re.search(r'booster|pack', title.lower()):
             product_type = "booster"
-        elif re.search(r'trainer box|elite trainer|box|tin', title.lower()):
-            product_type = "box"
-        elif re.search(r'blister|check\s?lane', title.lower()):
-            product_type = "blister"
         else:
             product_type = "unknown"
     
     # Extrahiere Serien-/Set-Code
     series_code = "unknown"
     # Suche nach Standard-Codes wie SV09, KP09, etc.
-    code_match = re.search(r'(?:sv|kp|op)(?:\s|-)?\d+', title.lower())
+    code_match = re.search(r'(?:sv|kp)(?:\s|-)?\d+', title.lower())
     if code_match:
         series_code = code_match.group(0).replace(" ", "").replace("-", "")
-    # Extrahiere Serien-Code aus beliebigem Text
-    else:
-        # Normalisiere den Titel und entferne "display", "booster", etc.
-        normalized_title = title.lower()
-        normalized_title = re.sub(r'display|booster|\d+er|box|pack|tin|elite|trainer', '', normalized_title)
-        normalized_title = re.sub(r'\s+', ' ', normalized_title).strip()
-        
-        # Verwende den Anfang des normalisierten Titels als Serien-Code
-        if normalized_title:
-            # Begrenze auf 1-3 Wörter für den Serien-Code
-            words = normalized_title.split()
-            if words:
-                if len(words) > 3:
-                    series_code = "-".join(words[:3])
-                else:
-                    series_code = "-".join(words)
     
     return (series_code, product_type, language)
 
 def create_product_id(title, base_id="tcgviert"):
     """
-    Erstellt eine eindeutige Produkt-ID basierend auf Titel und Produktinformationen
+    Erstellt eine eindeutige Produkt-ID basierend auf dem Titel
     
     :param title: Produkttitel
     :param base_id: Basis-ID (z.B. Website-Name)
@@ -311,157 +103,222 @@ def create_product_id(title, base_id="tcgviert"):
     # Erstelle eine strukturierte ID
     product_id = f"{base_id}_{series_code}_{product_type}_{language}"
     
-    # Füge zusätzliche Details für spezielle Produkte hinzu
-    if "premium" in title.lower():
-        product_id += "_premium"
-    if "elite" in title.lower():
-        product_id += "_elite"
-    if "top" in title.lower() and "trainer" in title.lower():
-        product_id += "_top"
-    
     return product_id
+
+def add_url_to_cache(url, title, search_term, is_available, price):
+    """
+    Fügt eine URL zum permanenten Cache hinzu
+    
+    :param url: Produktseiten-URL
+    :param title: Produkttitel
+    :param search_term: Übereinstimmender Suchbegriff
+    :param is_available: Ob das Produkt verfügbar ist
+    :param price: Produktpreis
+    """
+    # Lade aktuellen Cache
+    cache_data = load_product_cache()
+    
+    # Erstelle eindeutige ID
+    product_id = create_product_id(title)
+    
+    # Füge zur Produkte-Map hinzu
+    cache_data["products"][product_id] = {
+        "url": url,
+        "title": title,
+        "search_term": search_term,
+        "last_checked": int(time.time()),
+        "is_available": is_available,
+        "price": price
+    }
+    
+    # Aktualisiere Zeitstempel
+    cache_data["last_update"] = int(time.time())
+    
+    # Speichere Cache
+    save_product_cache(cache_data)
+    logger.debug(f"URL zu Cache hinzugefügt: {url}")
+
+def check_cached_products(keywords_map, seen, out_of_stock, only_available=False):
+    """
+    Überprüft gespeicherte URLs im Cache und aktualisiert deren Status
+    
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :param seen: Set mit bereits gesehenen Produkten
+    :param out_of_stock: Set mit ausverkauften Produkten
+    :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
+    :return: Tuple (new_matches, all_products)
+    """
+    logger.info("🔍 Überprüfe gespeicherte Produkt-URLs aus dem Cache")
+    cache_data = load_product_cache()
+    
+    new_matches = []
+    all_products = []
+    found_product_ids = set()
+    
+    # Überprüfe jedes Produkt im Cache
+    for product_id, product_info in list(cache_data["products"].items()):
+        url = product_info.get("url")
+        title = product_info.get("title")
+        search_term = product_info.get("search_term")
+        last_checked = product_info.get("last_checked", 0)
+        current_time = int(time.time())
+        
+        # Überprüfe nur alle 2 Stunden
+        if current_time - last_checked < 7200:
+            logger.debug(f"⏱️ Überspringe kürzlich geprüftes Produkt: {title}")
+            continue
+        
+        # Prüfe, ob der Suchbegriff noch aktuell ist
+        if search_term not in keywords_map:
+            logger.debug(f"⏭️ Überspringe Produkt mit nicht mehr aktuellem Suchbegriff: {title}")
+            continue
+        
+        # Prüfe die URL
+        try:
+            logger.info(f"🔍 Überprüfe Cache-URL: {url}")
+            headers = get_default_headers()
+            
+            # Verwende den verbesserten Request-Handler für robuste HTTP-Anfragen 
+            success, soup, status_code, error = get_page_content(
+                url,
+                headers=headers,
+                verify_ssl=True,
+                timeout=15
+            )
+            
+            if not success:
+                if status_code == 404:
+                    # URL existiert nicht mehr, aus Cache entfernen
+                    del cache_data["products"][product_id]
+                    logger.warning(f"⚠️ Produkt nicht mehr verfügbar (404): {title}")
+                    continue
+                else:
+                    logger.warning(f"⚠️ Fehler beim Abrufen von {url}: {error}")
+                    # Aktualisiere Zeitstempel, um nicht zu oft erfolglos zu versuchen
+                    product_info["last_checked"] = current_time
+                    continue
+            
+            # Verwende das Availability-Modul für Verfügbarkeitsprüfung
+            is_available, price, status_text = detect_availability(soup, url)
+            
+            # Aktualisiere Produkt-Status und Zeitstempel im Cache
+            product_info["is_available"] = is_available
+            product_info["price"] = price
+            product_info["last_checked"] = current_time
+            
+            # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
+            should_notify, is_back_in_stock = update_product_status(
+                product_id, is_available, seen, out_of_stock
+            )
+            
+            if should_notify and (not only_available or is_available):
+                # Status-Text aktualisieren, wenn Produkt wieder verfügbar ist
+                if is_back_in_stock:
+                    status_text = "🎉 Wieder verfügbar!"
+                
+                # Produkt-Informationen für Batch-Benachrichtigung
+                product_type = extract_product_type_from_text(title)
+                
+                product_data = {
+                    "title": title,
+                    "url": url,
+                    "price": price,
+                    "status_text": status_text,
+                    "is_available": is_available,
+                    "matched_term": search_term,
+                    "product_type": product_type,
+                    "shop": "tcgviert.com"
+                }
+                
+                # Deduplizierung innerhalb eines Durchlaufs
+                if product_id not in found_product_ids:
+                    all_products.append(product_data)
+                    new_matches.append(product_id)
+                    found_product_ids.add(product_id)
+                    logger.info(f"✅ Status-Update für gecachtes Produkt: {title} - {status_text}")
+            
+        except Exception as e:
+            logger.error(f"❌ Fehler beim Überprüfen von {url}: {e}")
+            # Aktualisiere den Zeitstempel trotzdem, um endlose Wiederholungen zu vermeiden
+            product_info["last_checked"] = current_time
+    
+    # Speichere den aktualisierten Cache
+    save_product_cache(cache_data)
+    
+    return new_matches, all_products
 
 def discover_collection_urls():
     """
-    Entdeckt aktuelle Collection-URLs durch Scraping der Hauptseite,
-    mit Optimierung für schnelleren Abbruch und bessere Priorisierung
+    Entdeckt aktuelle Collection-URLs durch Scraping der Hauptseite
     """
-    logger.info("🔍 Suche nach gültigen Collection-URLs auf der Hauptseite")
+    logger.info("🔍 Suche nach Collection-URLs auf der Hauptseite")
     valid_urls = []
     
     try:
-        # Starte mit den wichtigsten URLs (direkt)
+        # Start mit wichtigsten URLs
         priority_urls = [
             "https://tcgviert.com/collections/vorbestellungen",
             "https://tcgviert.com/collections/pokemon",
             "https://tcgviert.com/collections/all",
         ]
         
-        # Bei Fehlern direkt zu diesen URLs wechseln
-        fallback_urls = ["https://tcgviert.com/collections/all"]
+        headers = get_default_headers()
         
-        # Generiere dynamische Produktmuster-URLs
-        display_specific_urls = []
-        
-        # Erstelle dynamische Produktmuster-URLs basierend auf bekannten URL-Strukturen
-        base_display_patterns = [
-            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-en-max-1-per-person",
-            "https://tcgviert.com/products/pokemon-tcg-{}-36er-display-de-max-1-pro-person"
-        ]
-        
-        # Verwende generische Produktnamen für Muster
-        common_product_names = ["newest-series", "current-set", "latest-expansion"]
-        
-        # Erstelle generische URLs
-        for pattern in base_display_patterns:
-            for product_name in common_product_names:
-                url = pattern.format(product_name)
-                if url not in display_specific_urls:
-                    display_specific_urls.append(url)
-        
-        # Diese direkt zu den validen URLs hinzufügen
-        for url in display_specific_urls:
-            if url not in valid_urls:
-                valid_urls.append(url)
-                
-                # 404-URLs für spätere Prüfung merken
-                global _product_404_cache
-                if url not in _product_404_cache:
-                    _product_404_cache[url] = {
-                        "last_checked": 0,
-                        "attempts": 0
-                    }
-                
-                logger.info(f"✅ Direkte Produkt-URL hinzugefügt: {url}")
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
-        # Prüfe zuerst die Prioritäts-URLs (schneller Weg)
-        for url in priority_urls:
-            try:
-                logger.debug(f"Teste Prioritäts-URL: {url}")
-                response = requests.get(url, headers=headers, timeout=10)
-                if response.status_code == 200:
-                    valid_urls.append(url)
-                    logger.info(f"✅ Prioritäts-URL gefunden: {url}")
-            except Exception:
-                logger.warning(f"Konnte nicht auf Prioritäts-URL zugreifen: {url}")
-                pass
-        
-        # Wenn keine Prioritäts-URLs funktionieren, Fallbacks verwenden
-        if not valid_urls:
-            logger.warning("Keine Prioritäts-URLs funktionieren, verwende Fallbacks")
-            return fallback_urls
-        
-        # Wenn genug Priority-URLs gefunden wurden (mindestens 3), dann reicht das
-        if len(valid_urls) >= 3:
-            logger.info(f"🔍 {len(valid_urls)} Prioritäts-URLs gefunden, überspringe weitere Suche")
-            return valid_urls
-        
-        # Hauptseiten-Scan nur durchführen, wenn wir noch nicht genug URLs haben
+        # Hauptseite abrufen
         main_url = "https://tcgviert.com"
         
-        try:
-            response = requests.get(main_url, headers=headers, timeout=10)
-            if response.status_code != 200:
-                logger.warning(f"⚠️ Fehler beim Abrufen der Hauptseite: Status {response.status_code}")
-                if valid_urls:
-                    return valid_urls
-                return fallback_urls
+        response = requests.get(main_url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.warning(f"⚠️ Fehler beim Abrufen der Hauptseite: Status {response.status_code}")
+            return priority_urls
                 
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            # Finde alle Links
-            collection_urls = []
-            for link in soup.find_all("a", href=True):
-                href = link["href"]
-                if "/collections/" in href and "product" not in href:
-                    # Vollständige URL erstellen
-                    full_url = f"{main_url}{href}" if href.startswith("/") else href
-                    
-                    # Priorisiere relevante URLs
-                    if any(term in href.lower() for term in ["pokemon", "vorbestell"]):
-                        if full_url not in valid_urls:
-                            valid_urls.append(full_url)
-                    else:
-                        collection_urls.append(full_url)
-            
-            # Füge Haupt-Collection-URL immer hinzu (alle Produkte)
-            all_products_url = f"{main_url}/collections/all"
-            if all_products_url not in valid_urls:
-                valid_urls.append(all_products_url)
-                
-        except Exception as e:
-            logger.error(f"Fehler beim Abrufen der Hauptseite: {e}")
-            if valid_urls:
-                return valid_urls
-            return fallback_urls
+        soup = BeautifulSoup(response.text, "html.parser")
         
+        # Finde alle Links
+        for link in soup.find_all("a", href=True):
+            href = link["href"]
+            if "/collections/" in href and "product" not in href:
+                # Vollständige URL erstellen
+                full_url = f"{main_url}{href}" if href.startswith("/") else href
+                
+                # Priorisiere relevante URLs
+                if any(term in href.lower() for term in ["pokemon", "vorbestell"]):
+                    if full_url not in valid_urls:
+                        valid_urls.append(full_url)
+        
+        # Füge Haupt-Collection-URL immer hinzu (alle Produkte)
+        all_products_url = f"{main_url}/collections/all"
+        if all_products_url not in valid_urls:
+            valid_urls.append(all_products_url)
+            
+        # Wenn keine gültigen URLs gefunden wurden, verwende Priority-URLs
+        if not valid_urls:
+            return priority_urls
+            
         return valid_urls
         
     except Exception as e:
-        logger.error(f"❌ Fehler bei der Collection-URL-Entdeckung: {e}", exc_info=True)
-        return ["https://tcgviert.com/collections/all"]  # Fallback zur Alle-Produkte-Seite
+        logger.error(f"❌ Fehler bei der Collection-URL-Entdeckung: {e}")
+        return priority_urls
 
 def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False):
     """
-    JSON-Scraper für tcgviert.com mit verbesserter Produkttyp-Filterung und Effizienz
+    JSON-Scraper für tcgviert.com mit verbesserter Produkttyp-Filterung
+    
+    :return: Tuple (new_matches, all_products)
     """
     new_matches = []
-    all_products = []  # Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
+    all_products = []
     
-    # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
+    # Extrahiere den Produkttyp aus dem ersten Suchbegriff
     search_product_type = None
     if keywords_map:
         sample_search_term = list(keywords_map.keys())[0]
         search_product_type = extract_product_type_from_text(sample_search_term)
-        logger.debug(f"🔍 Suche nach Produkttyp mittels JSON-API: '{search_product_type}'")
     
     try:
-        # Versuche zuerst den JSON-Endpunkt mit kürzerem Timeout
-        response = requests.get("https://tcgviert.com/products.json", timeout=8)
+        # Versuche den JSON-Endpunkt
+        response = requests.get("https://tcgviert.com/products.json", timeout=10)
         if response.status_code != 200:
             logger.warning("⚠️ API antwortet nicht mit Status 200")
             return [], []
@@ -475,28 +332,25 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
         logger.info(f"🔍 {len(products)} Produkte zum Prüfen gefunden (JSON)")
         
         # Relevante Produkte filtern
-        # Optimiert: Nur filtern, nicht alles ausgeben
         relevant_products = []
         for product in products:
             title = product["title"]
             # Produkttyp aus dem Titel extrahieren
             product_type = extract_product_type_from_text(title)
             
-            # Nur Produkte, die in der Suche sind und vom richtigen Typ (nur wenn es Displays im Suchbegriff gibt)
+            # Nur Produkte, die in der Suche sind und vom richtigen Typ
             is_relevant = False
-            for search_term in keywords_map.keys():
+            for search_term, tokens in keywords_map.items():
                 search_term_type = extract_product_type_from_text(search_term)
                 
                 # Wenn wir nach Display suchen, nur Displays berücksichtigen
                 if search_term_type == "display" and product_type != "display":
                     continue
                 
-                # Erweitern: Generalisierte Relevanzprüfung
-                # Präpare Ausschlusslisten für die Serienprüfung
+                # Prüfe auf Ausschlusslisten
                 exclusion_sets = load_exclusion_sets()
                 
                 # Wenn wir nach einem bestimmten Suchbegriff und Typ suchen, prüfe Relevanz
-                tokens = keywords_map.get(search_term, [])
                 if is_keyword_in_text(tokens, title, log_level='None'):
                     # Wenn relevant, prüfe auf Ausschlusslisten
                     should_exclude = False
@@ -515,40 +369,35 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
         
         logger.info(f"🔍 {len(relevant_products)} relevante Produkte gefunden")
         
-        # Falls keine relevanten Produkte direkt gefunden wurden, prüfe alle
-        if not relevant_products:
-            # Suche nach Display-Produkten in allen Produkten, wenn nach Display gesucht wird
-            if search_product_type == "display":
-                for product in products:
-                    title = product["title"]
-                    product_type = extract_product_type_from_text(title)
-                    
-                    # Nur Displays hinzufügen
-                    if product_type == "display":
-                        for search_term, tokens in keywords_map.items():
-                            if is_keyword_in_text(tokens, title, log_level='None'):
-                                relevant_products.append(product)
-                                break
-            
-            # Wenn immer noch nichts gefunden, verwende alle Produkte
-            if not relevant_products:
-                relevant_products = products
+        # Falls keine relevanten Produkte direkt gefunden wurden
+        if not relevant_products and search_product_type == "display":
+            # Suche nach Display-Produkten in allen Produkten
+            for product in products:
+                title = product["title"]
+                product_type = extract_product_type_from_text(title)
+                
+                # Nur Displays hinzufügen
+                if product_type == "display":
+                    for search_term, tokens in keywords_map.items():
+                        if is_keyword_in_text(tokens, title, log_level='None'):
+                            relevant_products.append(product)
+                            break
         
-        # Set für Deduplizierung von gefundenen Produkten innerhalb eines Durchlaufs
+        # Set für Deduplizierung
         found_product_ids = set()
                 
         for product in relevant_products:
             title = product["title"]
             handle = product["handle"]
             
-            # Erstelle eine eindeutige ID basierend auf den Produktinformationen
+            # Erstelle eine eindeutige ID
             product_id = create_product_id(title)
             
-            # Deduplizierung innerhalb eines Durchlaufs
+            # Deduplizierung
             if product_id in found_product_ids:
                 continue
             
-            # Prüfe jeden Suchbegriff gegen den Produkttitel mit reduziertem Logging
+            # Prüfe jeden Suchbegriff gegen den Produkttitel
             matched_term = None
             for search_term, tokens in keywords_map.items():
                 # Extrahiere Produkttyp aus Suchbegriff und Titel
@@ -559,13 +408,13 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
                 if search_term_type == "display" and title_product_type != "display":
                     continue
                 
-                # Strikte Keyword-Prüfung ohne übermäßiges Logging
+                # Strikte Keyword-Prüfung
                 if is_keyword_in_text(tokens, title, log_level='None'):
                     matched_term = search_term
                     break
             
             if matched_term:
-                # Preis aus der ersten Variante extrahieren, falls vorhanden
+                # Preis aus der ersten Variante extrahieren
                 price = "Preis unbekannt"
                 if product.get("variants") and len(product["variants"]) > 0:
                     price = f"{product['variants'][0].get('price', 'N/A')}€"
@@ -577,6 +426,12 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
                         available = True
                         break
                 
+                # URL erstellen
+                url = f"https://tcgviert.com/products/{handle}"
+                
+                # Füge URL zum permanenten Cache hinzu
+                add_url_to_cache(url, title, matched_term, available, price)
+                
                 # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
                 should_notify, is_back_in_stock = update_product_status(
                     product_id, available, seen, out_of_stock
@@ -585,19 +440,6 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
                 if should_notify and (not only_available or available):
                     # Status-Text erstellen
                     status_text = get_status_text(available, is_back_in_stock)
-                    
-                    # URL erstellen
-                    url = f"https://tcgviert.com/products/{handle}"
-                    
-                    # Produkt-URL zum 404-Cache hinzufügen, wenn es nicht verfügbar ist
-                    # Dies sorgt dafür, dass wir auch nach 404-Fehlern diese URL überwachen
-                    if not available:
-                        global _product_404_cache
-                        if url not in _product_404_cache:
-                            _product_404_cache[url] = {
-                                "last_checked": time.time(),
-                                "attempts": 0
-                            }
                     
                     # Produkt-Informationen für Batch-Benachrichtigung
                     product_type = extract_product_type_from_text(title)
@@ -625,122 +467,37 @@ def scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available=False)
 
 def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=False):
     """
-    HTML-Scraper für tcgviert.com mit verbesserter Produkttyp-Prüfung und Effizienz
+    HTML-Scraper für tcgviert.com mit verbesserter Produkttyp-Prüfung
+    
+    :return: Tuple (new_matches, all_products)
     """
     logger.info("🔄 Starte HTML-Scraping für tcgviert.com")
     new_matches = []
-    all_products = []  # Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
-    
-    # Extrahiere den Produkttyp aus dem ersten Suchbegriff (meistens "display")
-    search_product_type = None
-    if keywords_map:
-        sample_search_term = list(keywords_map.keys())[0]
-        search_product_type = extract_product_type_from_text(sample_search_term)
-        logger.debug(f"🔍 Suche nach Produkttyp mittels HTML: '{search_product_type}'")
+    all_products = []
     
     # Cache für bereits verarbeitete Links
     processed_links = set()
     
-    # Set für Deduplizierung von gefundenen Produkten innerhalb eines Durchlaufs
+    # Set für Deduplizierung
     found_product_ids = set()
     
     for url in urls:
-        # Überprüfe, ob es sich um eine direkte Produkt-URL handelt
-        is_product_url = '/products/' in url
-        
         try:
             logger.info(f"🔍 Durchsuche {url}")
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
+            headers = get_default_headers()
             
-            try:
-                response = requests.get(url, headers=headers, timeout=10)
-                if response.status_code != 200:
-                    logger.warning(f"⚠️ Fehler beim Abrufen von {url}: Status {response.status_code}")
-                    
-                    # 404-URLs für spätere Überprüfungen speichern
-                    if response.status_code == 404 and is_product_url:
-                        global _product_404_cache
-                        if url not in _product_404_cache:
-                            _product_404_cache[url] = {
-                                "last_checked": time.time(),
-                                "attempts": 0
-                            }
-                            logger.info(f"📌 404-URL für spätere Überprüfung gespeichert: {url}")
-                    continue
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"⚠️ Fehler beim Abrufen von {url}: {e}")
+            # Verwende den verbesserten Request-Handler
+            success, soup, status_code, error = get_page_content(
+                url,
+                headers=headers,
+                verify_ssl=True,
+                timeout=15
+            )
+            
+            if not success:
+                logger.warning(f"⚠️ Fehler beim Abrufen von {url}: {error}")
                 continue
             
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            # Wenn es sich um eine direkte Produkt-URL handelt, diese direkt verarbeiten
-            if is_product_url:
-                # Extrahiere Titel
-                title_elem = soup.find('h1', {'class': 'product-single__title'}) or soup.find('h1')
-                if not title_elem:
-                    continue
-                
-                title = title_elem.text.strip()
-                product_url = url
-                
-                # Erstelle eine eindeutige ID
-                product_id = create_product_id(title)
-                
-                # Prüfe jeden Suchbegriff gegen den Titel
-                matched_term = None
-                for search_term, tokens in keywords_map.items():
-                    # Extrahiere Produkttyp aus Suchbegriff und Titel
-                    search_term_type = extract_product_type_from_text(search_term)
-                    title_product_type = extract_product_type_from_text(title)
-                    
-                    # Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
-                    if search_term_type == "display" and title_product_type != "display":
-                        continue
-                    
-                    # Strikte Keyword-Prüfung
-                    if is_keyword_in_text(tokens, title, log_level='None'):
-                        matched_term = search_term
-                        break
-                
-                if matched_term and product_id not in found_product_ids:
-                    # Verwende das neue Modul zur Verfügbarkeitsprüfung
-                    is_available, price, status_text = detect_availability(soup, product_url)
-                    
-                    # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
-                    should_notify, is_back_in_stock = update_product_status(
-                        product_id, is_available, seen, out_of_stock
-                    )
-                    
-                    if should_notify and (not only_available or is_available):
-                        # Status-Text aktualisieren, wenn Produkt wieder verfügbar ist
-                        if is_back_in_stock:
-                            status_text = "🎉 Wieder verfügbar!"
-                        
-                        # Produkt-Informationen für Batch-Benachrichtigung
-                        product_type = extract_product_type_from_text(title)
-                        
-                        product_data = {
-                            "title": title,
-                            "url": product_url,
-                            "price": price,
-                            "status_text": status_text,
-                            "is_available": is_available,
-                            "matched_term": matched_term,
-                            "product_type": product_type,
-                            "shop": "tcgviert.com"
-                        }
-                        
-                        all_products.append(product_data)
-                        new_matches.append(product_id)
-                        found_product_ids.add(product_id)
-                        logger.info(f"✅ Neuer Treffer gefunden (direkte Produkt-URL): {title} - {status_text}")
-                
-                # Bei direkter Produkt-URL keine weitere Verarbeitung nötig
-                continue
-            
-            # Verbesserte Produktkarten-Erkennung für Shopify-Layout
             # Versuche verschiedene CSS-Selektoren für Produktkarten
             product_selectors = [
                 ".product-card", 
@@ -775,20 +532,10 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                         continue
                     
                     # Prüfe ob es sich um Produktlinks handelt
-                    is_product_link = ("/products/" in href or 
-                                      "/product/" in href or 
-                                      "detail" in href)
+                    is_product_link = "/products/" in href
                     
                     # Prüfe ob der Link zu Pokémon-Produkten führt
-                    is_pokemon_link = ("pokemon" in href.lower() or 
-                                      "pokemon" in text.lower())
-                    
-                    # Generische Relevanzprüfung für beliebige Produkte
-                    is_relevant = False
-                    for search_term, tokens in keywords_map.items():
-                        if is_keyword_in_text(tokens, text, log_level='None') or is_keyword_in_text(tokens, href, log_level='None'):
-                            is_relevant = True
-                            break
+                    is_pokemon_link = "pokemon" in href.lower() or "pokemon" in text.lower()
                     
                     # Vollständige URL erstellen
                     if not href.startswith('http'):
@@ -801,101 +548,89 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                         continue
                     
                     # Links mit Produktinformationen bevorzugen
-                    if (is_product_link and is_pokemon_link) or is_relevant:
+                    if (is_product_link and is_pokemon_link):
                         relevant_links.append((product_url, text))
                         processed_links.add(product_url)
                 
                 # Verarbeite relevante Links
                 for product_url, text in relevant_links:
-                    # Erstelle eine eindeutige ID
-                    product_id = create_product_id(text)
+                    # Produktdetailseite abrufen
+                    success, detail_soup, status_code, error = get_page_content(
+                        product_url,
+                        headers=headers,
+                        verify_ssl=True,
+                        timeout=15
+                    )
                     
-                    # Deduplizierung innerhalb eines Durchlaufs
+                    if not success:
+                        continue
+                    
+                    # Titel aus der Detailseite extrahieren
+                    title_elem = detail_soup.find('h1', {'class': 'product-single__title'}) or detail_soup.find('h1')
+                    if not title_elem:
+                        continue
+                    
+                    title = title_elem.text.strip()
+                    
+                    # Erstelle eine eindeutige ID
+                    product_id = create_product_id(title)
+                    
+                    # Deduplizierung
                     if product_id in found_product_ids:
                         continue
                     
-                    # Prüfe jeden Suchbegriff gegen den Linktext
+                    # Prüfe jeden Suchbegriff gegen den Titel
                     matched_term = None
                     for search_term, tokens in keywords_map.items():
-                        # Extrahiere Produkttyp aus Suchbegriff und Linktext
+                        # Extrahiere Produkttyp aus Suchbegriff und Titel
                         search_term_type = extract_product_type_from_text(search_term)
-                        link_product_type = extract_product_type_from_text(text)
+                        title_product_type = extract_product_type_from_text(title)
                         
-                        # Wenn nach einem Display gesucht wird, aber der Link keins ist, überspringen
-                        if search_term_type == "display" and link_product_type != "display":
+                        # Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
+                        if search_term_type == "display" and title_product_type != "display":
                             continue
                         
                         # Strikte Keyword-Prüfung
-                        if is_keyword_in_text(tokens, text, log_level='None'):
+                        if is_keyword_in_text(tokens, title, log_level='None'):
                             matched_term = search_term
                             break
                     
                     if matched_term:
-                        try:
-                            # Verfügbarkeit prüfen
-                            try:
-                                detail_response = requests.get(product_url, headers=headers, timeout=8)
-                                if detail_response.status_code != 200:
-                                    # 404-URLs für spätere Überprüfungen speichern
-                                    if detail_response.status_code == 404 and '/products/' in product_url:
-                                        if product_url not in _product_404_cache:
-                                            _product_404_cache[product_url] = {
-                                                "last_checked": time.time(),
-                                                "attempts": 0
-                                            }
-                                            logger.info(f"📌 404-URL für spätere Überprüfung gespeichert: {product_url}")
-                                    continue
-                                detail_soup = BeautifulSoup(detail_response.text, "html.parser")
-                            except requests.exceptions.RequestException:
-                                continue
+                        # Verfügbarkeit prüfen
+                        is_available, price, status_text = detect_availability(detail_soup, product_url)
+                        
+                        # Füge URL zum permanenten Cache hinzu
+                        add_url_to_cache(product_url, title, matched_term, is_available, price)
                             
-                            # Wenn Detailseite geladen werden konnte, Titel aus der Detailseite extrahieren
-                            detail_title = detail_soup.find("title")
-                            if detail_title:
-                                detail_title_text = detail_title.text.strip()
-                                # Erneute Prüfung auf korrekte Produkttypübereinstimmung
-                                detail_product_type = extract_product_type_from_text(detail_title_text)
-                                if search_term_type == "display" and detail_product_type != "display":
-                                    continue
-                                
-                                # Wenn Titel verfügbar ist, verwende diesen für die Nachricht
-                                text = detail_title_text
+                        # Aktualisiere Produkt-Status
+                        should_notify, is_back_in_stock = update_product_status(
+                            product_id, is_available, seen, out_of_stock
+                        )
+                        
+                        if should_notify and (not only_available or is_available):
+                            # Status anpassen wenn wieder verfügbar
+                            if is_back_in_stock:
+                                status_text = "🎉 Wieder verfügbar!"
                             
-                            # Verfügbarkeit prüfen
-                            is_available, price, status_text = detect_availability(detail_soup, product_url)
-                                
-                            # Aktualisiere Produkt-Status
-                            should_notify, is_back_in_stock = update_product_status(
-                                product_id, is_available, seen, out_of_stock
-                            )
+                            # Produkt-Informationen für Batch-Benachrichtigung
+                            product_type = extract_product_type_from_text(title)
                             
-                            if should_notify and (not only_available or is_available):
-                                # Status anpassen wenn wieder verfügbar
-                                if is_back_in_stock:
-                                    status_text = "🎉 Wieder verfügbar!"
-                                
-                                # Produkt-Informationen für Batch-Benachrichtigung
-                                product_type = extract_product_type_from_text(text)
-                                
-                                product_data = {
-                                    "title": text,
-                                    "url": product_url,
-                                    "price": price,
-                                    "status_text": status_text,
-                                    "is_available": is_available,
-                                    "matched_term": matched_term,
-                                    "product_type": product_type,
-                                    "shop": "tcgviert.com"
-                                }
-                                
-                                all_products.append(product_data)
-                                new_matches.append(product_id)
-                                found_product_ids.add(product_id)
-                                logger.info(f"✅ Neuer Treffer gefunden (HTML-Link): {text} - {status_text}")
-                        except Exception as e:
-                            logger.warning(f"Fehler beim Prüfen der Produktdetails: {e}")
+                            product_data = {
+                                "title": title,
+                                "url": product_url,
+                                "price": price,
+                                "status_text": status_text,
+                                "is_available": is_available,
+                                "matched_term": matched_term,
+                                "product_type": product_type,
+                                "shop": "tcgviert.com"
+                            }
+                            
+                            all_products.append(product_data)
+                            new_matches.append(product_id)
+                            found_product_ids.add(product_id)
+                            logger.info(f"✅ Neuer Treffer gefunden (HTML-Link): {title} - {status_text}")
                 
-                # Nächste URL
                 continue
             
             # Verarbeite die gefundenen Produktkarten
@@ -920,9 +655,6 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                 
                 title = title_elem.text.strip()
                 
-                # Frühe Prüfung auf relevante Produkte - Filter nach Produktart
-                title_product_type = extract_product_type_from_text(title)
-                
                 # Link extrahieren
                 link_elem = product.find("a", href=True)
                 if not link_elem:
@@ -937,18 +669,19 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                     
                 processed_links.add(product_url)
                 
-                # Erstelle eine eindeutige ID basierend auf den Produktinformationen
+                # Erstelle eine eindeutige ID
                 product_id = create_product_id(title)
                 
-                # Deduplizierung innerhalb eines Durchlaufs
+                # Deduplizierung
                 if product_id in found_product_ids:
                     continue
                 
-                # Prüfe jeden Suchbegriff gegen den Produkttitel
+                # Prüfe jeden Suchbegriff gegen den Titel
                 matched_term = None
                 for search_term, tokens in keywords_map.items():
                     # Extrahiere Produkttyp aus Suchbegriff und Titel
                     search_term_type = extract_product_type_from_text(search_term)
+                    title_product_type = extract_product_type_from_text(title)
                     
                     # Wenn nach einem Display gesucht wird, aber der Titel keins ist, überspringen
                     if search_term_type == "display" and title_product_type != "display":
@@ -962,36 +695,26 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
                 if matched_term:
                     try:
                         # Besuche Produktdetailseite für genaue Verfügbarkeitsprüfung
-                        try:
-                            detail_response = requests.get(product_url, headers=headers, timeout=8)
-                            if detail_response.status_code != 200:
-                                # 404-URLs für spätere Überprüfungen speichern
-                                if detail_response.status_code == 404 and '/products/' in product_url:
-                                    if product_url not in _product_404_cache:
-                                        _product_404_cache[product_url] = {
-                                            "last_checked": time.time(),
-                                            "attempts": 0
-                                        }
-                                        logger.info(f"📌 404-URL für spätere Überprüfung gespeichert: {product_url}")
-                                continue
-                            detail_soup = BeautifulSoup(detail_response.text, "html.parser")
-                        except requests.exceptions.RequestException:
+                        success, detail_soup, status_code, error = get_page_content(
+                            product_url,
+                            headers=headers,
+                            verify_ssl=True,
+                            timeout=15
+                        )
+                        
+                        if not success:
                             continue
                         
                         # Nochmal den Titel aus der Detailseite extrahieren (ist oft genauer)
-                        detail_title = detail_soup.find("title")
+                        detail_title = detail_soup.find('h1', {'class': 'product-single__title'}) or detail_soup.find('h1')
                         if detail_title:
-                            detail_title_text = detail_title.text.strip()
-                            # Erneute Prüfung auf korrekte Produkttypübereinstimmung
-                            detail_product_type = extract_product_type_from_text(detail_title_text)
-                            if search_term_type == "display" and detail_product_type != "display":
-                                continue
-                            
-                            # Wenn Titel verfügbar ist, verwende diesen für die Nachricht
-                            title = detail_title_text
+                            title = detail_title.text.strip()
                         
-                        # Verwende das neue Modul zur Verfügbarkeitsprüfung
+                        # Verwende das Availability-Modul zur Verfügbarkeitsprüfung
                         is_available, price, status_text = detect_availability(detail_soup, product_url)
+                        
+                        # Füge URL zum permanenten Cache hinzu
+                        add_url_to_cache(product_url, title, matched_term, is_available, price)
                             
                         # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
                         should_notify, is_back_in_stock = update_product_status(
@@ -1029,59 +752,82 @@ def scrape_tcgviert_html(urls, keywords_map, seen, out_of_stock, only_available=
     
     return new_matches, all_products
 
-# Generische Version für Anpassung an andere Webseiten
-def generic_scrape_product(url, product_title, product_url, price, status, matched_term, seen, out_of_stock, new_matches, all_products, site_id="generic", is_available=True):
+def scrape_tcgviert(keywords_map, seen, out_of_stock, only_available=False):
     """
-    Generische Funktion zur Verarbeitung gefundener Produkte für beliebige Websites
+    Hauptfunktion, die den Scraping-Prozess für tcgviert.com koordiniert.
+    Kombiniert JSON-API und HTML-Scraping Methoden und implementiert
+    ein robustes Cache-System, das gefundene Produkt-URLs dauerhaft speichert.
     
-    :param url: URL der aktuellen Seite
-    :param product_title: Produkttitel
-    :param product_url: Produkt-URL 
-    :param price: Produktpreis
-    :param status: Status-Text für die Nachricht
-    :param matched_term: Übereinstimmender Suchbegriff
-    :param seen: Set mit bereits gemeldeten Produkten
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :param seen: Set mit bereits gesehenen Produkttiteln
     :param out_of_stock: Set mit ausverkauften Produkten
-    :param new_matches: Liste der neu gefundenen Produkt-IDs
-    :param all_products: Liste für alle gefundenen Produkte (für sortierte Benachrichtigung)
-    :param site_id: ID der Website (für Produkt-ID-Erstellung)
-    :param is_available: Ob das Produkt verfügbar ist (True/False)
-    :return: None
+    :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
+    :return: Liste der neuen Treffer
     """
-    # Erstelle eine eindeutige ID basierend auf den Produktinformationen
-    product_id = create_product_id(product_title, base_id=site_id)
+    logger.info("🌐 Starte Scraper für tcgviert.com")
     
-    # Extrahiere Produkttyp aus Suchbegriff und Produkttitel
-    search_term_type = extract_product_type_from_text(matched_term)
-    product_type = extract_product_type_from_text(product_title)
+    json_matches = []
+    html_matches = []
+    cache_matches = []
+    all_products = []  # Liste für alle gefundenen Produkte
     
-    # Wenn nach einem Display gesucht wird, aber das Produkt keins ist, überspringen
-    if search_term_type == "display" and product_type != "display":
-        logger.debug(f"Produkttyp-Konflikt: Suche nach Display, aber Produkt ist '{product_type}': {product_title}")
-        return
-    
-    # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
-    should_notify, is_back_in_stock = update_product_status(
-        product_id, is_available, seen, out_of_stock
-    )
-    
-    if should_notify:
-        # Status-Text aktualisieren, wenn Produkt wieder verfügbar ist
-        if is_back_in_stock:
-            status = "🎉 Wieder verfügbar!"
+    # SCHRITT 1: Zuerst den Cache überprüfen - schnellster Weg
+    try:
+        cache_matches, cache_products = check_cached_products(keywords_map, seen, out_of_stock, only_available)
         
-        # Produkt-Informationen für Batch-Benachrichtigung
-        product_data = {
-            "title": product_title,
-            "url": product_url,
-            "price": price,
-            "status_text": status,
-            "is_available": is_available,
-            "matched_term": matched_term,
-            "product_type": product_type,
-            "shop": site_id
-        }
+        # Deduplizierung für die gefundenen Produkte
+        found_product_ids = set()
+        for product in cache_products:
+            product_id = create_product_id(product["title"])
+            if product_id not in found_product_ids:
+                all_products.append(product)
+                found_product_ids.add(product_id)
+                
+        if cache_matches:
+            logger.info(f"✅ {len(cache_matches)} Produkte im Cache aktualisiert")
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Cache-Überprüfen: {e}", exc_info=True)
+    
+    # SCHRITT 2: JSON-API Scraping versuchen - schneller als HTML-Parsing
+    try:
+        json_matches, json_products = scrape_tcgviert_json(keywords_map, seen, out_of_stock, only_available)
         
-        all_products.append(product_data)
-        new_matches.append(product_id)
-        logger.info(f"✅ Neuer Treffer gefunden ({site_id}): {product_title} - {status}")
+        # Deduplizierung für die gefundenen Produkte
+        found_product_ids = set()
+        for product in json_products:
+            product_id = create_product_id(product["title"])
+            if product_id not in found_product_ids:
+                all_products.append(product)
+                found_product_ids.add(product_id)
+    except Exception as e:
+        logger.error(f"❌ Fehler beim JSON-Scraping: {e}", exc_info=True)
+    
+    # SCHRITT 3: HTML-Scraping nur durchführen, wenn JSON weniger als 3 Ergebnisse liefert
+    if len(json_matches) < 3:
+        try:
+            # Hauptseite scrapen, um die richtigen Collection-URLs zu finden
+            main_page_urls = discover_collection_urls()
+            if main_page_urls:
+                html_matches, html_products = scrape_tcgviert_html(main_page_urls, keywords_map, seen, out_of_stock, only_available)
+                
+                # Deduplizierung für die gefundenen Produkte
+                found_product_ids = set()
+                for product in html_products:
+                    product_id = create_product_id(product["title"])
+                    if product_id not in found_product_ids:
+                        all_products.append(product)
+                        found_product_ids.add(product_id)
+        except Exception as e:
+            logger.error(f"❌ Fehler beim HTML-Scraping: {e}", exc_info=True)
+    else:
+        logger.info(f"🔍 JSON-Scraping lieferte bereits {len(json_matches)} Treffer - HTML-Scraping übersprungen")
+    
+    # Kombiniere eindeutige Ergebnisse
+    all_matches = list(set(json_matches + html_matches + cache_matches))
+    logger.info(f"✅ Insgesamt {len(all_matches)} einzigartige Treffer gefunden")
+    
+    # Sende Benachrichtigungen sortiert nach Verfügbarkeit
+    if all_products:
+        send_batch_notification(all_products)
+    
+    return all_matches
