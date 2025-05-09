@@ -1,7 +1,7 @@
 """
 Spezieller Scraper für games-island.eu mit IP-Blockade-Umgehung durch:
 1. Verwendung von cloudflare-freundlichen Headern
-2. Proxy-Rotation-Unterstützung (optional)
+2. Korrekten URL-Mustern von games-island.eu
 3. Anti-Bot-Detection-Maßnahmen
 """
 
@@ -49,8 +49,8 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     """
     logger.info("🌐 Starte speziellen Scraper für games-island.eu mit Anti-IP-Blocking")
     
-    # Verwende direktes Produkt-Scraping statt Suche, wenn die Website blockiert
-    logger.info("🔍 Verwende direkte Produktlinks statt Suche (umgeht Cloudflare)")
+    # Verwende direktes Kategorie-Scraping statt Suche, wenn die Website blockiert
+    logger.info("🔍 Verwende direkte Kategorie-Navigation statt Suche (umgeht Cloudflare)")
     
     # Optimierte/reduzierte Liste von Suchbegriffen
     search_terms = get_optimized_search_terms(keywords_map)
@@ -60,8 +60,8 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     product_list = load_cached_product_urls()
     if not product_list:
         # Wenn kein Cache, versuche mit optimierten URLs
-        logger.info("🔄 Kein Produkt-Cache gefunden, verwende vordefinierte URLs")
-        product_list = get_predefined_product_urls()
+        logger.info("🔄 Kein Produkt-Cache gefunden, verwende Kategorie-Navigation")
+        product_list = fetch_products_from_categories()
     
     logger.info(f"🔍 {len(product_list)} bekannte Produkt-URLs zum Scannen")
     
@@ -85,7 +85,7 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
             
             logger.info(f"🔍 Prüfe Produkt-URL ({processed_count+1}/{len(product_list)}): {product_url}")
             
-            # Versuche, die Produktdetails mit Proxy-Rotation zu holen
+            # Versuche, die Produktdetails zu holen
             details = get_product_details(product_url, search_terms)
             
             if not details:
@@ -276,66 +276,149 @@ def save_product_cache(cache_data, cache_file="data/games_island_cache.json"):
         logger.error(f"❌ Fehler beim Speichern des Produkt-Caches: {e}")
         return False
 
-def get_predefined_product_urls():
+def fetch_products_from_categories():
     """
-    Erstellt eine Liste von vordefinierten Produkt-URLs basierend auf bekannten URL-Mustern
+    Fetcht Produkte aus den bekannten Pokemon-Kategorien bei games-island.eu
     
     :return: Liste mit Produkt-URL-Daten
     """
-    base_url = "https://games-island.eu"
-    
-    # Bekannte Produktpfade mit Mustern für Pokémon-Produkte
-    product_paths = [
-        # Set-spezifische Pfade für das aktuelle Set
-        "/Pokemon/Pokemon-Karmesin-Purpur-Reisegefaehrten-Serie-9",
-        "/Pokemon/Pokemon-Karmesin-Purpur-Reisegefaehrten-Booster-Display-36-Booster-deutsch",
-        "/Pokemon/Pokemon-Scarlet-Violet-Journey-Together-Series-9",
-        "/Pokemon/Pokemon-Scarlet-Violet-Journey-Together-Booster-Display-36-Booster-english",
-        "/Pokemon/Pokemon-Karmesin-Purpur-Reisegefaehrten-Elite-Trainer-Box",
-        "/Pokemon/Pokemon-Scarlet-Violet-Journey-Together-Elite-Trainer-Box",
-        
-        # Allgemeine Pokémon-Pfade
-        "/Pokemon",
-        "/Pokemon-Displays",
-        "/Pokemon-Boxen",
-        "/Pokemon-Booster",
-        "/Neu-eingetroffen"  # Neue Produkte könnten auch relevant sein
+    # Bekannte Kategorie-URLs für Pokemon-Produkte
+    category_urls = [
+        "https://games-island.eu/pokemon",
+        "https://games-island.eu/pokemon/pokemon-displays",
+        "https://games-island.eu/pokemon/pokemon-einzelbooster",
+        "https://games-island.eu/pokemon/pokemon-boxen",
+        "https://games-island.eu/neu-eingetroffen"  # Neue Produkte
     ]
     
-    # Erweitere die Basis-URLs mit möglichen Produkt-IDs (Heuristik)
-    product_ids = [
-        # Hypothetische Produkt-IDs basierend auf typischen Mustern
-        "pokemon-karmesin-purpur-reisegefaehrten-booster-display",
-        "pokemon-karmesin-purpur-reisegefaehrten-elite-trainer-box",
-        "pokemon-scarlet-violet-journey-together-booster-display",
-        "pokemon-scarlet-violet-journey-together-elite-trainer-box",
-        "pokemon-sv09-journey-together-booster-display",
-        "pokemon-kp09-reisegefaehrten-booster-display"
-    ]
-    
-    # Zusammenführen der Pfade und IDs zu vollständigen URLs
     product_urls = []
+    all_found_products = {}  # Dictionary zur Deduplizierung
     
-    # Pfade zuerst hinzufügen
-    for path in product_paths:
-        product_urls.append({
-            'url': f"{base_url}{path}",
-            'title': ''  # Wird später gefüllt
-        })
+    for category_url in category_urls:
+        try:
+            # Zufällige Pause zwischen Kategoriebesuchen
+            time.sleep(3 + random.uniform(1, 3))
+            
+            logger.info(f"🔍 Durchsuche Kategorie: {category_url}")
+            
+            # Verwende Cloud-freundliche Header
+            headers = get_cloudflare_friendly_headers()
+            
+            # Verwende Session für bessere Performance und Cookie-Handling
+            session = requests.Session()
+            session.headers.update(headers)
+            
+            # Abrufen der Kategorieseite
+            response = session.get(
+                category_url,
+                timeout=LONG_TIMEOUT,
+                allow_redirects=True
+            )
+            
+            if response.status_code != 200:
+                logger.warning(f"⚠️ HTTP-Fehlercode {response.status_code} für {category_url}")
+                continue
+                
+            # Parsen mit BeautifulSoup
+            soup = BeautifulSoup(response.content, "html.parser")
+            
+            # Finde alle Produktlinks in dieser Kategorie
+            category_products = extract_product_links_from_category(soup, category_url)
+            
+            for product in category_products:
+                product_url = product.get('url')
+                product_title = product.get('title', '')
+                
+                # Nur eindeutige URLs hinzufügen
+                if product_url and product_url not in all_found_products:
+                    all_found_products[product_url] = {
+                        'url': product_url,
+                        'title': product_title
+                    }
+                    
+            logger.info(f"✅ {len(category_products)} Produkte in Kategorie {category_url} gefunden")
+            
+        except Exception as e:
+            logger.error(f"❌ Fehler beim Scrapen der Kategorie {category_url}: {e}")
     
-    # Produkt-IDs als direkte URLs
-    for pid in product_ids:
-        product_urls.append({
-            'url': f"{base_url}/produkt/{pid}",
-            'title': ''
-        })
+    # Konvertiere das Dictionary in eine Liste
+    for url, data in all_found_products.items():
+        product_urls.append(data)
+        
+    logger.info(f"✅ Insgesamt {len(product_urls)} eindeutige Produkte aus Kategorien extrahiert")
     
-    logger.info(f"🔍 {len(product_urls)} vordefinierte Produkt-URLs erstellt")
     return product_urls
+
+def extract_product_links_from_category(soup, category_url):
+    """
+    Extrahiert Produktlinks aus einer Kategorieseite
+    
+    :param soup: BeautifulSoup-Objekt der Kategorieseite
+    :param category_url: URL der Kategorieseite für Basis-URLs
+    :return: Liste mit Produkt-URL-Daten
+    """
+    products = []
+    
+    # Bekannte Selektoren für Produktelemente bei games-island.eu
+    product_item_selectors = [
+        ".product-item-info",  # Standard
+        ".product.item",       # Alternative
+        ".product-items .item" # Fallback
+    ]
+    
+    # Probiere verschiedene Selektoren
+    product_items = []
+    for selector in product_item_selectors:
+        items = soup.select(selector)
+        if items:
+            product_items = items
+            break
+    
+    # Falls keine Produkte gefunden wurden, versuche einen alternativen Ansatz
+    if not product_items:
+        # Suche nach allen Links, die auf Produktseiten führen könnten
+        for link in soup.find_all("a", href=True):
+            href = link["href"]
+            if any(segment in href for segment in ["/pokemon/", "product/"]):
+                title_elem = link.select_one("span.product-item-name, .product-name, .name")
+                title = title_elem.get_text().strip() if title_elem else link.get_text().strip()
+                
+                # Prüfe auf "Pokemon" im Titel
+                if "pokemon" in title.lower() or "pokémon" in title.lower():
+                    products.append({
+                        "url": href if href.startswith("http") else urljoin(category_url, href),
+                        "title": title
+                    })
+    
+    # Verarbeite gefundene Produktelemente
+    for item in product_items:
+        # Suche nach dem Link und dem Titel
+        link = item.select_one("a.product-item-link, a.product-name, a[title], a.name")
+        if not link:
+            continue
+            
+        href = link.get("href", "")
+        if not href:
+            continue
+            
+        # Extrahiere den Titel
+        title = link.get("title") or link.get_text().strip()
+        
+        # Absoluten Link erstellen
+        product_url = href if href.startswith("http") else urljoin(category_url, href)
+        
+        # Nur Pokemon-Produkte hinzufügen
+        if "pokemon" in title.lower() or "pokémon" in title.lower():
+            products.append({
+                "url": product_url,
+                "title": title
+            })
+    
+    return products
 
 def get_product_details(url, search_terms):
     """
-    Holt Produktdetails mit Proxy-Rotation und Cloud-freundlichen Headern
+    Holt Produktdetails mit Cloud-freundlichen Headern
     
     :param url: Produkt-URL
     :param search_terms: Liste mit Suchbegriffen zur Relevanzprüfung
@@ -353,14 +436,8 @@ def get_product_details(url, search_terms):
     # Verwende Cloud-freundliche Header
     headers = get_cloudflare_friendly_headers()
     
-    # Proxies verwenden, falls aktiviert
-    proxies = get_random_proxy() if USE_PROXIES and PROXIES else None
-    
     # Verwende Session für bessere Performance und Cookie-Handling
     session = requests.Session()
-    if proxies:
-        session.proxies.update(proxies)
-    
     session.headers.update(headers)
     
     retry_count = 0
@@ -372,10 +449,8 @@ def get_product_details(url, search_terms):
                 logger.info(f"🔄 Wiederholungsversuch {retry_count}/{MAX_RETRY_ATTEMPTS} in {wait_time:.1f} Sekunden")
                 time.sleep(wait_time)
                 
-                # Bei Wiederholungen: Header und ggf. Proxy rotieren
+                # Bei Wiederholungen: Header rotieren
                 session.headers.update(get_cloudflare_friendly_headers())
-                if USE_PROXIES and PROXIES:
-                    session.proxies.update(get_random_proxy())
             
             # Zweistufiger Ansatz: Zuerst GET, dann verarbeiten
             response = session.get(
@@ -451,7 +526,7 @@ def extract_title(soup):
     """
     # Verschiedene Muster für Titel-Elemente probieren
     title_selectors = [
-        "h1.product-title", "h1.product-name", "h1.title", "h1",
+        "h1.product-title", "h1.product-name", "h1.title", "h1.page-title", "h1",
         ".product-title h1", ".product-name h1", ".product-detail h1",
         "title"  # Fallback auf <title>-Tag
     ]
@@ -551,21 +626,6 @@ def get_cloudflare_friendly_headers():
         "sec-ch-ua": '"Not A;Brand";v="99", "Chromium";v="96", "Google Chrome";v="96"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"'
-    }
-
-def get_random_proxy():
-    """
-    Wählt einen zufälligen Proxy aus der Liste
-    
-    :return: Dictionary mit Proxy-Konfiguration
-    """
-    if not PROXIES:
-        return None
-        
-    proxy = random.choice(PROXIES)
-    return {
-        "http": proxy,
-        "https": proxy
     }
 
 def url_to_id(url):
