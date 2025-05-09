@@ -1,6 +1,8 @@
 """
-Spezieller Scraper für games-island.eu mit robusteren HTTP-Anfragen
-und besserer Fehlerbehandlung für die spezifischen Timeout-Probleme dieser Seite.
+Spezieller Scraper für games-island.eu mit IP-Blockade-Umgehung durch:
+1. Verwendung von cloudflare-freundlichen Headern
+2. Proxy-Rotation-Unterstützung (optional)
+3. Anti-Bot-Detection-Maßnahmen
 """
 
 import requests
@@ -8,25 +10,36 @@ import logging
 import re
 import random
 import time
+import json
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote_plus
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text
 from utils.stock import update_product_status
 from utils.availability import detect_availability
-from utils.requests_handler import get_default_headers
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
 
-# Konstanten für den Scraper
-MAX_RETRY_ATTEMPTS = 5
-STATIC_DELAY = 3  # Feste Pause zwischen Anfragen in Sekunden
-LONG_TIMEOUT = 30  # Längerer Timeout für games-island.eu
+# Konstanten für den Scraper mit konservativeren Einstellungen
+MAX_RETRY_ATTEMPTS = 4
+STATIC_DELAY = 4  # Feste Pause zwischen Anfragen in Sekunden erhöht
+LONG_TIMEOUT = 40  # Längerer Timeout für games-island.eu
 BACKOFF_FACTOR = 2  # Faktor für exponentielles Backoff
+
+# Proxy-Konfiguration (optional)
+USE_PROXIES = False  # Auf True setzen, wenn Proxies verfügbar sind
+PROXIES = [
+    # Format: "http://user:pass@ip:port" oder "http://ip:port"
+    # Beispiel: "http://123.45.67.89:8080"
+]
+
+# Lokaler Cache für gefundene Produkte um wiederholte Anfragen zu vermeiden
+PRODUCT_CACHE = {}
+CACHE_EXPIRY = 24 * 60 * 60  # 24 Stunden in Sekunden
 
 def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     """
-    Spezialisierter Scraper für games-island.eu mit angepasster Timeout-Behandlung
+    Spezialisierter Scraper für games-island.eu mit Anti-IP-Blocking-Maßnahmen
     
     :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
     :param seen: Set mit bereits gesehenen Produkttiteln
@@ -34,61 +47,116 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
     :return: Liste der neuen Treffer
     """
-    logger.info("🌐 Starte speziellen Scraper für games-island.eu")
+    logger.info("🌐 Starte speziellen Scraper für games-island.eu mit Anti-IP-Blocking")
+    
+    # Verwende direktes Produkt-Scraping statt Suche, wenn die Website blockiert
+    logger.info("🔍 Verwende direkte Produktlinks statt Suche (umgeht Cloudflare)")
+    
+    # Optimierte/reduzierte Liste von Suchbegriffen
+    search_terms = get_optimized_search_terms(keywords_map)
+    logger.info(f"🔍 Verwende {len(search_terms)} optimierte Suchbegriffe")
+    
+    # Versuche zuerst vorbereitete Produkt-URLs
+    product_list = load_cached_product_urls()
+    if not product_list:
+        # Wenn kein Cache, versuche mit optimierten URLs
+        logger.info("🔄 Kein Produkt-Cache gefunden, verwende vordefinierte URLs")
+        product_list = get_predefined_product_urls()
+    
+    logger.info(f"🔍 {len(product_list)} bekannte Produkt-URLs zum Scannen")
+    
     new_matches = []
-    all_products = []  # Liste für alle gefundenen Produkte
+    all_products = []
     
-    # Extraktion der Suchbegriffe in ein Format, das sich besser für die direkte Suche eignet
-    search_terms = []
-    product_types = {}
+    # Zufällige Reihenfolge und erhöhte Pausen, um Bot-Erkennung zu reduzieren
+    random.shuffle(product_list)
     
-    for search_term, tokens in keywords_map.items():
-        clean_term = re.sub(r'\s+', ' ', search_term.lower().strip())
-        if clean_term not in search_terms:
-            search_terms.append(clean_term)
-            # Extrahiere den Produkttyp aus dem Suchbegriff für spätere Filterung
-            product_types[clean_term] = extract_product_type_from_text(clean_term)
-    
-    # Sortiere nach Länge (kürzere Terme könnten mehr Ergebnisse liefern)
-    search_terms.sort(key=len)
-    logger.info(f"🔍 Verwende folgende Suchbegriffe für games-island.eu: {search_terms}")
-    
-    # Direkte Suche mit Suchbegriffen
-    for term in search_terms:
+    # Versuche, alle bekannten Produkt-URLs zu scannen
+    processed_count = 0
+    for product_data in product_list:
         try:
-            logger.info(f"🔍 Suche nach Term: '{term}'")
-            
-            # Sichere Verzögerung vor jeder Anfrage
-            time.sleep(STATIC_DELAY + random.uniform(0.5, 1.5))
-            
-            # Erstelle URL für die Suche
-            search_url = f"https://games-island.eu/search?q={quote_plus(term)}"
-            
-            # Angepasste Anfrage mit robusterem Timeout und Retry-Mechanismus
-            products = search_games_island(search_url, term, product_types.get(term))
-            
-            if products:
-                logger.info(f"✅ {len(products)} potentielle Produkte gefunden für '{term}'")
+            product_url = product_data.get('url')
+            if not product_url:
+                continue
                 
-                # Verarbeite die gefundenen Produkte
-                for product in products:
-                    try:
-                        product_data = process_product(
-                            product, term, seen, out_of_stock, only_available
-                        )
-                        
-                        if product_data and isinstance(product_data, dict):
-                            all_products.append(product_data)
-                            new_matches.append(product_data.get("product_id"))
-                    except Exception as e:
-                        logger.error(f"❌ Fehler bei der Verarbeitung eines Produkts: {e}")
-                        continue
-            else:
-                logger.info(f"⚠️ Keine Produkte gefunden für Suchbegriff '{term}'")
+            # Zufällige Pausen zwischen Anfragen (3-7 Sekunden)
+            delay = STATIC_DELAY + random.uniform(1, 4)
+            time.sleep(delay)
+            
+            logger.info(f"🔍 Prüfe Produkt-URL ({processed_count+1}/{len(product_list)}): {product_url}")
+            
+            # Versuche, die Produktdetails mit Proxy-Rotation zu holen
+            details = get_product_details(product_url, search_terms)
+            
+            if not details:
+                logger.warning(f"⚠️ Keine Details für {product_url}")
+                processed_count += 1
+                continue
+                
+            # Prüfe, ob das Produkt für unsere Suche relevant ist
+            title = details.get('title', '')
+            if not title or not is_product_relevant(title, search_terms):
+                processed_count += 1
+                continue
+                
+            # Produktdaten vervollständigen
+            details['url'] = product_url
+            
+            # Update Produkt-Status
+            product_id = create_product_id(title)
+            is_available = details.get('is_available', False)
+            
+            # Status aktualisieren und prüfen, ob Benachrichtigung gesendet werden soll
+            should_notify, is_back_in_stock = update_product_status(
+                product_id, is_available, seen, out_of_stock
+            )
+            
+            # Bei "nur verfügbare" Option überspringen, wenn nicht verfügbar
+            if only_available and not is_available:
+                processed_count += 1
+                continue
+                
+            if should_notify:
+                # Zusätzliche Daten für die Benachrichtigung
+                status_text = details.get('status_text', '')
+                if is_back_in_stock:
+                    status_text = "🎉 Wieder verfügbar!"
+                
+                product_type = extract_product_type_from_text(title)
+                
+                # Bestimme, welcher Suchbegriff getroffen wurde
+                matched_term = find_matching_search_term(title, keywords_map)
+                
+                product_data = {
+                    "title": title,
+                    "url": product_url,
+                    "price": details.get('price', 'Preis nicht verfügbar'),
+                    "status_text": status_text,
+                    "is_available": is_available,
+                    "matched_term": matched_term,
+                    "product_type": product_type,
+                    "shop": "games-island.eu",
+                    "product_id": product_id
+                }
+                
+                all_products.append(product_data)
+                new_matches.append(product_id)
+                logger.info(f"✅ Neuer Treffer bei games-island.eu: {title} - {status_text}")
+            
+            processed_count += 1
+            
+            # Regelmäßiges Speichern des Caches
+            if processed_count % 5 == 0:
+                save_product_cache(PRODUCT_CACHE)
                 
         except Exception as e:
-            logger.error(f"❌ Fehler bei der Suche nach '{term}': {e}")
+            logger.error(f"❌ Fehler bei der Verarbeitung: {e}")
+            processed_count += 1
             continue
+    
+    # Speichere den aktualisierten Cache
+    if PRODUCT_CACHE:
+        save_product_cache(PRODUCT_CACHE)
     
     # Sende Benachrichtigungen für gefundene Produkte
     if all_products:
@@ -96,236 +164,270 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     
     return new_matches
 
-def search_games_island(search_url, search_term, product_type=None):
+def get_optimized_search_terms(keywords_map):
     """
-    Führt eine Suchanfrage auf games-island.eu durch mit angepasstem Retry-Mechanismus
+    Erstellt eine optimierte Liste von Suchbegriffen (kürzer für bessere Kompatibilität)
     
-    :param search_url: URL für die Suchanfrage
-    :param search_term: Der verwendete Suchbegriff
-    :param product_type: Optional - Produkttyp für bessere Filterung
-    :return: Liste mit gefundenen Produkten
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :return: Liste mit optimierten Suchbegriffen
     """
-    headers = get_random_headers()
-    products = []
-    retry_count = 0
+    search_terms = []
     
-    while retry_count < MAX_RETRY_ATTEMPTS:
-        try:
-            # Exponentielles Backoff mit Jitter
-            if retry_count > 0:
-                wait_time = BACKOFF_FACTOR ** retry_count + random.uniform(0.5, 1.5)
-                logger.info(f"🔄 Wiederholungsversuch {retry_count}/{MAX_RETRY_ATTEMPTS} in {wait_time:.1f} Sekunden")
-                time.sleep(wait_time)
-            
-            # Verwende eine manuelle Session mit angepassten Parametern
-            session = requests.Session()
-            session.headers.update(headers)
-            
-            # Setze den Timeout höher für games-island.eu
-            response = session.get(search_url, timeout=LONG_TIMEOUT, verify=True)
-            
-            if response.status_code != 200:
-                logger.warning(f"⚠️ HTTP-Fehlercode {response.status_code} für {search_url}")
-                retry_count += 1
-                continue
-            
-            # Parsen mit BeautifulSoup
-            soup = BeautifulSoup(response.content, "html.parser")
-            
-            # Muster für verschiedene Arten von Produktlisten auf der Website
-            product_containers = []
-            
-            # Primäre Produktlisten-Container versuchen
-            product_containers = soup.select('.product-items .product-item, .product-grid .product-item')
-            
-            # Wenn primäre Selektoren nichts finden, versuche Alternative
-            if not product_containers:
-                product_containers = soup.select('.item-product, .product, [data-product-id]')
-            
-            # Wenn immer noch nichts gefunden wurde, versuche generische Listen
-            if not product_containers:
-                product_containers = soup.select('.grid-view .item, .list-view .item')
-            
-            # Letzter Versuch: Alle Links untersuchen, die auf Produktseiten zeigen könnten
-            if not product_containers:
-                logger.warning("⚠️ Keine Produktcontainer gefunden, versuche alle Links zu prüfen")
-                for link in soup.select('a[href*="/product/"]'):
-                    heading = link.find('h3') or link.find('h2') or link.find('span', class_='name')
-                    if heading:
-                        product_containers.append(link.parent)
-            
-            # Verarbeite die gefundenen Produktcontainer
-            for container in product_containers:
-                try:
-                    # Extrahiere grundlegende Produktinformationen
-                    title_elem = (container.select_one('.product-title, .item-title, .title, h2, h3') or 
-                                 container.find('h4') or container.find('h5'))
-                    
-                    # Wenn kein Titel gefunden wird, überspringe dieses Produkt
-                    if not title_elem:
-                        continue
-                    
-                    title = title_elem.get_text().strip()
-                    
-                    # Prüfe, ob der Titel zum Suchbegriff passt
-                    if not is_relevant_product(title, search_term, product_type):
-                        continue
-                    
-                    # Suche nach dem Produktlink
-                    link_elem = (title_elem.parent if title_elem.parent.name == 'a' else 
-                                title_elem.find('a') or container.find('a', href=True))
-                    
-                    if not link_elem or not link_elem.get('href'):
-                        continue
-                    
-                    # Vollständige URL erstellen
-                    product_url = link_elem['href']
-                    if not product_url.startswith(('http://', 'https://')):
-                        product_url = urljoin("https://games-island.eu", product_url)
-                    
-                    # Füge das Produkt hinzu
-                    products.append({
-                        'title': title,
-                        'url': product_url,
-                        'search_term': search_term
-                    })
-                    
-                except Exception as e:
-                    logger.debug(f"Fehler bei der Extraktion der Produktdaten: {e}")
-                    continue
-            
-            # Wenn Produkte gefunden wurden, Schleife beenden
-            if products:
-                logger.info(f"🔍 {len(products)} potentielle Produkte aus Suche extrahiert")
-                return products
-            
-            # Wenn keine Produkte gefunden wurden, aber die Anfrage erfolgreich war
-            retry_count += 1
-            logger.warning(f"⚠️ Keine passenden Produkte in der Antwort gefunden (Versuch {retry_count})")
-            
-        except requests.exceptions.Timeout:
-            retry_count += 1
-            logger.warning(f"⚠️ Timeout bei der Anfrage an {search_url} (Versuch {retry_count})")
-        except requests.exceptions.RequestException as e:
-            retry_count += 1
-            logger.warning(f"⚠️ Fehler bei der Anfrage an {search_url}: {e} (Versuch {retry_count})")
-        except Exception as e:
-            retry_count += 1
-            logger.warning(f"⚠️ Unerwarteter Fehler: {e} (Versuch {retry_count})")
+    # Extrahiere Kernbegriffe (vermeide zu lange Suchbegriffe)
+    core_terms = []
+    for term in keywords_map.keys():
+        # Extrahiere "Journey Together" oder "Reisegefährten" als Kernbegriffe
+        if "journey together" in term.lower():
+            core_terms.append("journey together")
+        if "reisegefährten" in term.lower():
+            core_terms.append("reisegefährten")
     
-    # Wenn alle Versuche fehlgeschlagen sind
-    logger.error(f"❌ Alle {MAX_RETRY_ATTEMPTS} Versuche für {search_url} fehlgeschlagen")
-    return []
+    # Deduplizieren
+    core_terms = list(set(core_terms))
+    
+    # Füge Kombinationen mit relevanten Produkttypen hinzu
+    product_types = ["display", "booster box", "36er", "elite trainer box", "etb"]
+    
+    for core in core_terms:
+        # Basis-Term hinzufügen
+        search_terms.append(core)
+        # Mit Produkttypen kombinieren
+        for ptype in product_types:
+            search_terms.append(f"{core} {ptype}")
+    
+    # Zusätzliche Codes für das Set
+    search_terms.extend(["kp09", "sv09"])
+    
+    return search_terms
 
-def process_product(product, search_term, seen, out_of_stock, only_available):
+def load_cached_product_urls(cache_file="data/games_island_cache.json"):
     """
-    Verarbeitet ein einzelnes Produkt mit angepasster Fehlerbehandlung
+    Lädt zuvor gefundene Produkt-URLs aus der Cache-Datei
     
-    :param product: Produktdaten aus der Suche
-    :param search_term: Der verwendete Suchbegriff
-    :param seen: Set mit bereits gesehenen Produkttiteln
-    :param out_of_stock: Set mit ausverkauften Produkten
-    :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
-    :return: Dictionary mit Produktdaten oder None bei Fehler
+    :param cache_file: Pfad zur Cache-Datei
+    :return: Liste mit Produkt-URL-Daten
     """
-    title = product.get('title', '')
-    url = product.get('url', '')
-    
-    if not title or not url:
-        return None
-    
     try:
-        # Spezielle Verzögerung zur Vermeidung von Rate-Limiting
-        time.sleep(STATIC_DELAY + random.uniform(1.0, 2.0))
+        import os
+        from pathlib import Path
         
-        logger.info(f"🔍 Prüfe Produkt: {title}")
+        # Stelle sicher, dass das Verzeichnis existiert
+        Path(os.path.dirname(cache_file)).mkdir(parents=True, exist_ok=True)
         
-        # Produktdetailseite mit angepasstem Retry-Mechanismus abrufen
-        success, detail_soup = fetch_product_page(url)
-        
-        if not success or not detail_soup:
-            logger.warning(f"⚠️ Konnte Produktdetails nicht abrufen für: {title}")
-            return None
-        
-        # Verwende das Availability-Modul für die Verfügbarkeitsprüfung
-        is_available, price, status_text = detect_availability(detail_soup, url)
-        
-        # Erstelle eindeutige Produkt-ID
-        product_id = create_product_id(title)
-        
-        # Status aktualisieren und prüfen, ob Benachrichtigung gesendet werden soll
-        should_notify, is_back_in_stock = update_product_status(
-            product_id, is_available, seen, out_of_stock
-        )
-        
-        # Bei "nur verfügbare" Option überspringen, wenn nicht verfügbar
-        if only_available and not is_available:
-            return None
-        
-        if should_notify:
-            # Status anpassen wenn wieder verfügbar
-            if is_back_in_stock:
-                status_text = "🎉 Wieder verfügbar!"
+        if os.path.exists(cache_file):
+            with open(cache_file, "r", encoding="utf-8") as f:
+                cache_data = json.load(f)
+                # Aktualisiere den globalen Cache
+                global PRODUCT_CACHE
+                PRODUCT_CACHE = cache_data
                 
-            # Extrahiere Produkttyp aus dem Titel
-            product_type = extract_product_type_from_text(title)
-            
-            # Produkt-Daten für die Benachrichtigung
-            product_data = {
-                "title": title,
-                "url": url,
-                "price": price,
-                "status_text": status_text,
-                "is_available": is_available,
-                "matched_term": search_term,
-                "product_type": product_type,
-                "shop": "games-island.eu",
-                "product_id": product_id
-            }
-            
-            logger.info(f"✅ Neuer Treffer bei games-island.eu: {title} - {status_text}")
-            return product_data
+                # Extrahiere relevante Produkt-Einträge
+                product_list = []
+                current_time = time.time()
+                
+                for product_id, data in cache_data.items():
+                    # Überspringe Metadaten-Einträge
+                    if product_id == "last_update":
+                        continue
+                        
+                    # Prüfe auf Verfall des Cache-Eintrags
+                    last_checked = data.get("last_checked", 0)
+                    if current_time - last_checked > CACHE_EXPIRY:
+                        continue
+                        
+                    product_list.append({
+                        'url': data.get('url', ''),
+                        'title': data.get('title', '')
+                    })
+                
+                logger.info(f"ℹ️ {len(product_list)} Produkte aus Cache geladen")
+                return product_list
         
-        return None
-    
+        logger.info("ℹ️ Keine Cache-Datei gefunden")
+        return []
     except Exception as e:
-        logger.error(f"❌ Fehler bei der Verarbeitung von {title}: {e}")
-        return None
+        logger.error(f"❌ Fehler beim Laden des Produkt-Caches: {e}")
+        return []
 
-def fetch_product_page(url):
+def save_product_cache(cache_data, cache_file="data/games_island_cache.json"):
     """
-    Ruft die Produktdetailseite mit verbesserter Fehlerbehandlung ab
+    Speichert gefundene Produkt-URLs in der Cache-Datei
     
-    :param url: URL der Produktdetailseite
-    :return: Tuple (success, soup)
+    :param cache_data: Cache-Daten als Dictionary
+    :param cache_file: Pfad zur Cache-Datei
+    :return: True bei Erfolg, False bei Fehler
     """
-    headers = get_random_headers()
+    try:
+        import os
+        from pathlib import Path
+        
+        # Stelle sicher, dass das Verzeichnis existiert
+        Path(os.path.dirname(cache_file)).mkdir(parents=True, exist_ok=True)
+        
+        # Aktualisiere Zeitstempel
+        cache_data["last_update"] = int(time.time())
+        
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"ℹ️ Produkt-Cache gespeichert mit {len(cache_data)-1} Einträgen")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Speichern des Produkt-Caches: {e}")
+        return False
+
+def get_predefined_product_urls():
+    """
+    Erstellt eine Liste von vordefinierten Produkt-URLs basierend auf bekannten URL-Mustern
+    
+    :return: Liste mit Produkt-URL-Daten
+    """
+    base_url = "https://games-island.eu"
+    
+    # Bekannte Produktpfade mit Mustern für Pokémon-Produkte
+    product_paths = [
+        # Set-spezifische Pfade für das aktuelle Set
+        "/Pokemon/Pokemon-Karmesin-Purpur-Reisegefaehrten-Serie-9",
+        "/Pokemon/Pokemon-Karmesin-Purpur-Reisegefaehrten-Booster-Display-36-Booster-deutsch",
+        "/Pokemon/Pokemon-Scarlet-Violet-Journey-Together-Series-9",
+        "/Pokemon/Pokemon-Scarlet-Violet-Journey-Together-Booster-Display-36-Booster-english",
+        "/Pokemon/Pokemon-Karmesin-Purpur-Reisegefaehrten-Elite-Trainer-Box",
+        "/Pokemon/Pokemon-Scarlet-Violet-Journey-Together-Elite-Trainer-Box",
+        
+        # Allgemeine Pokémon-Pfade
+        "/Pokemon",
+        "/Pokemon-Displays",
+        "/Pokemon-Boxen",
+        "/Pokemon-Booster",
+        "/Neu-eingetroffen"  # Neue Produkte könnten auch relevant sein
+    ]
+    
+    # Erweitere die Basis-URLs mit möglichen Produkt-IDs (Heuristik)
+    product_ids = [
+        # Hypothetische Produkt-IDs basierend auf typischen Mustern
+        "pokemon-karmesin-purpur-reisegefaehrten-booster-display",
+        "pokemon-karmesin-purpur-reisegefaehrten-elite-trainer-box",
+        "pokemon-scarlet-violet-journey-together-booster-display",
+        "pokemon-scarlet-violet-journey-together-elite-trainer-box",
+        "pokemon-sv09-journey-together-booster-display",
+        "pokemon-kp09-reisegefaehrten-booster-display"
+    ]
+    
+    # Zusammenführen der Pfade und IDs zu vollständigen URLs
+    product_urls = []
+    
+    # Pfade zuerst hinzufügen
+    for path in product_paths:
+        product_urls.append({
+            'url': f"{base_url}{path}",
+            'title': ''  # Wird später gefüllt
+        })
+    
+    # Produkt-IDs als direkte URLs
+    for pid in product_ids:
+        product_urls.append({
+            'url': f"{base_url}/produkt/{pid}",
+            'title': ''
+        })
+    
+    logger.info(f"🔍 {len(product_urls)} vordefinierte Produkt-URLs erstellt")
+    return product_urls
+
+def get_product_details(url, search_terms):
+    """
+    Holt Produktdetails mit Proxy-Rotation und Cloud-freundlichen Headern
+    
+    :param url: Produkt-URL
+    :param search_terms: Liste mit Suchbegriffen zur Relevanzprüfung
+    :return: Dictionary mit Produktdetails oder None bei Fehler
+    """
+    # Zuerst im Cache suchen
+    product_id = url_to_id(url)
+    if product_id in PRODUCT_CACHE:
+        cache_entry = PRODUCT_CACHE[product_id]
+        # Prüfe, ob der Cache-Eintrag noch gültig ist
+        if time.time() - cache_entry.get("last_checked", 0) < CACHE_EXPIRY:
+            logger.info(f"ℹ️ Verwende Cache-Eintrag für {url}")
+            return cache_entry
+    
+    # Verwende Cloud-freundliche Header
+    headers = get_cloudflare_friendly_headers()
+    
+    # Proxies verwenden, falls aktiviert
+    proxies = get_random_proxy() if USE_PROXIES and PROXIES else None
+    
+    # Verwende Session für bessere Performance und Cookie-Handling
+    session = requests.Session()
+    if proxies:
+        session.proxies.update(proxies)
+    
+    session.headers.update(headers)
+    
     retry_count = 0
-    
     while retry_count < MAX_RETRY_ATTEMPTS:
         try:
-            # Exponentielles Backoff mit Jitter
+            # Bei Wiederholungsversuchen: Exponentielles Backoff mit Jitter
             if retry_count > 0:
-                wait_time = BACKOFF_FACTOR ** retry_count + random.uniform(0.5, 1.5)
+                wait_time = BACKOFF_FACTOR ** retry_count + random.uniform(1.0, 3.0)
                 logger.info(f"🔄 Wiederholungsversuch {retry_count}/{MAX_RETRY_ATTEMPTS} in {wait_time:.1f} Sekunden")
                 time.sleep(wait_time)
+                
+                # Bei Wiederholungen: Header und ggf. Proxy rotieren
+                session.headers.update(get_cloudflare_friendly_headers())
+                if USE_PROXIES and PROXIES:
+                    session.proxies.update(get_random_proxy())
             
-            # Verwende eine manuelle Session mit angepassten Parametern
-            session = requests.Session()
-            session.headers.update(headers)
+            # Zweistufiger Ansatz: Zuerst GET, dann verarbeiten
+            response = session.get(
+                url,
+                timeout=LONG_TIMEOUT,
+                allow_redirects=True
+            )
             
-            # Höherer Timeout für Produktdetailseiten
-            response = session.get(url, timeout=LONG_TIMEOUT, verify=True)
-            
-            if response.status_code != 200:
+            # Prüfe auf Erfolg
+            if response.status_code == 200:
+                # Parsen mit BeautifulSoup
+                soup = BeautifulSoup(response.content, "html.parser")
+                
+                # Extrahiere den Titel
+                title = extract_title(soup)
+                
+                # Prüfe Relevanz
+                if not title or not is_product_relevant(title, search_terms):
+                    logger.info(f"ℹ️ Produkt nicht relevant: {title}")
+                    return None
+                
+                # Verwende das Availability-Modul für die Verfügbarkeitsprüfung
+                is_available, price, status_text = detect_availability(soup, url)
+                
+                # Erstelle Produktdetails
+                product_details = {
+                    "title": title,
+                    "price": price,
+                    "is_available": is_available,
+                    "status_text": status_text,
+                    "url": url,
+                    "last_checked": int(time.time())
+                }
+                
+                # In Cache speichern
+                PRODUCT_CACHE[product_id] = product_details
+                
+                return product_details
+                
+            elif response.status_code in [403, 429]:
+                # Cloudflare- oder Rate-Limiting-Probleme
+                logger.warning(f"⚠️ Anti-Bot-Schutz erkannt: Status {response.status_code} für {url}")
+                retry_count += 1
+                # Längere Wartezeit bei 403/429
+                time.sleep(5 + random.uniform(3, 7))
+                continue
+                
+            else:
                 logger.warning(f"⚠️ HTTP-Fehlercode {response.status_code} für {url}")
                 retry_count += 1
                 continue
-            
-            # Parsen mit BeautifulSoup
-            soup = BeautifulSoup(response.content, "html.parser")
-            return True, soup
-            
+                
         except requests.exceptions.Timeout:
             retry_count += 1
             logger.warning(f"⚠️ Timeout bei der Anfrage an {url} (Versuch {retry_count})")
@@ -336,26 +438,86 @@ def fetch_product_page(url):
             retry_count += 1
             logger.warning(f"⚠️ Unerwarteter Fehler: {e} (Versuch {retry_count})")
     
-    # Wenn alle Versuche fehlgeschlagen sind
+    # Alle Versuche fehlgeschlagen
     logger.error(f"❌ Alle {MAX_RETRY_ATTEMPTS} Versuche für {url} fehlgeschlagen")
-    return False, None
+    return None
 
-def get_random_headers():
+def extract_title(soup):
     """
-    Erstellt zufällige HTTP-Headers zur Vermeidung von Bot-Erkennung
+    Extrahiert den Titel aus der Produktseite
+    
+    :param soup: BeautifulSoup-Objekt
+    :return: Titel oder None wenn nicht gefunden
+    """
+    # Verschiedene Muster für Titel-Elemente probieren
+    title_selectors = [
+        "h1.product-title", "h1.product-name", "h1.title", "h1",
+        ".product-title h1", ".product-name h1", ".product-detail h1",
+        "title"  # Fallback auf <title>-Tag
+    ]
+    
+    for selector in title_selectors:
+        title_elem = soup.select_one(selector)
+        if title_elem:
+            title = title_elem.get_text().strip()
+            # Bereinige den Titel (entferne Shop-Namen, etc.)
+            title = re.sub(r'\s*[-|]\s*Games-Island.*$', '', title)
+            title = re.sub(r'\s*[-|–]\s*Jetzt kaufen.*$', '', title)
+            return title
+    
+    # Fallback auf Meta-Tags für den Titel
+    meta_title = soup.find("meta", property="og:title")
+    if meta_title and meta_title.get("content"):
+        title = meta_title["content"].strip()
+        title = re.sub(r'\s*[-|]\s*Games-Island.*$', '', title)
+        return title
+        
+    return None
+
+def is_product_relevant(title, search_terms):
+    """
+    Prüft, ob ein Produkttitel für die Suche relevant ist
+    
+    :param title: Produkttitel
+    :param search_terms: Liste mit Suchbegriffen
+    :return: True wenn relevant, False sonst
+    """
+    if not title:
+        return False
+        
+    title_lower = title.lower()
+    
+    # Grundlegende Relevanzprüfung für Pokemon-Produkte
+    if not any(term in title_lower for term in ["pokemon", "pokémon"]):
+        return False
+    
+    # Prüfe alle Suchbegriffe
+    for term in search_terms:
+        term_lower = term.lower()
+        # Tokenisiere den Suchbegriff für flexibleres Matching
+        tokens = term_lower.split()
+        
+        # Verwende die is_keyword_in_text-Funktion für besseres Matching
+        if is_keyword_in_text(tokens, title_lower, log_level='None'):
+            return True
+    
+    # Kein Treffer für Suchbegriffe
+    return False
+
+def get_cloudflare_friendly_headers():
+    """
+    Erstellt Cloudflare-freundliche HTTP-Headers mit zufälligem User-Agent
     
     :return: Dictionary mit HTTP-Headers
     """
     user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15",
+        # Desktop Browser
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36 Edg/90.0.818.66"
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.93 Safari/537.36 Edg/96.0.1054.43",
     ]
-    
-    # Zufällige User-Agent-Rotation
-    random_agent = random.choice(user_agents)
     
     # Länderspezifische Akzeptanz-Header für DE
     accept_language = "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7"
@@ -363,19 +525,21 @@ def get_random_headers():
     # Zufällige Referer von bekannten Webseiten
     referers = [
         "https://www.google.de/",
+        "https://www.google.com/",
         "https://www.bing.com/",
         "https://duckduckgo.com/",
         "https://www.pokemon.com/de/",
-        "https://www.pokemoncenter.com/"
+        "https://www.pokemoncenter.com/",
+        "https://games-island.eu/"  # Selbst-Referenzierung für mehr Natürlichkeit
     ]
-    random_referer = random.choice(referers)
     
+    # Cloudflare prüft diese Header besonders
     return {
-        "User-Agent": random_agent,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "User-Agent": random.choice(user_agents),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         "Accept-Language": accept_language,
         "Accept-Encoding": "gzip, deflate, br",
-        "Referer": random_referer,
+        "Referer": random.choice(referers),
         "DNT": "1",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
@@ -383,8 +547,36 @@ def get_random_headers():
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "cross-site",
         "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0"
+        "Cache-Control": "max-age=0",
+        "sec-ch-ua": '"Not A;Brand";v="99", "Chromium";v="96", "Google Chrome";v="96"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"'
     }
+
+def get_random_proxy():
+    """
+    Wählt einen zufälligen Proxy aus der Liste
+    
+    :return: Dictionary mit Proxy-Konfiguration
+    """
+    if not PROXIES:
+        return None
+        
+    proxy = random.choice(PROXIES)
+    return {
+        "http": proxy,
+        "https": proxy
+    }
+
+def url_to_id(url):
+    """
+    Konvertiert eine URL in eine eindeutige ID für den Cache
+    
+    :param url: URL
+    :return: Cache-ID
+    """
+    import hashlib
+    return hashlib.md5(url.encode()).hexdigest()
 
 def create_product_id(title, base_id="gamesisland"):
     """
@@ -400,7 +592,7 @@ def create_product_id(title, base_id="gamesisland"):
     # Sprache (DE/EN)
     if "deutsch" in title_lower or "(de)" in title_lower:
         language = "DE"
-    elif "english" in title_lower or "(en)" in title_lower:
+    elif "english" in title_lower or "(en)" in title_lower or "eng" in title_lower:
         language = "EN"
     else:
         language = "UNK"
@@ -426,63 +618,36 @@ def create_product_id(title, base_id="gamesisland"):
     
     return product_id
 
-def is_relevant_product(title, search_term, product_type=None):
+def find_matching_search_term(title, keywords_map):
     """
-    Prüft, ob ein Produkttitel relevant für den Suchbegriff ist
+    Findet den am besten passenden Suchbegriff für einen Produkttitel
     
     :param title: Produkttitel
-    :param search_term: Suchbegriff
-    :param product_type: Optional - Erwarteter Produkttyp
-    :return: True wenn relevant, False sonst
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :return: Passender Suchbegriff oder Standardwert
     """
-    if not title or not search_term:
-        return False
-    
     title_lower = title.lower()
-    search_term_lower = search_term.lower()
+    best_match = None
+    max_tokens = 0
     
-    # Prüfe grundlegende Relevanz mit Matcher-Funktion
-    tokens = search_term_lower.split()
-    if not is_keyword_in_text(tokens, title_lower, log_level='None'):
-        return False
-    
-    # Wenn ein bestimmter Produkttyp erwartet wird, prüfe ob er mit dem Titel übereinstimmt
-    if product_type and product_type != "unknown":
-        title_product_type = extract_product_type_from_text(title_lower)
+    for search_term, tokens in keywords_map.items():
+        # Prüfe, wie viele Tokens übereinstimmen
+        matching_tokens = sum(1 for token in tokens if token in title_lower)
         
-        # Bei speziellen Produkttypen sind wir strenger
-        if product_type in ["display", "etb", "ttb"]:
-            # Wenn Produkttyp nicht übereinstimmt, aber bestimmte Begriffe im Titel vorkommen
-            if title_product_type != product_type:
-                if product_type == "display":
-                    # Prüfe auf Display-spezifische Begriffe
-                    if not any(term in title_lower for term in ["display", "36er", "booster box", "36 booster"]):
-                        return False
-                elif product_type == "etb":
-                    # Prüfe auf ETB-spezifische Begriffe
-                    if not any(term in title_lower for term in ["etb", "elite trainer", "trainer box"]):
-                        return False
-                elif product_type == "ttb":
-                    # Prüfe auf TTB-spezifische Begriffe
-                    if not any(term in title_lower for term in ["ttb", "top trainer", "top-trainer"]):
-                        return False
+        if matching_tokens > max_tokens:
+            max_tokens = matching_tokens
+            best_match = search_term
     
-    # Grundlegende Relevanzprüfung für Pokemon-Produkte
-    if not any(term in title_lower for term in ["pokemon", "pokémon"]):
-        return False
+    # Wenn keine Übereinstimmung gefunden wurde, verwende einen Standardwert
+    if not best_match:
+        if "journey" in title_lower or "together" in title_lower:
+            best_match = "Journey Together display"
+        elif "reisegefährten" in title_lower:
+            best_match = "Reisegefährten display"
+        else:
+            best_match = "Pokemon Display"
     
-    # Ausschluss von nicht relevanten Sets/Produkten
-    exclusion_terms = [
-        "astral", "brilliant", "fusion", "stellar", "paldea", "karmesin", "purpur",
-        "silberne", "schatten", "gold", "scarlet", "violet", "paradox", "obsidian"
-    ]
-    
-    # Prüfe, ob der Titel einen der ausgeschlossenen Begriffe enthält, aber nicht im Suchbegriff enthalten ist
-    for term in exclusion_terms:
-        if term in title_lower and term not in search_term_lower:
-            return False
-    
-    return True
+    return best_match
 
 def send_batch_notifications(products):
     """Sendet Benachrichtigungen für gefundene Produkte"""
