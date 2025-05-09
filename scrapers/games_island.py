@@ -42,13 +42,12 @@ PROXIES = [
 PRODUCT_CACHE = {}
 CACHE_EXPIRY = 24 * 60 * 60  # 24 Stunden in Sekunden
 
-# Korrekte Kategorie-URLs für Games-Island.eu
-CATEGORY_URLS = [
-    "https://games-island.eu/Pokemon-Booster-Displays",
-    "https://games-island.eu/Pokemon-Booster-Displays-deutsch",
-    "https://games-island.eu/Pokemon-Booster-Displays-englisch",
-    "https://games-island.eu/Pokemon-Elite-Trainer-Box"
-]
+# Timeout-Schutz für Kategorien
+MAX_CATEGORY_ATTEMPTS = 2
+CATEGORY_FAIL_TIMEOUT = 300  # 5 Minuten in Sekunden
+
+# Fehlgeschlagene Kategorien speichern (URL -> Zeitstempel)
+FAILED_CATEGORIES = {}
 
 def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     """
@@ -71,7 +70,7 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     if not product_list:
         # Wenn kein Cache, versuche mit optimierten URLs
         logger.info("🔄 Kein Produkt-Cache gefunden, verwende Kategorie-Navigation")
-        product_list = fetch_products_from_categories()
+        product_list = fetch_products_from_categories(keywords_map)
     
     logger.info(f"🔍 {len(product_list)} bekannte Produkt-URLs zum Scannen")
     
@@ -285,16 +284,39 @@ def save_product_cache(cache_data, cache_file="data/games_island_cache.json"):
         logger.error(f"❌ Fehler beim Speichern des Produkt-Caches: {e}")
         return False
 
-def fetch_products_from_categories():
+def fetch_products_from_categories(keywords_map):
     """
     Fetcht Produkte aus den bekannten Pokemon-Kategorien bei games-island.eu
     
+    :param keywords_map: Dictionary mit Suchbegriffen
     :return: Liste mit Produkt-URL-Daten
     """
     product_urls = []
     all_found_products = {}  # Dictionary zur Deduplizierung
     
-    for category_url in CATEGORY_URLS:
+    # Prüfe ob nach ETB/Elite Trainer Box gesucht wird
+    etb_search = contains_etb_keywords(keywords_map)
+    
+    # Definiere Kategorie-URLs basierend auf Keywords
+    category_urls = [
+        "https://games-island.eu/Pokemon-Booster-Displays",
+        "https://games-island.eu/Pokemon-Booster-Displays-deutsch",
+        "https://games-island.eu/Pokemon-Booster-Displays-englisch"
+    ]
+    
+    # Füge Elite Trainer Box Kategorie hinzu, wenn danach gesucht wird
+    if etb_search:
+        category_urls.append("https://games-island.eu/Pokemon-Elite-Trainer-Box")
+        logger.info("🔍 Elite Trainer Box Keywords gefunden, durchsuche ETB-Kategorie")
+    
+    for category_url in category_urls:
+        # Überprüfe, ob diese Kategorie kürzlich fehlgeschlagen ist
+        if category_url in FAILED_CATEGORIES:
+            last_fail_time = FAILED_CATEGORIES[category_url]
+            if time.time() - last_fail_time < CATEGORY_FAIL_TIMEOUT:
+                logger.info(f"⏩ Überspringe kürzlich fehlgeschlagene Kategorie: {category_url}")
+                continue
+        
         try:
             # Zufällige Pause zwischen Kategoriebesuchen
             time.sleep(3 + random.uniform(1, 3))
@@ -308,16 +330,17 @@ def fetch_products_from_categories():
             session = requests.Session()
             session.headers.update(headers)
             
-            # Abrufen der Kategorieseite
+            # Abrufen der Kategorieseite mit verkleinertem Timeout
             response = session.get(
                 category_url,
-                timeout=LONG_TIMEOUT,
+                timeout=30,  # Verringert von 40 auf 30 Sekunden
                 allow_redirects=True,
                 verify=False
             )
             
             if response.status_code != 200:
                 logger.warning(f"⚠️ HTTP-Fehlercode {response.status_code} für {category_url}")
+                FAILED_CATEGORIES[category_url] = time.time()
                 continue
                 
             # Parsen mit BeautifulSoup
@@ -339,8 +362,15 @@ def fetch_products_from_categories():
                     
             logger.info(f"✅ {len(category_products)} Produkte in Kategorie {category_url} gefunden")
             
+        except requests.exceptions.Timeout:
+            logger.error(f"❌ Timeout beim Scrapen der Kategorie {category_url}")
+            FAILED_CATEGORIES[category_url] = time.time()
+        except requests.exceptions.ConnectionError:
+            logger.error(f"❌ Verbindungsfehler beim Scrapen der Kategorie {category_url}")
+            FAILED_CATEGORIES[category_url] = time.time()
         except Exception as e:
             logger.error(f"❌ Fehler beim Scrapen der Kategorie {category_url}: {e}")
+            FAILED_CATEGORIES[category_url] = time.time()
     
     # Konvertiere das Dictionary in eine Liste
     for url, data in all_found_products.items():
@@ -349,6 +379,22 @@ def fetch_products_from_categories():
     logger.info(f"✅ Insgesamt {len(product_urls)} eindeutige Produkte aus Kategorien extrahiert")
     
     return product_urls
+
+def contains_etb_keywords(keywords_map):
+    """
+    Prüft, ob nach ETB/Elite Trainer Box gesucht wird
+    
+    :param keywords_map: Dictionary mit Suchbegriffen
+    :return: True, wenn ETB-Suchbegriffe vorhanden sind
+    """
+    etb_patterns = ["etb", "elite trainer box", "elite-trainer", "trainer box"]
+    
+    for term in keywords_map.keys():
+        term_lower = term.lower()
+        if any(pattern in term_lower for pattern in etb_patterns):
+            return True
+        
+    return False
 
 def extract_product_links_from_category(soup, category_url):
     """
@@ -503,7 +549,7 @@ def get_product_details(url, search_terms, keywords_map):
             response = requests.get(
                 url,
                 headers=headers,
-                timeout=LONG_TIMEOUT,
+                timeout=30,  # Verringert von 40 auf 30 Sekunden
                 allow_redirects=True,
                 verify=False
             )
