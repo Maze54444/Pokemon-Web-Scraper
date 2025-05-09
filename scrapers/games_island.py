@@ -11,11 +11,16 @@ import re
 import random
 import time
 import json
+import warnings
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote_plus
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text
 from utils.stock import update_product_status
 from utils.availability import detect_availability
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+# Unterdrücke InsecureRequestWarning
+warnings.simplefilter('ignore', InsecureRequestWarning)
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
@@ -91,7 +96,7 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
             logger.info(f"🔍 Prüfe Produkt-URL ({processed_count+1}/{len(product_list)}): {product_url}")
             
             # Versuche, die Produktdetails zu holen
-            details = get_product_details(product_url, search_terms)
+            details = get_product_details(product_url, search_terms, keywords_map)
             
             if not details:
                 logger.warning(f"⚠️ Keine Details für {product_url}")
@@ -100,7 +105,7 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
                 
             # Prüfe, ob das Produkt für unsere Suche relevant ist
             title = details.get('title', '')
-            if not title or not is_product_relevant(title, search_terms):
+            if not title:
                 processed_count += 1
                 continue
                 
@@ -130,7 +135,7 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
                 product_type = extract_product_type_from_text(title)
                 
                 # Bestimme, welcher Suchbegriff getroffen wurde
-                matched_term = find_matching_search_term(title, keywords_map)
+                matched_term = details.get('matched_term', find_matching_search_term(title, keywords_map))
                 
                 product_data = {
                     "title": title,
@@ -178,32 +183,31 @@ def get_optimized_search_terms(keywords_map):
     """
     search_terms = []
     
-    # Extrahiere Kernbegriffe (vermeide zu lange Suchbegriffe)
-    core_terms = []
+    # Extrahiere alle Kernbegriffe aus den Suchbegriffen
     for term in keywords_map.keys():
-        # Extrahiere "Journey Together" oder "Reisegefährten" als Kernbegriffe
-        if "journey together" in term.lower():
-            core_terms.append("journey together")
-        if "reisegefährten" in term.lower():
-            core_terms.append("reisegefährten")
+        # Füge den Gesamtbegriff hinzu
+        search_terms.append(term.lower())
+        
+        # Füge alle Tokens hinzu, die länger als 3 Zeichen sind
+        for token in keywords_map[term]:
+            if len(token) > 3 and token not in search_terms:
+                search_terms.append(token)
     
-    # Deduplizieren
-    core_terms = list(set(core_terms))
-    
-    # Füge Kombinationen mit relevanten Produkttypen hinzu
+    # Extrahiere Produkttypen für kombinierte Suche
     product_types = ["display", "booster box", "36er", "elite trainer box", "etb"]
     
-    for core in core_terms:
-        # Basis-Term hinzufügen
-        search_terms.append(core)
-        # Mit Produkttypen kombinieren
-        for ptype in product_types:
-            search_terms.append(f"{core} {ptype}")
+    # Extrahiere Produktcodes (z.B. kp09, sv09)
+    product_codes = []
+    for term in search_terms:
+        code_match = re.search(r'(kp\d+|sv\d+)', term)
+        if code_match and code_match.group(0) not in product_codes:
+            product_codes.append(code_match.group(0))
     
-    # Zusätzliche Codes für das Set
-    search_terms.extend(["kp09", "sv09"])
+    # Füge Produktcodes explizit hinzu
+    search_terms.extend(product_codes)
     
-    return search_terms
+    # Entferne Duplikate und sortiere nach Länge (längere zuerst)
+    return sorted(list(set(search_terms)), key=len, reverse=True)
 
 def load_cached_product_urls(cache_file="data/games_island_cache.json"):
     """
@@ -462,12 +466,13 @@ def get_cloudflare_friendly_headers():
         "sec-ch-ua-platform": '"Windows"'
     }
 
-def get_product_details(url, search_terms):
+def get_product_details(url, search_terms, keywords_map):
     """
     Holt Produktdetails mit Cloud-freundlichen Headern
     
     :param url: Produkt-URL
     :param search_terms: Liste mit Suchbegriffen zur Relevanzprüfung
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
     :return: Dictionary mit Produktdetails oder None bei Fehler
     """
     # Zuerst im Cache suchen
@@ -511,8 +516,14 @@ def get_product_details(url, search_terms):
                 # Extrahiere den Titel
                 title = extract_title(soup)
                 
-                # Prüfe Relevanz
-                if not title or not is_product_relevant(title, search_terms):
+                if not title:
+                    logger.info(f"ℹ️ Kein Titel gefunden für {url}")
+                    return None
+                
+                # Prüfe Relevanz mit verbesserter Methode
+                matched_term = check_product_relevance(title, search_terms, keywords_map)
+                
+                if not matched_term:
                     logger.info(f"ℹ️ Produkt nicht relevant: {title}")
                     return None
                 
@@ -526,6 +537,7 @@ def get_product_details(url, search_terms):
                     "is_available": is_available,
                     "status_text": status_text,
                     "url": url,
+                    "matched_term": matched_term,
                     "last_checked": int(time.time())
                 }
                 
@@ -593,6 +605,69 @@ def extract_title(soup):
         
     return None
 
+def check_product_relevance(title, search_terms, keywords_map):
+    """
+    Verbesserte Prüfung, ob ein Produkttitel für die Suche relevant ist
+    
+    :param title: Produkttitel
+    :param search_terms: Liste mit Suchbegriffen
+    :param keywords_map: Original-Dictionary mit Suchbegriffen und ihren Tokens
+    :return: Passender Suchbegriff oder None wenn nicht relevant
+    """
+    if not title:
+        return None
+        
+    title_lower = title.lower()
+    
+    # Grundlegende Relevanzprüfung für Pokemon-Produkte
+    if not any(term in title_lower for term in ["pokemon", "pokémon"]):
+        return None
+    
+    # 1. Zunächst Produktcodes prüfen (kp09, sv09, etc.)
+    codes_in_title = re.findall(r'(kp\d+|sv\d+)', title_lower)
+    if codes_in_title:
+        for original_term, tokens in keywords_map.items():
+            term_lower = original_term.lower()
+            # Wenn ein Code im Titel und im Suchbegriff vorkommt
+            if any(code in term_lower for code in codes_in_title):
+                logger.debug(f"📌 Produkt relevant durch Produktcode-Match: {title}")
+                return original_term
+    
+    # 2. Direkte Prüfung mit is_keyword_in_text aber mit weniger strengem Matching
+    for original_term, tokens in keywords_map.items():
+        # Wenn mehr als die Hälfte der Tokens im Titel vorkommen
+        matching_tokens = sum(1 for token in tokens if token in title_lower)
+        if matching_tokens >= max(1, len(tokens) // 2):  # Mindestens 1 Token, sonst 50%
+            logger.debug(f"📌 Produkt relevant durch Token-Match: {matching_tokens}/{len(tokens)} für {original_term}")
+            return original_term
+    
+    # 3. Prüfung auf Produktset-Nummern (z.B. "9", "9.0") mit Karmesin & Purpur/Scarlet & Violet
+    set_num_match = re.search(r'(?:karmesin|purpur|scarlet|violet).*?(?:\d+(?:\.\d+)?|ix)', title_lower)
+    if set_num_match:
+        # Extrahiere die gefundene Setnummer
+        set_num = re.search(r'(\d+(?:\.\d+)?|ix)', set_num_match.group(0))
+        if set_num and (set_num.group(1) == "9" or set_num.group(1) == "9.0" or set_num.group(1) == "ix"):
+            # Finde einen passenden Suchbegriff aus keywords_map
+            for original_term in keywords_map.keys():
+                if any(code in original_term.lower() for code in ["sv09", "kp09"]):
+                    logger.debug(f"📌 Produkt relevant durch Set-Nummer-Match: {title}")
+                    return original_term
+    
+    # 4. Prüfung auf unversionierte Set-Namen
+    for original_term in keywords_map.keys():
+        term_lower = original_term.lower()
+        
+        # Entferne Produkttyp-Bezeichnung wie "display", "etb", etc.
+        clean_term = re.sub(r'\s+(display|box|tin|etb|ttb|blister)$', '', term_lower)
+        
+        # Prüfe, ob dieser bereinigte Suchbegriff im Titel vorkommt
+        if clean_term and len(clean_term) > 4 and clean_term in title_lower:
+            logger.debug(f"📌 Produkt relevant durch Set-Namen-Match: {clean_term} in {title}")
+            return original_term
+    
+    # Keine Übereinstimmung gefunden
+    return None
+
 def is_product_relevant(title, search_terms):
     """
     Prüft, ob ein Produkttitel für die Suche relevant ist
@@ -610,14 +685,31 @@ def is_product_relevant(title, search_terms):
     if not any(term in title_lower for term in ["pokemon", "pokémon"]):
         return False
     
-    # Prüfe alle Suchbegriffe
+    # Prüfe auf Produktcodes (kp09, sv09)
+    if any(re.search(r'kp0?9|sv0?9', title_lower) for term in search_terms):
+        return True
+    
+    # Prüfe auf Scarlet & Violet 9.0 / Karmesin & Purpur 9.0
+    if re.search(r'(?:karmesin|purpur|scarlet|violet).*?(?:9(?:\.0)?|ix)', title_lower):
+        return True
+    
+    # Prüfe alle Suchbegriffe mit weniger strengem Matching
     for term in search_terms:
         term_lower = term.lower()
+        
+        # Für kurze Suchbegriffe, direkt prüfen
+        if len(term_lower) <= 3:
+            if term_lower in title_lower:
+                return True
+            continue
+            
         # Tokenisiere den Suchbegriff für flexibleres Matching
         tokens = term_lower.split()
         
-        # Verwende die is_keyword_in_text-Funktion für besseres Matching
-        if is_keyword_in_text(tokens, title_lower, log_level='None'):
+        # Weniger strenges Matching: Wenn mindestens 50% der Tokens enthalten sind
+        min_tokens = max(1, len(tokens) // 2)  # Mindestens 1 Token, sonst 50%
+        matching_tokens = sum(1 for token in tokens if token in title_lower)
+        if matching_tokens >= min_tokens:
             return True
     
     # Kein Treffer für Suchbegriffe
@@ -695,12 +787,24 @@ def find_matching_search_term(title, keywords_map):
     
     # Wenn keine Übereinstimmung gefunden wurde, verwende einen Standardwert
     if not best_match:
-        if "journey" in title_lower or "together" in title_lower:
-            best_match = "Journey Together display"
-        elif "reisegefährten" in title_lower:
-            best_match = "Reisegefährten display"
-        else:
-            best_match = "Pokemon Display"
+        # Prüfe auf Produktcodes im Titel
+        code_match = re.search(r'(kp\d+|sv\d+)', title_lower)
+        if code_match:
+            code = code_match.group(0)
+            # Finde ersten passenden Suchbegriff mit diesem Code
+            for term in keywords_map.keys():
+                if code in term.lower():
+                    return term
+        
+        # Fallback zu generischem Match
+        for term in ["display", "etb", "ttb", "box"]:
+            if term in title_lower:
+                for search_term in keywords_map.keys():
+                    if term in search_term.lower():
+                        return search_term
+        
+        # Absoluter Fallback
+        return list(keywords_map.keys())[0] if keywords_map else "Pokemon Display"
     
     return best_match
 
