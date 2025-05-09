@@ -37,6 +37,14 @@ PROXIES = [
 PRODUCT_CACHE = {}
 CACHE_EXPIRY = 24 * 60 * 60  # 24 Stunden in Sekunden
 
+# Korrekte Kategorie-URLs für Games-Island.eu
+CATEGORY_URLS = [
+    "https://games-island.eu/Pokemon-Booster-Displays",
+    "https://games-island.eu/Pokemon-Booster-Displays-deutsch",
+    "https://games-island.eu/Pokemon-Booster-Displays-englisch",
+    "https://games-island.eu/Pokemon-Elite-Trainer-Box"
+]
+
 def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     """
     Spezialisierter Scraper für games-island.eu mit Anti-IP-Blocking-Maßnahmen
@@ -48,9 +56,6 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     :return: Liste der neuen Treffer
     """
     logger.info("🌐 Starte speziellen Scraper für games-island.eu mit Anti-IP-Blocking")
-    
-    # Verwende direktes Kategorie-Scraping statt Suche, wenn die Website blockiert
-    logger.info("🔍 Verwende direkte Kategorie-Navigation statt Suche (umgeht Cloudflare)")
     
     # Optimierte/reduzierte Liste von Suchbegriffen
     search_terms = get_optimized_search_terms(keywords_map)
@@ -282,19 +287,10 @@ def fetch_products_from_categories():
     
     :return: Liste mit Produkt-URL-Daten
     """
-    # Bekannte Kategorie-URLs für Pokemon-Produkte
-    category_urls = [
-        "https://games-island.eu/pokemon",
-        "https://games-island.eu/pokemon/pokemon-displays",
-        "https://games-island.eu/pokemon/pokemon-einzelbooster",
-        "https://games-island.eu/pokemon/pokemon-boxen",
-        "https://games-island.eu/neu-eingetroffen"  # Neue Produkte
-    ]
-    
     product_urls = []
     all_found_products = {}  # Dictionary zur Deduplizierung
     
-    for category_url in category_urls:
+    for category_url in CATEGORY_URLS:
         try:
             # Zufällige Pause zwischen Kategoriebesuchen
             time.sleep(3 + random.uniform(1, 3))
@@ -312,7 +308,8 @@ def fetch_products_from_categories():
             response = session.get(
                 category_url,
                 timeout=LONG_TIMEOUT,
-                allow_redirects=True
+                allow_redirects=True,
+                verify=False
             )
             
             if response.status_code != 200:
@@ -379,7 +376,7 @@ def extract_product_links_from_category(soup, category_url):
         # Suche nach allen Links, die auf Produktseiten führen könnten
         for link in soup.find_all("a", href=True):
             href = link["href"]
-            if any(segment in href for segment in ["/pokemon/", "product/"]):
+            if any(segment in href for segment in ["/Pokemon-", "product/"]):
                 title_elem = link.select_one("span.product-item-name, .product-name, .name")
                 title = title_elem.get_text().strip() if title_elem else link.get_text().strip()
                 
@@ -416,6 +413,55 @@ def extract_product_links_from_category(soup, category_url):
     
     return products
 
+def get_cloudflare_friendly_headers():
+    """
+    Erstellt Cloudflare-freundliche HTTP-Headers mit zufälligem User-Agent
+    
+    :return: Dictionary mit HTTP-Headers
+    """
+    user_agents = [
+        # Desktop Browser
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.93 Safari/537.36 Edg/96.0.1054.43",
+    ]
+    
+    # Länderspezifische Akzeptanz-Header für DE
+    accept_language = "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7"
+    
+    # Zufällige Referer von bekannten Webseiten
+    referers = [
+        "https://www.google.de/",
+        "https://www.google.com/",
+        "https://www.bing.com/",
+        "https://duckduckgo.com/",
+        "https://www.pokemon.com/de/",
+        "https://www.pokemoncenter.com/",
+        "https://games-island.eu/"  # Selbst-Referenzierung für mehr Natürlichkeit
+    ]
+    
+    # Cloudflare prüft diese Header besonders
+    return {
+        "User-Agent": random.choice(user_agents),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": accept_language,
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": random.choice(referers),
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+        "sec-ch-ua": '"Not A;Brand";v="99", "Chromium";v="96", "Google Chrome";v="96"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"'
+    }
+
 def get_product_details(url, search_terms):
     """
     Holt Produktdetails mit Cloud-freundlichen Headern
@@ -436,10 +482,6 @@ def get_product_details(url, search_terms):
     # Verwende Cloud-freundliche Header
     headers = get_cloudflare_friendly_headers()
     
-    # Verwende Session für bessere Performance und Cookie-Handling
-    session = requests.Session()
-    session.headers.update(headers)
-    
     retry_count = 0
     while retry_count < MAX_RETRY_ATTEMPTS:
         try:
@@ -450,13 +492,15 @@ def get_product_details(url, search_terms):
                 time.sleep(wait_time)
                 
                 # Bei Wiederholungen: Header rotieren
-                session.headers.update(get_cloudflare_friendly_headers())
+                headers = get_cloudflare_friendly_headers()
             
             # Zweistufiger Ansatz: Zuerst GET, dann verarbeiten
-            response = session.get(
+            response = requests.get(
                 url,
+                headers=headers,
                 timeout=LONG_TIMEOUT,
-                allow_redirects=True
+                allow_redirects=True,
+                verify=False
             )
             
             # Prüfe auf Erfolg
@@ -579,55 +623,6 @@ def is_product_relevant(title, search_terms):
     # Kein Treffer für Suchbegriffe
     return False
 
-def get_cloudflare_friendly_headers():
-    """
-    Erstellt Cloudflare-freundliche HTTP-Headers mit zufälligem User-Agent
-    
-    :return: Dictionary mit HTTP-Headers
-    """
-    user_agents = [
-        # Desktop Browser
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.93 Safari/537.36 Edg/96.0.1054.43",
-    ]
-    
-    # Länderspezifische Akzeptanz-Header für DE
-    accept_language = "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7"
-    
-    # Zufällige Referer von bekannten Webseiten
-    referers = [
-        "https://www.google.de/",
-        "https://www.google.com/",
-        "https://www.bing.com/",
-        "https://duckduckgo.com/",
-        "https://www.pokemon.com/de/",
-        "https://www.pokemoncenter.com/",
-        "https://games-island.eu/"  # Selbst-Referenzierung für mehr Natürlichkeit
-    ]
-    
-    # Cloudflare prüft diese Header besonders
-    return {
-        "User-Agent": random.choice(user_agents),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": accept_language,
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": random.choice(referers),
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "cross-site",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0",
-        "sec-ch-ua": '"Not A;Brand";v="99", "Chromium";v="96", "Google Chrome";v="96"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"'
-    }
-
 def url_to_id(url):
     """
     Konvertiert eine URL in eine eindeutige ID für den Cache
@@ -709,12 +704,12 @@ def find_matching_search_term(title, keywords_map):
     
     return best_match
 
-def send_batch_notifications(products):
+def send_batch_notifications(all_products):
     """Sendet Benachrichtigungen für gefundene Produkte"""
     from utils.telegram import send_batch_notification
     
-    if products:
-        logger.info(f"📤 Sende Benachrichtigung für {len(products)} Produkte")
-        send_batch_notification(products)
+    if all_products:
+        logger.info(f"📤 Sende Benachrichtigung für {len(all_products)} Produkte")
+        send_batch_notification(all_products)
     else:
         logger.info("ℹ️ Keine Produkte für Benachrichtigung gefunden")
