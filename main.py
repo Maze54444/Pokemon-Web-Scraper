@@ -20,6 +20,7 @@ from scrapers.tcgviert import scrape_tcgviert
 from scrapers.generic import scrape_generic
 from scrapers.sapphire_cards import scrape_sapphire_cards
 from scrapers.mighty_cards import scrape_mighty_cards
+from scrapers.games_island import scrape_games_island  # Neuer Import für games-island.eu
 
 # Logger-Konfiguration
 logger = logging.getLogger("main")
@@ -106,9 +107,27 @@ def run_once(only_available=False, reset_seen=False):
         except Exception as e:
             logger.error(f"[ERROR] Fehler beim Mighty-Cards Scraping: {str(e)}")
             logger.debug(traceback.format_exc())
+            
+    # Games-Island spezifischer Scraper (NEU)
+    games_island_urls = [url for url in all_urls if "games-island.eu" in url]
+    if games_island_urls:
+        try:
+            logger.info("[SCRAPER] Starte Games-Island Scraper")
+            games_island_matches = scrape_games_island(keywords_map, seen, out_of_stock, only_available)
+            if games_island_matches:
+                logger.info(f"[SUCCESS] {len(games_island_matches)} neue Treffer bei Games-Island gefunden")
+                all_matches.extend(games_island_matches)
+            else:
+                logger.info("[INFO] Keine neuen Treffer bei Games-Island")
+        except Exception as e:
+            logger.error(f"[ERROR] Fehler beim Games-Island Scraping: {str(e)}")
+            logger.debug(traceback.format_exc())
     
-    # Generische URLs - immer alle scannen, aber jetzt auch Mighty-Cards ausschließen
-    generic_urls = [url for url in all_urls if not ("sapphire-cards.de" in url or "tcgviert.com" in url or "mighty-cards.de" in url)]
+    # Generische URLs - immer alle scannen, aber jetzt auch Games-Island ausschließen
+    generic_urls = [url for url in all_urls if not ("sapphire-cards.de" in url or 
+                                                  "tcgviert.com" in url or 
+                                                  "mighty-cards.de" in url or
+                                                  "games-island.eu" in url)]
     if generic_urls:
         logger.info(f"[INFO] Starte generische Scraper für {len(generic_urls)} URLs")
         
@@ -216,8 +235,8 @@ def test_matching():
     
     for title in test_titles:
         logger.info(f"\nTest für Titel: {title}")
-        clean_title = clean_text(title)
-        logger.info(f"  Bereinigter Titel: '{clean_title}'")
+        clean_title_lower = clean_text(title)
+        logger.info(f"  Bereinigter Titel: '{clean_title_lower}'")
         for keywords in test_keywords:
             result = is_keyword_in_text(keywords, title)
             logger.info(f"  Mit Keywords {keywords}: {result}")
@@ -348,6 +367,24 @@ def test_mighty_cards():
     else:
         logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
 
+def test_games_island():
+    """Testet den Games-Island Scraper isoliert"""
+    logger.info("[TEST] Teste Games-Island Scraper isoliert")
+    
+    products = load_products()
+    keywords_map = prepare_keywords(products)
+    
+    seen = set()
+    out_of_stock = set()
+    
+    from scrapers.games_island import scrape_games_island
+    matches = scrape_games_island(keywords_map, seen, out_of_stock)
+    
+    if matches:
+        logger.info(f"[SUCCESS] Test erfolgreich, {len(matches)} Treffer gefunden")
+    else:
+        logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
+
 def monitor_out_of_stock():
     """Zeigt die aktuell ausverkauften Produkte an, die überwacht werden"""
     out_of_stock = load_out_of_stock()
@@ -387,7 +424,8 @@ def clean_database():
     # Entferne veraltete Einträge aus out_of_stock
     # Wir behalten nur Einträge, die einer der bekannten Domains entsprechen
     valid_domains = ["tcgviert", "card-corner", "comicplanet", "gameware", 
-                     "kofuku", "mighty-cards", "games-island", "sapphirecards", "mightycards"]
+                     "kofuku", "mighty-cards", "games-island", "sapphirecards", "mightycards",
+                     "gamesisland"]  # Neuer Eintrag für Games-Island
     
     valid_out_of_stock = set()
     for product_id in out_of_stock:
@@ -408,7 +446,8 @@ def clean_database():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pokémon TCG Scraper mit verbesserten Filtern")
     parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", "availability_test", 
-                                          "sapphire_test", "mighty_cards_test", "request_test", "show_out_of_stock", "clean"], 
+                                          "sapphire_test", "mighty_cards_test", "games_island_test",  # Neue Test-Option
+                                          "request_test", "show_out_of_stock", "clean"], 
                         default="loop", help="Ausführungsmodus")
     parser.add_argument("--only-available", action="store_true", 
                         help="Nur verfügbare Produkte melden (nicht ausverkaufte)")
@@ -438,6 +477,8 @@ if __name__ == "__main__":
         test_sapphire()
     elif args.mode == "mighty_cards_test":
         test_mighty_cards()
+    elif args.mode == "games_island_test":  # Neue Testoption
+        test_games_island()
     elif args.mode == "request_test":
         test_request_handler()
     elif args.mode == "show_out_of_stock":
