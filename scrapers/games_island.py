@@ -1,8 +1,10 @@
 """
-Spezieller Scraper für games-island.eu mit IP-Blockade-Umgehung durch:
-1. Verwendung von cloudflare-freundlichen Headern
-2. Korrekten URL-Mustern von games-island.eu
-3. Anti-Bot-Detection-Maßnahmen
+Spezieller Scraper für games-island.eu mit IP-Blockade-Umgehung und präziser Produkterkennung
+
+Dieses Modul implementiert einen robusten Scraper für games-island.eu mit:
+1. Präziser Unterscheidung zwischen Produktnamen und Produkttypen
+2. Verbesserte Synonymerkennung mit verschiedenen Schreibweisen
+3. Anti-Bot-Detection-Maßnahmen für zuverlässiges Scraping
 """
 
 import requests
@@ -52,6 +54,7 @@ FAILED_CATEGORIES = {}
 def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     """
     Spezialisierter Scraper für games-island.eu mit Anti-IP-Blocking-Maßnahmen
+    und präziser Produkterkennung
     
     :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
     :param seen: Set mit bereits gesehenen Produkttiteln
@@ -61,8 +64,12 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     """
     logger.info("🌐 Starte speziellen Scraper für games-island.eu mit Anti-IP-Blocking")
     
+    # Parse keywords_map, um Produktnamen und Produkttypen zu extrahieren
+    product_info_list = parse_product_keywords(keywords_map)
+    logger.info(f"🔍 {len(product_info_list)} Produktkombinationen aus Keywords extrahiert")
+    
     # Optimierte/reduzierte Liste von Suchbegriffen
-    search_terms = get_optimized_search_terms(keywords_map)
+    search_terms = get_optimized_search_terms(product_info_list)
     logger.info(f"🔍 Verwende {len(search_terms)} optimierte Suchbegriffe")
     
     # Versuche zuerst vorbereitete Produkt-URLs
@@ -70,7 +77,7 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     if not product_list:
         # Wenn kein Cache, versuche mit optimierten URLs
         logger.info("🔄 Kein Produkt-Cache gefunden, verwende Kategorie-Navigation")
-        product_list = fetch_products_from_categories(keywords_map)
+        product_list = fetch_products_from_categories()
     
     logger.info(f"🔍 {len(product_list)} bekannte Produkt-URLs zum Scannen")
     
@@ -95,7 +102,7 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
             logger.info(f"🔍 Prüfe Produkt-URL ({processed_count+1}/{len(product_list)}): {product_url}")
             
             # Versuche, die Produktdetails zu holen
-            details = get_product_details(product_url, search_terms, keywords_map)
+            details = get_product_details(product_url, search_terms, product_info_list)
             
             if not details:
                 logger.warning(f"⚠️ Keine Details für {product_url}")
@@ -131,10 +138,10 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
                 if is_back_in_stock:
                     status_text = "🎉 Wieder verfügbar!"
                 
-                product_type = extract_product_type_from_text(title)
+                product_type = details.get('product_type', extract_product_type_from_text(title))
                 
                 # Bestimme, welcher Suchbegriff getroffen wurde
-                matched_term = details.get('matched_term', find_matching_search_term(title, keywords_map))
+                matched_term = details.get('matched_term', '')
                 
                 product_data = {
                     "title": title,
@@ -173,40 +180,174 @@ def scrape_games_island(keywords_map, seen, out_of_stock, only_available=False):
     
     return new_matches
 
-def get_optimized_search_terms(keywords_map):
+def parse_product_keywords(keywords_map):
     """
-    Erstellt eine optimierte Liste von Suchbegriffen (kürzer für bessere Kompatibilität)
+    Extrahiert Produktnamen und Produkttypen aus den Suchbegriffen
     
     :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :return: Liste von Dictionaries mit Produktname und Produkttyp
+    """
+    product_info_list = []
+    
+    for search_term in keywords_map.keys():
+        # Extrahiere Produkttyp vom Ende des Suchbegriffs
+        product_type = extract_product_type_from_text(search_term)
+        
+        # Entferne Produkttyp vom Ende, um Produktnamen zu erhalten
+        product_name = re.sub(r'\s+(display|etb|ttb|box|tin|blister)$', '', search_term.lower(), re.IGNORECASE).strip()
+        
+        # Erstelle Varianten des Produktnamens für besseres Matching
+        name_variants = generate_name_variants(product_name)
+        
+        # Erstelle Varianten des Produkttyps für besseres Matching
+        type_variants = generate_type_variants(product_type)
+        
+        # Füge Informationen zur Liste hinzu
+        product_info_list.append({
+            'original_term': search_term,
+            'product_name': product_name,
+            'product_type': product_type,
+            'name_variants': name_variants,
+            'type_variants': type_variants
+        })
+    
+    return product_info_list
+
+def generate_name_variants(product_name):
+    """
+    Generiert Varianten des Produktnamens für flexibles Matching
+    
+    :param product_name: Ursprünglicher Produktname
+    :return: Liste mit Namensvarianten
+    """
+    variants = [product_name]
+    
+    # Mit und ohne Bindestriche
+    if ' ' in product_name:
+        variants.append(product_name.replace(' ', '-'))
+    if '-' in product_name:
+        variants.append(product_name.replace('-', ' '))
+    
+    # Ohne Leerzeichen und Bindestriche
+    compact_variant = product_name.replace(' ', '').replace('-', '')
+    if compact_variant != product_name and compact_variant not in variants:
+        variants.append(compact_variant)
+    
+    # Umlaute-Varianten
+    umlaut_mapping = {
+        'ä': 'ae', 'ö': 'oe', 'ü': 'ue', 'ß': 'ss',
+        'Ä': 'Ae', 'Ö': 'Oe', 'Ü': 'Ue'
+    }
+    
+    # Prüfe, ob der Name Umlaute enthält
+    has_umlauts = any(umlaut in product_name for umlaut in umlaut_mapping.keys())
+    
+    if has_umlauts:
+        # Ersetze Umlaute
+        umlaut_variant = product_name
+        for umlaut, replacement in umlaut_mapping.items():
+            umlaut_variant = umlaut_variant.replace(umlaut, replacement)
+            
+        if umlaut_variant not in variants:
+            variants.append(umlaut_variant)
+            
+            # Auch Varianten mit Bindestrichen/ohne Leerzeichen für die Umlaut-Variante
+            if ' ' in umlaut_variant:
+                variants.append(umlaut_variant.replace(' ', '-'))
+            if '-' in umlaut_variant:
+                variants.append(umlaut_variant.replace('-', ' '))
+    
+    # Umgekehrt: Wandle "ae", "oe", "ue" in Umlaute um für URLs, die mit Umlauten kodiert sind
+    if 'ae' in product_name or 'oe' in product_name or 'ue' in product_name:
+        reverse_umlaut_variant = product_name
+        reverse_mapping = {v: k for k, v in umlaut_mapping.items()}
+        
+        # Zwei-Zeichen-Ersetzungen zuerst behandeln
+        for replacement, umlaut in reverse_mapping.items():
+            if len(replacement) > 1:  # Nur "ae", "oe", "ue", etc.
+                reverse_umlaut_variant = reverse_umlaut_variant.replace(replacement, umlaut)
+                
+        if reverse_umlaut_variant not in variants:
+            variants.append(reverse_umlaut_variant)
+    
+    return variants
+
+def generate_type_variants(product_type):
+    """
+    Generiert Varianten des Produkttyps für flexibles Matching
+    
+    :param product_type: Ursprünglicher Produkttyp
+    :return: Liste mit Typvarianten
+    """
+    # Standard-Varianten für bekannte Produkttypen
+    type_mapping = {
+        "display": [
+            "display", "booster display", "36er display", "36-er display", 
+            "36 booster", "36er booster", "booster box", "36er box", "box", 
+            "booster-box", "18er display", "18er booster", "18-er display"
+        ],
+        "etb": [
+            "etb", "elite trainer box", "elite-trainer-box", "elite trainer",
+            "trainer box", "elite-trainer", "elitetrainerbox"
+        ],
+        "ttb": [
+            "ttb", "top trainer box", "top-trainer-box", "top trainer",
+            "trainer box", "top-trainer", "toptrainerbox"
+        ],
+        "blister": [
+            "blister", "3pack", "3-pack", "3er pack", "3er blister", 
+            "sleeved booster", "sleeve booster", "check lane", "checklane"
+        ],
+        "tin": [
+            "tin", "tin box", "metal box", "metalbox"
+        ],
+        "box": [
+            "box", "box set", "boxset", "collector box", "collection box"
+        ]
+    }
+    
+    # Wenn unbekannter Produkttyp, leere Liste zurückgeben
+    if product_type == "unknown" or product_type not in type_mapping:
+        return []
+    
+    return type_mapping.get(product_type, [product_type])
+
+def get_optimized_search_terms(product_info_list):
+    """
+    Erstellt eine optimierte Liste von Suchbegriffen aus Produktinformationen
+    
+    :param product_info_list: Liste mit Produktinformationen
     :return: Liste mit optimierten Suchbegriffen
     """
     search_terms = []
     
-    # Extrahiere alle Kernbegriffe aus den Suchbegriffen
-    for term in keywords_map.keys():
-        # Füge den Gesamtbegriff hinzu
-        search_terms.append(term.lower())
-        
-        # Füge alle Tokens hinzu, die länger als 3 Zeichen sind
-        for token in keywords_map[term]:
-            if len(token) > 3 and token not in search_terms:
-                search_terms.append(token)
+    # Sammle alle Produktnamen (ohne Duplikate)
+    for product_info in product_info_list:
+        product_name = product_info['product_name']
+        if product_name and product_name not in search_terms:
+            search_terms.append(product_name)
     
-    # Extrahiere Produkttypen für kombinierte Suche
-    product_types = ["display", "booster box", "36er", "elite trainer box", "etb"]
+    # Sammle spezifische Schlüsselwörter für bessere Suchtreffer
+    special_keywords = []
+    for product_info in product_info_list:
+        # Sammle spezielle Kürzel wie "sv09", "kp09"
+        code_match = re.search(r'(sv\d+|kp\d+)', product_info['product_name'].lower())
+        if code_match and code_match.group(0) not in special_keywords:
+            special_keywords.append(code_match.group(0))
+            
+        # Füge einzigartige Produktnamen hinzu (ohne allgemeine Begriffe)
+        name_parts = product_info['product_name'].lower().split()
+        for part in name_parts:
+            if (len(part) > 3 and part not in special_keywords and
+                part not in ["pokemon", "pokémon", "und", "and", "the"]):
+                special_keywords.append(part)
     
-    # Extrahiere Produktcodes (z.B. kp09, sv09)
-    product_codes = []
-    for term in search_terms:
-        code_match = re.search(r'(kp\d+|sv\d+)', term)
-        if code_match and code_match.group(0) not in product_codes:
-            product_codes.append(code_match.group(0))
+    # Füge spezielle Keywords zur Suchbegriffsliste hinzu
+    for keyword in special_keywords:
+        if keyword not in search_terms:
+            search_terms.append(keyword)
     
-    # Füge Produktcodes explizit hinzu
-    search_terms.extend(product_codes)
-    
-    # Entferne Duplikate und sortiere nach Länge (längere zuerst)
-    return sorted(list(set(search_terms)), key=len, reverse=True)
+    return search_terms
 
 def load_cached_product_urls(cache_file="data/games_island_cache.json"):
     """
@@ -284,30 +425,22 @@ def save_product_cache(cache_data, cache_file="data/games_island_cache.json"):
         logger.error(f"❌ Fehler beim Speichern des Produkt-Caches: {e}")
         return False
 
-def fetch_products_from_categories(keywords_map):
+def fetch_products_from_categories():
     """
     Fetcht Produkte aus den bekannten Pokemon-Kategorien bei games-island.eu
     
-    :param keywords_map: Dictionary mit Suchbegriffen
     :return: Liste mit Produkt-URL-Daten
     """
     product_urls = []
     all_found_products = {}  # Dictionary zur Deduplizierung
     
-    # Prüfe ob nach ETB/Elite Trainer Box gesucht wird
-    etb_search = contains_etb_keywords(keywords_map)
-    
-    # Definiere Kategorie-URLs basierend auf Keywords
+    # Definiere Kategorie-URLs für Pokemon Produkte
     category_urls = [
         "https://games-island.eu/Pokemon-Booster-Displays",
         "https://games-island.eu/Pokemon-Booster-Displays-deutsch",
-        "https://games-island.eu/Pokemon-Booster-Displays-englisch"
+        "https://games-island.eu/Pokemon-Booster-Displays-englisch",
+        "https://games-island.eu/Pokemon-Elite-Trainer-Box"
     ]
-    
-    # Füge Elite Trainer Box Kategorie hinzu, wenn danach gesucht wird
-    if etb_search:
-        category_urls.append("https://games-island.eu/Pokemon-Elite-Trainer-Box")
-        logger.info("🔍 Elite Trainer Box Keywords gefunden, durchsuche ETB-Kategorie")
     
     for category_url in category_urls:
         # Überprüfe, ob diese Kategorie kürzlich fehlgeschlagen ist
@@ -379,22 +512,6 @@ def fetch_products_from_categories(keywords_map):
     logger.info(f"✅ Insgesamt {len(product_urls)} eindeutige Produkte aus Kategorien extrahiert")
     
     return product_urls
-
-def contains_etb_keywords(keywords_map):
-    """
-    Prüft, ob nach ETB/Elite Trainer Box gesucht wird
-    
-    :param keywords_map: Dictionary mit Suchbegriffen
-    :return: True, wenn ETB-Suchbegriffe vorhanden sind
-    """
-    etb_patterns = ["etb", "elite trainer box", "elite-trainer", "trainer box"]
-    
-    for term in keywords_map.keys():
-        term_lower = term.lower()
-        if any(pattern in term_lower for pattern in etb_patterns):
-            return True
-        
-    return False
 
 def extract_product_links_from_category(soup, category_url):
     """
@@ -512,14 +629,14 @@ def get_cloudflare_friendly_headers():
         "sec-ch-ua-platform": '"Windows"'
     }
 
-def get_product_details(url, search_terms, keywords_map):
+def get_product_details(url, search_terms, product_info_list):
     """
-    Holt Produktdetails mit Cloud-freundlichen Headern
+    Holt Produktdetails und prüft auf Übereinstimmung mit Suchkriterien
     
     :param url: Produkt-URL
     :param search_terms: Liste mit Suchbegriffen zur Relevanzprüfung
-    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
-    :return: Dictionary mit Produktdetails oder None bei Fehler
+    :param product_info_list: Liste mit Produktinformationen (Name + Typ)
+    :return: Dictionary mit Produktdetails oder None bei Fehler/Nichtübereinstimmung
     """
     # Zuerst im Cache suchen
     product_id = url_to_id(url)
@@ -566,10 +683,10 @@ def get_product_details(url, search_terms, keywords_map):
                     logger.info(f"ℹ️ Kein Titel gefunden für {url}")
                     return None
                 
-                # Prüfe Relevanz mit verbesserter Methode
-                matched_term = check_product_relevance(title, search_terms, keywords_map)
+                # Prüfe Übereinstimmung mit den Produktinformationen
+                matched_info = match_product_info(title, product_info_list)
                 
-                if not matched_term:
+                if not matched_info:
                     logger.info(f"ℹ️ Produkt nicht relevant: {title}")
                     return None
                 
@@ -583,7 +700,8 @@ def get_product_details(url, search_terms, keywords_map):
                     "is_available": is_available,
                     "status_text": status_text,
                     "url": url,
-                    "matched_term": matched_term,
+                    "matched_term": matched_info.get("original_term", ""),
+                    "product_type": matched_info.get("product_type", ""),
                     "last_checked": int(time.time())
                 }
                 
@@ -651,14 +769,13 @@ def extract_title(soup):
         
     return None
 
-def check_product_relevance(title, search_terms, keywords_map):
+def match_product_info(title, product_info_list):
     """
-    Verbesserte Prüfung, ob ein Produkttitel für die Suche relevant ist
+    Prüft, ob ein Produkttitel mit einem der gesuchten Produkte übereinstimmt
     
-    :param title: Produkttitel
-    :param search_terms: Liste mit Suchbegriffen
-    :param keywords_map: Original-Dictionary mit Suchbegriffen und ihren Tokens
-    :return: Passender Suchbegriff oder None wenn nicht relevant
+    :param title: Der zu prüfende Produkttitel
+    :param product_info_list: Liste mit Produktinformationen
+    :return: Passendes Produktinfo-Dict oder None wenn nicht relevant
     """
     if not title:
         return None
@@ -669,97 +786,45 @@ def check_product_relevance(title, search_terms, keywords_map):
     if not any(term in title_lower for term in ["pokemon", "pokémon"]):
         return None
     
-    # 1. Zunächst Produktcodes prüfen (kp09, sv09, etc.)
-    codes_in_title = re.findall(r'(kp\d+|sv\d+)', title_lower)
-    if codes_in_title:
-        for original_term, tokens in keywords_map.items():
-            term_lower = original_term.lower()
-            # Wenn ein Code im Titel und im Suchbegriff vorkommt
-            if any(code in term_lower for code in codes_in_title):
-                logger.debug(f"📌 Produkt relevant durch Produktcode-Match: {title}")
-                return original_term
+    # Extrahiere Produkttyp aus dem Titel
+    title_product_type = extract_product_type_from_text(title)
     
-    # 2. Direkte Prüfung mit is_keyword_in_text aber mit weniger strengem Matching
-    for original_term, tokens in keywords_map.items():
-        # Wenn mehr als die Hälfte der Tokens im Titel vorkommen
-        matching_tokens = sum(1 for token in tokens if token in title_lower)
-        if matching_tokens >= max(1, len(tokens) // 2):  # Mindestens 1 Token, sonst 50%
-            logger.debug(f"📌 Produkt relevant durch Token-Match: {matching_tokens}/{len(tokens)} für {original_term}")
-            return original_term
-    
-    # 3. Prüfung auf Produktset-Nummern (z.B. "9", "9.0") mit Karmesin & Purpur/Scarlet & Violet
-    set_num_match = re.search(r'(?:karmesin|purpur|scarlet|violet).*?(?:\d+(?:\.\d+)?|ix)', title_lower)
-    if set_num_match:
-        # Extrahiere die gefundene Setnummer
-        set_num = re.search(r'(\d+(?:\.\d+)?|ix)', set_num_match.group(0))
-        if set_num and (set_num.group(1) == "9" or set_num.group(1) == "9.0" or set_num.group(1) == "ix"):
-            # Finde einen passenden Suchbegriff aus keywords_map
-            for original_term in keywords_map.keys():
-                if any(code in original_term.lower() for code in ["sv09", "kp09"]):
-                    logger.debug(f"📌 Produkt relevant durch Set-Nummer-Match: {title}")
-                    return original_term
-    
-    # 4. Prüfung auf unversionierte Set-Namen
-    for original_term in keywords_map.keys():
-        term_lower = original_term.lower()
+    # Für jede Produktinfo-Kombination prüfen
+    for product_info in product_info_list:
+        product_name = product_info['product_name']
+        product_type = product_info['product_type']
+        name_variants = product_info['name_variants']
+        type_variants = product_info['type_variants']
         
-        # Entferne Produkttyp-Bezeichnung wie "display", "etb", etc.
-        clean_term = re.sub(r'\s+(display|box|tin|etb|ttb|blister)$', '', term_lower)
+        # 1. Prüfe, ob der Produktname im Titel vorkommt (in einer der Varianten)
+        name_match = False
+        for variant in name_variants:
+            if variant in title_lower:
+                name_match = True
+                break
         
-        # Prüfe, ob dieser bereinigte Suchbegriff im Titel vorkommt
-        if clean_term and len(clean_term) > 4 and clean_term in title_lower:
-            logger.debug(f"📌 Produkt relevant durch Set-Namen-Match: {clean_term} in {title}")
-            return original_term
+        if not name_match:
+            continue
+        
+        # 2. Prüfe, ob der Produkttyp übereinstimmt
+        type_match = False
+        
+        # Wenn der extrahierte Typ im Titel mit dem gesuchten Typ übereinstimmt
+        if title_product_type == product_type:
+            type_match = True
+        else:
+            # Oder wenn einer der Typ-Varianten im Titel vorkommt
+            for variant in type_variants:
+                if variant in title_lower:
+                    type_match = True
+                    break
+        
+        # 3. Nur wenn sowohl Name als auch Typ übereinstimmen, gilt das Produkt als relevant
+        if name_match and type_match:
+            return product_info
     
     # Keine Übereinstimmung gefunden
     return None
-
-def is_product_relevant(title, search_terms):
-    """
-    Prüft, ob ein Produkttitel für die Suche relevant ist
-    
-    :param title: Produkttitel
-    :param search_terms: Liste mit Suchbegriffen
-    :return: True wenn relevant, False sonst
-    """
-    if not title:
-        return False
-        
-    title_lower = title.lower()
-    
-    # Grundlegende Relevanzprüfung für Pokemon-Produkte
-    if not any(term in title_lower for term in ["pokemon", "pokémon"]):
-        return False
-    
-    # Prüfe auf Produktcodes (kp09, sv09)
-    if any(re.search(r'kp0?9|sv0?9', title_lower) for term in search_terms):
-        return True
-    
-    # Prüfe auf Scarlet & Violet 9.0 / Karmesin & Purpur 9.0
-    if re.search(r'(?:karmesin|purpur|scarlet|violet).*?(?:9(?:\.0)?|ix)', title_lower):
-        return True
-    
-    # Prüfe alle Suchbegriffe mit weniger strengem Matching
-    for term in search_terms:
-        term_lower = term.lower()
-        
-        # Für kurze Suchbegriffe, direkt prüfen
-        if len(term_lower) <= 3:
-            if term_lower in title_lower:
-                return True
-            continue
-            
-        # Tokenisiere den Suchbegriff für flexibleres Matching
-        tokens = term_lower.split()
-        
-        # Weniger strenges Matching: Wenn mindestens 50% der Tokens enthalten sind
-        min_tokens = max(1, len(tokens) // 2)  # Mindestens 1 Token, sonst 50%
-        matching_tokens = sum(1 for token in tokens if token in title_lower)
-        if matching_tokens >= min_tokens:
-            return True
-    
-    # Kein Treffer für Suchbegriffe
-    return False
 
 def url_to_id(url):
     """
@@ -811,51 +876,8 @@ def create_product_id(title, base_id="gamesisland"):
     
     return product_id
 
-def find_matching_search_term(title, keywords_map):
-    """
-    Findet den am besten passenden Suchbegriff für einen Produkttitel
-    
-    :param title: Produkttitel
-    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
-    :return: Passender Suchbegriff oder Standardwert
-    """
-    title_lower = title.lower()
-    best_match = None
-    max_tokens = 0
-    
-    for search_term, tokens in keywords_map.items():
-        # Prüfe, wie viele Tokens übereinstimmen
-        matching_tokens = sum(1 for token in tokens if token in title_lower)
-        
-        if matching_tokens > max_tokens:
-            max_tokens = matching_tokens
-            best_match = search_term
-    
-    # Wenn keine Übereinstimmung gefunden wurde, verwende einen Standardwert
-    if not best_match:
-        # Prüfe auf Produktcodes im Titel
-        code_match = re.search(r'(kp\d+|sv\d+)', title_lower)
-        if code_match:
-            code = code_match.group(0)
-            # Finde ersten passenden Suchbegriff mit diesem Code
-            for term in keywords_map.keys():
-                if code in term.lower():
-                    return term
-        
-        # Fallback zu generischem Match
-        for term in ["display", "etb", "ttb", "box"]:
-            if term in title_lower:
-                for search_term in keywords_map.keys():
-                    if term in search_term.lower():
-                        return search_term
-        
-        # Absoluter Fallback
-        return list(keywords_map.keys())[0] if keywords_map else "Pokemon Display"
-    
-    return best_match
-
 def send_batch_notifications(all_products):
-    """Sendet Benachrichtigungen für gefundene Produkte"""
+    """Sendet Benachrichtigungen in Batches"""
     from utils.telegram import send_batch_notification
     
     if all_products:
