@@ -591,7 +591,7 @@ def fetch_filtered_products_from_sitemap_with_retry(headers, product_info, max_r
                     logger.info(f"🔍 {len(all_product_urls)} Produkt-URLs aus Sitemap extrahiert")
                     
                     # Filtern der URLs wie zuvor
-                return filter_sitemap_products(all_product_urls, product_info)
+                    return filter_sitemap_products(all_product_urls, product_info)
                 else:
                     logger.warning(f"⚠️ Keine Produkt-URLs in der Sitemap gefunden (Versuch {retry+1}/{max_retries})")
             else:
