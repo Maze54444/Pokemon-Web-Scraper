@@ -390,8 +390,26 @@ def process_cached_product(product_url, product_data, product_info, seen, out_of
         else:
             title = title_elem.text.strip()
         
-        # Verwende das Availability-Modul für Verfügbarkeitserkennnung
-        is_available, price, status_text = detect_availability(soup, product_url)
+        # VERBESSERT: Direkte Prüfung auf "Ausverkauft"-Label
+        is_available = True  # Standardmäßig als verfügbar annehmen
+        ausverkauft_elem = soup.find('div', {'class': 'label__text'}, text="Ausverkauft")
+        
+        if ausverkauft_elem:
+            is_available = False
+            status_text = "[X] Ausverkauft"
+        else:
+            # Vorbestellung/Verfügbar-Check
+            if "vorbestellung" in title.lower() or soup.find(string=re.compile("Vorbestellung", re.IGNORECASE)):
+                status_text = "[V] Vorbestellbar"
+            else:
+                status_text = "[V] Verfügbar"
+        
+        # VERBESSERT: Bessere Preisextraktion
+        price_elem = soup.find('span', {'class': 'details-product-price__value'})
+        if price_elem:
+            price = price_elem.text.strip()
+        else:
+            price = "Preis nicht verfügbar"
         
         # Eindeutige ID für das Produkt erstellen
         product_id = product_data.get("product_id") or create_product_id(title)
@@ -423,6 +441,19 @@ def process_cached_product(product_url, product_data, product_info, seen, out_of
             
             # Extrahiere Produkttyp
             detected_product_type = extract_product_type_from_text(title)
+            
+            # VERBESSERT: Überprüfe, ob der Produkttyp dem ursprünglichen Suchbegriff entspricht
+            search_term_product_type = None
+            for item in product_info:
+                if item["original_term"] == search_term:
+                    search_term_product_type = item["product_type"]
+                    break
+            
+            # Wenn der erkannte Produkttyp nicht mit dem gesuchten übereinstimmt, überspringen
+            if (search_term_product_type and search_term_product_type != "unknown" and 
+                detected_product_type != "unknown" and search_term_product_type != detected_product_type):
+                logger.debug(f"⚠️ Produkttyp-Diskrepanz: Gesucht {search_term_product_type}, gefunden {detected_product_type}: {title}")
+                return True, False
             
             # Produkt-Daten sammeln
             product_data = {
@@ -844,6 +875,27 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
         # DEBUG: Zeige Titel für Debugging-Zwecke
         logger.debug(f"Titel: {title}")
         
+        # VERBESSERT: Prüfe auf ausverkauft-Label
+        is_available = True
+        ausverkauft_elem = soup.find('div', {'class': 'label__text'}, text="Ausverkauft")
+        
+        if ausverkauft_elem:
+            is_available = False
+            status_text = "[X] Ausverkauft"
+        else:
+            # Prüfe auf Vorbestellung
+            if "vorbestellung" in title.lower() or soup.find(string=re.compile("Vorbestellung", re.IGNORECASE)):
+                status_text = "[V] Vorbestellbar"
+            else:
+                status_text = "[V] Verfügbar"
+        
+        # VERBESSERT: Bessere Preisextraktion
+        price_elem = soup.find('span', {'class': 'details-product-price__value'})
+        if price_elem:
+            price = price_elem.text.strip()
+        else:
+            price = "Preis nicht verfügbar"
+        
         # Strikte Titel-Validierung mit verbesserter Typ-vs-Name Unterscheidung
         title_lower = title.lower()
         
@@ -962,6 +1014,16 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
                     type_match = True
                     current_score += 3
                 
+                # VERBESSERT: Striktere Typprüfung - wenn gesuchter Typ und erkannter Typ bekannt
+                # sind und nicht übereinstimmen, reduziere den Score
+                if product["product_type"] != "unknown" and detected_product_type != "unknown":
+                    if product["product_type"] != detected_product_type:
+                        # Bei Display besonders streng sein
+                        if product["product_type"] == "display" and detected_product_type != "display":
+                            current_score -= 20  # Stark reduzieren, wenn wir Display suchen aber etwas anderes finden
+                        else:
+                            current_score -= 5  # Weniger stark reduzieren für andere Typen
+                
                 # 3.4 Wähle das Produkt mit dem höchsten Score
                 if current_score > matching_score:
                     matched_product = product
@@ -984,21 +1046,10 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
                 logger.debug(f"❌ Produkt passt nicht zu Suchbegriffen (Score {matching_score}): {title}")
                 return False
         
-        # Bei Produkttyp-Unstimmigkeit: Weniger strenge Prüfung
-        # Da wir bereits durch die URL-Prüfung gegangen sind (KP09/18er oder KP09/36er)
-        if direct_url_match:
-            # Wenn es ein direkter URL-Match ist, akzeptieren wir es ohne weitere Prüfung
-            pass
-        elif matching_score >= 5 and matched_product["product_type"] != "unknown" and detected_product_type != "unknown":
-            # Wenn sowohl der gesuchte als auch der erkannte Typ bekannt sind und nicht übereinstimmen
-            if matched_product["product_type"] != detected_product_type:
-                # Beispiel: Wir suchen nach "reisegefährten display", aber gefunden wird "reisegefährten blister"
-                logger.debug(f"❌ Produkttyp stimmt nicht überein: Gesucht {matched_product['product_type']}, gefunden {detected_product_type} - {title}")
-                # Wir lassen es trotzdem zu, protokollieren es aber
-                pass
-        
-        # Verwende das Availability-Modul für Verfügbarkeitserkennnung
-        is_available, price, status_text = detect_availability(soup, product_url)
+        # VERBESSERT: Bei Blister/ETB Produkten, wenn wir eigentlich Display suchen, ablehnen
+        if matched_product["product_type"] == "display" and detected_product_type != "unknown" and detected_product_type != "display":
+            logger.debug(f"❌ Produkttyp stimmt nicht überein: Gesucht '{matched_product['product_type']}', gefunden '{detected_product_type}': {title}")
+            return False
         
         # Eindeutige ID für das Produkt erstellen
         product_id = create_product_id(title)
