@@ -1,5 +1,5 @@
 requests>=2.25.1
 beautifulsoup4>=4.9.3
 lxml>=4.6.3  # XML-Parser für BeautifulSoup
-selenium>=4.1.0  # Für Browser-Automatisierung und dynamisches Scraping
-webdriver-manager>=3.8.0  # Für automatische Verwaltung von Webdriver-Versionen
+selenium>=4.0.0  # Browser-Automatisierung
+webdriver-manager>=3.8.0  # Automatische WebDriver-Verwaltung
