@@ -5,6 +5,7 @@ import traceback
 from datetime import datetime
 import concurrent.futures
 import random
+from contextlib import contextmanager
 
 # Neue Importe für verbesserte Konfigurationsverwaltung und Request-Handling
 from utils.config_manager import (
@@ -33,6 +34,68 @@ logging.basicConfig(
     ]
 )
 
+# Initialisiere Logger für Selenium
+selenium_logger = logging.getLogger("selenium")
+selenium_logger.setLevel(logging.WARNING)  # Reduziere Log-Spam von Selenium
+
+# Globale Flag für Selenium-Verfügbarkeit
+SELENIUM_AVAILABLE = False
+
+def check_selenium_availability():
+    """
+    Prüft, ob Selenium und Chrome korrekt eingerichtet sind
+    
+    :return: True wenn verfügbar, False sonst
+    """
+    global SELENIUM_AVAILABLE
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        
+        # Minimale Chrome-Optionen für Test
+        options = Options()
+        options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        
+        # Versuche, Chrome zu starten
+        driver = webdriver.Chrome(options=options)
+        driver.quit()
+        
+        logger.info("✅ Selenium und Chrome erfolgreich initialisiert")
+        SELENIUM_AVAILABLE = True
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ Selenium/Chrome nicht verfügbar: {str(e)}")
+        logger.debug(traceback.format_exc())
+        SELENIUM_AVAILABLE = False
+        return False
+
+@contextmanager
+def selenium_handler():
+    """
+    Context Manager für sicheres Starten und Beenden von Selenium-Ressourcen
+    
+    :yield: True wenn Selenium verfügbar ist, False sonst
+    """
+    global SELENIUM_AVAILABLE
+    
+    selenium_status = check_selenium_availability()
+    try:
+        yield selenium_status
+    except Exception as e:
+        logger.error(f"❌ Fehler bei Selenium-Operation: {str(e)}")
+        logger.debug(traceback.format_exc())
+    finally:
+        # Bereinige Browser-Ressourcen, wenn Selenium verfügbar ist
+        if SELENIUM_AVAILABLE:
+            try:
+                from scrapers.mighty_cards import cleanup_browsers
+                cleanup_browsers()
+                logger.info("🧹 Selenium-Browser-Ressourcen bereinigt")
+            except Exception as e:
+                logger.warning(f"⚠️ Fehler beim Bereinigen von Selenium-Ressourcen: {str(e)}")
+
 def run_once(only_available=False, reset_seen=False):
     """
     Führt einen einzelnen Scan-Durchlauf aus
@@ -43,6 +106,10 @@ def run_once(only_available=False, reset_seen=False):
     """
     logger.info("[START] Einzelscan gestartet")
     logger.info(f"[MODE] {'Nur verfügbare Produkte' if only_available else 'Alle Produkte'}")
+    
+    # Prüfe Selenium-Verfügbarkeit beim Start
+    with selenium_handler() as selenium_status:
+        logger.info(f"[INFO] Selenium-Status: {'Verfügbar' if selenium_status else 'Nicht verfügbar'}")
     
     # Seen-Liste zurücksetzen, wenn angefordert
     if reset_seen:
@@ -93,17 +160,19 @@ def run_once(only_available=False, reset_seen=False):
             logger.error(f"[ERROR] Fehler beim TCGViert Scraping: {str(e)}")
             logger.debug(traceback.format_exc())
     
-    # Mighty-cards spezifischer Scraper
+    # Mighty-cards spezifischer Scraper mit Selenium-Unterstützung
     mighty_cards_urls = [url for url in all_urls if "mighty-cards.de" in url]
     if mighty_cards_urls:
         try:
-            logger.info("[SCRAPER] Starte Mighty-Cards Scraper")
-            mighty_cards_matches = scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available)
-            if mighty_cards_matches:
-                logger.info(f"[SUCCESS] {len(mighty_cards_matches)} neue Treffer bei Mighty-Cards gefunden")
-                all_matches.extend(mighty_cards_matches)
-            else:
-                logger.info("[INFO] Keine neuen Treffer bei Mighty-Cards")
+            logger.info("[SCRAPER] Starte Mighty-Cards Scraper mit Selenium")
+            # Führe Scraper in einem Selenium-Handler aus, um Ressourcen zu bereinigen
+            with selenium_handler() as selenium_status:
+                mighty_cards_matches = scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available)
+                if mighty_cards_matches:
+                    logger.info(f"[SUCCESS] {len(mighty_cards_matches)} neue Treffer bei Mighty-Cards gefunden")
+                    all_matches.extend(mighty_cards_matches)
+                else:
+                    logger.info("[INFO] Keine neuen Treffer bei Mighty-Cards")
         except Exception as e:
             logger.error(f"[ERROR] Fehler beim Mighty-Cards Scraping: {str(e)}")
             logger.debug(traceback.format_exc())
@@ -350,8 +419,8 @@ def test_sapphire():
         logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
 
 def test_mighty_cards():
-    """Testet den Mighty-Cards Scraper isoliert"""
-    logger.info("[TEST] Teste Mighty-Cards Scraper isoliert")
+    """Testet den Mighty-Cards Scraper isoliert mit Selenium-Unterstützung"""
+    logger.info("[TEST] Teste Mighty-Cards Scraper isoliert mit Selenium")
     
     products = load_products()
     keywords_map = prepare_keywords(products)
@@ -359,13 +428,18 @@ def test_mighty_cards():
     seen = set()
     out_of_stock = set()
     
-    from scrapers.mighty_cards import scrape_mighty_cards
-    matches = scrape_mighty_cards(keywords_map, seen, out_of_stock)
-    
-    if matches:
-        logger.info(f"[SUCCESS] Test erfolgreich, {len(matches)} Treffer gefunden")
-    else:
-        logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
+    # Führe Mighty-Cards Test in einem Selenium-Handler aus
+    with selenium_handler() as selenium_status:
+        if not selenium_status:
+            logger.warning("[WARNING] Selenium nicht verfügbar, verwende nur BeautifulSoup")
+        
+        from scrapers.mighty_cards import scrape_mighty_cards
+        matches = scrape_mighty_cards(keywords_map, seen, out_of_stock)
+        
+        if matches:
+            logger.info(f"[SUCCESS] Test erfolgreich, {len(matches)} Treffer gefunden")
+        else:
+            logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
 
 def test_games_island():
     """Testet den Games-Island Scraper isoliert"""
@@ -384,6 +458,54 @@ def test_games_island():
         logger.info(f"[SUCCESS] Test erfolgreich, {len(matches)} Treffer gefunden")
     else:
         logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
+
+def test_selenium():
+    """Testet die Selenium-Verfügbarkeit und Browser-Funktionalität"""
+    logger.info("[TEST] Teste Selenium und Browser-Funktionalität")
+    
+    with selenium_handler() as selenium_status:
+        if selenium_status:
+            try:
+                # Definiere Test-URL
+                test_url = "https://www.mighty-cards.de/"
+                
+                # Importiere notwendige Selenium-Funktionen
+                from selenium import webdriver
+                from selenium.webdriver.chrome.options import Options
+                from selenium.webdriver.common.by import By
+                
+                # Konfiguriere Browser
+                options = Options()
+                options.add_argument("--headless")
+                options.add_argument("--no-sandbox")
+                options.add_argument("--disable-dev-shm-usage")
+                
+                # Browser starten
+                driver = webdriver.Chrome(options=options)
+                
+                # Test-URL laden
+                driver.get(test_url)
+                
+                # Prüfe, ob die Seite geladen wurde
+                page_title = driver.title
+                
+                # Extrahiere einige Elemente, um die Funktionalität zu testen
+                logo = driver.find_elements(By.CSS_SELECTOR, "img.shop-logo")
+                navigation = driver.find_elements(By.CSS_SELECTOR, ".header-navigation")
+                
+                # Browser schließen
+                driver.quit()
+                
+                # Ergebnis ausgeben
+                logger.info(f"[SUCCESS] Selenium-Test erfolgreich, Titel: {page_title}")
+                logger.info(f"[INFO] Logo gefunden: {bool(logo)}")
+                logger.info(f"[INFO] Navigation gefunden: {bool(navigation)}")
+                
+            except Exception as e:
+                logger.error(f"[ERROR] Selenium-Test fehlgeschlagen: {str(e)}")
+                logger.debug(traceback.format_exc())
+        else:
+            logger.warning("[WARNING] Selenium nicht verfügbar, Test übersprungen")
 
 def monitor_out_of_stock():
     """Zeigt die aktuell ausverkauften Produkte an, die überwacht werden"""
@@ -446,7 +568,8 @@ def clean_database():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pokémon TCG Scraper mit verbesserten Filtern")
     parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", "availability_test", 
-                                          "sapphire_test", "mighty_cards_test", "games_island_test",  # Neue Test-Option
+                                          "sapphire_test", "mighty_cards_test", "games_island_test",
+                                          "selenium_test", # Neuer Test für Selenium
                                           "request_test", "show_out_of_stock", "clean"], 
                         default="loop", help="Ausführungsmodus")
     parser.add_argument("--only-available", action="store_true", 
@@ -477,8 +600,10 @@ if __name__ == "__main__":
         test_sapphire()
     elif args.mode == "mighty_cards_test":
         test_mighty_cards()
-    elif args.mode == "games_island_test":  # Neue Testoption
+    elif args.mode == "games_island_test":
         test_games_island()
+    elif args.mode == "selenium_test":
+        test_selenium()
     elif args.mode == "request_test":
         test_request_handler()
     elif args.mode == "show_out_of_stock":
