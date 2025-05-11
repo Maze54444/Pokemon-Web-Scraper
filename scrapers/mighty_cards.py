@@ -121,23 +121,34 @@ def check_product_availability(soup):
     :param soup: BeautifulSoup-Objekt der Produktseite
     :return: Tuple (is_available, price, status_text)
     """
-    # 1. Preisinformation extrahieren mit verbessertem Selektor
+    # 1. Extrahiere den Preis mit der optimierten Funktion
     price = extract_price(soup)
     
-    # 2. Prüfung auf "Ausverkauft"-Textelemente (mehrere Strukturen)
+    # 2. Zuerst den Haupt-Selektor aus dem Anhang prüfen
+    status_element = soup.select_one(".product-detail--delivery .delivery--text")
+    if status_element:
+        status_text = status_element.get_text(strip=True).lower()
+        logger.debug(f"Gefundener Status-Text: '{status_text}'")
+        
+        if "nicht" in status_text or "ausverkauft" in status_text:
+            return False, price, f"[X] Ausverkauft ({status_text})"
+        elif "verfügbar" in status_text:
+            return True, price, f"[V] Verfügbar ({status_text})"
+    
+    # 3. Prüfung auf "Ausverkauft"-Textelemente (mehrere Strukturen als Fallback)
     # Erste Variante: <div class="label__text">Ausverkauft</div>
-    sold_out_label = soup.find('div', {'class': 'label__text'}, text="Ausverkauft")
+    sold_out_label = soup.find('div', {'class': 'label__text'}, text=re.compile("Ausverkauft", re.IGNORECASE))
     
     # Zweite Variante: <span>Ausverkauft</span> in einem div mit bestimmten Klassen
     sold_out_div = soup.find('div', {'class': 'details-product-purchaseplace'})
     sold_out_span = None
     if sold_out_div:
-        sold_out_span = sold_out_div.find('span', text="Ausverkauft")
+        sold_out_span = sold_out_div.find('span', text=re.compile("Ausverkauft", re.IGNORECASE))
     
     # Alternative: Jeglicher Ausverkauft-Text in relevanten Elementen
     sold_out_text = None
     for elem in soup.find_all(['div', 'span']):
-        if elem.text.strip() == 'Ausverkauft':
+        if elem.text.strip().lower() == 'ausverkauft':
             sold_out_text = elem
             break
     
@@ -145,7 +156,7 @@ def check_product_availability(soup):
     if sold_out_label or sold_out_span or sold_out_text:
         return False, price, "[X] Ausverkauft (Text gefunden)"
     
-    # 3. Prüfung auf "In den Warenkorb"-Button
+    # 4. Prüfung auf "In den Warenkorb"-Button
     # Suche nach dem Button mit dem spezifischen Text
     cart_button = None
     for elem in soup.find_all(['button', 'span']):
@@ -168,12 +179,12 @@ def check_product_availability(soup):
     if cart_button:
         return True, price, "[V] Verfügbar (Warenkorb-Button aktiv)"
     
-    # 4. Prüfung auf Vorbestellung
+    # 5. Prüfung auf Vorbestellung
     preorder_elements = soup.find_all(string=re.compile('Vorbestellung|Pre-Order|Preorder', re.IGNORECASE))
     if preorder_elements:
         return True, price, "[V] Vorbestellbar"
     
-    # 5. Zusätzliche Prüfung: Form-Control-Button mit In den Warenkorb
+    # 6. Zusätzliche Prüfung: Form-Control-Button mit In den Warenkorb
     form_control_button = soup.find('button', {'class': 'form-controlbutton'})
     if form_control_button:
         button_text = form_control_button.find('span', {'class': 'form-controlbutton-text'})
@@ -182,16 +193,16 @@ def check_product_availability(soup):
             if 'disabled' not in form_control_button.attrs and 'disabled' not in form_control_button.get('class', []):
                 return True, price, "[V] Verfügbar (Form-Control Warenkorb-Button aktiv)"
     
-    # 6. Fallback: Wenn offensichtliche Ausverkauft-Merkmale fehlen, aber kein Warenkorb-Button vorhanden ist
+    # 7. Fallback: Wenn offensichtliche Ausverkauft-Merkmale fehlen, aber kein Warenkorb-Button vorhanden ist
     page_text = soup.get_text().lower()
     if "ausverkauft" in page_text:
         return False, price, "[X] Ausverkauft (Text in Seiteninhalt)"
     
-    # 7. Prüfung ob irgendein Text/Element mit "nicht verfügbar" oder "nicht lieferbar" existiert
+    # 8. Prüfung ob irgendein Text/Element mit "nicht verfügbar" oder "nicht lieferbar" existiert
     if any(term in page_text for term in ["nicht verfügbar", "nicht lieferbar", "vergriffen"]):
         return False, price, "[X] Ausverkauft (Nicht verfügbar/lieferbar)"
     
-    # 8. Fallback: Wenn "in den warenkorb" im Text, aber nicht als Button gefunden
+    # 9. Fallback: Wenn "in den warenkorb" im Text, aber nicht als Button gefunden
     if "in den warenkorb" in page_text:
         # Prüfe, ob der Text in einem deaktivierten Element steht
         disabled_elements = soup.select('.disabled, [disabled]')
@@ -202,7 +213,7 @@ def check_product_availability(soup):
         # Wenn kein deaktivierter Button gefunden wurde, aber der Text vorhanden ist
         return True, price, "[V] Wahrscheinlich verfügbar (Warenkorb-Text gefunden)"
     
-    # 9. Prüfung auf klassische Shop-Elemente die auf Verfügbarkeit hindeuten
+    # 10. Prüfung auf klassische Shop-Elemente die auf Verfügbarkeit hindeuten
     availability_indicators = soup.select('.availability-label, .product-availability, .stock-label')
     for indicator in availability_indicators:
         indicator_text = indicator.text.lower()
@@ -211,7 +222,7 @@ def check_product_availability(soup):
         if any(term in indicator_text for term in ["ausverkauft", "nicht lieferbar", "nicht verfügbar", "out of stock"]):
             return False, price, f"[X] Ausverkauft (Shop-Indikator: {indicator.text.strip()})"
     
-    # 10. Standard-Fallback: Bei unklaren Fällen als nicht verfügbar einstufen
+    # 11. Standard-Fallback: Bei unklaren Fällen als nicht verfügbar einstufen
     # Diese Änderung ist kritisch, da wir im Zweifelsfall eher falsch-negativ als falsch-positiv sein wollen
     return False, price, "[X] Status unklar, als nicht verfügbar eingestuft"
 
@@ -222,27 +233,40 @@ def extract_price(soup):
     :param soup: BeautifulSoup-Objekt der Produktseite
     :return: Formatierter Preis als String
     """
-    # 1. Versuche zuerst den exakten Selektor basierend auf der HTML-Analyse
+    # 1. Zuerst den präzisen Selektor aus dem Anhang verwenden
+    price_element = soup.select_one(".product-detail--price .price--content")
+    if price_element:
+        try:
+            raw_price = price_element.get_text(strip=True)
+            # Normalisiere den Preis: "129,99 €*" → "129.99€"
+            numeric_price = raw_price.replace("€", "").replace("*", "").replace(".", "").replace(",", ".").strip()
+            price_value = float(numeric_price)
+            # Format mit €-Symbol zurückgeben
+            return f"{price_value:.2f}€".replace('.', ',')
+        except (ValueError, AttributeError):
+            logger.debug(f"Konnte Preis nicht aus '{price_element.text}' extrahieren")
+    
+    # 2. Versuche den exakten Selektor basierend auf der HTML-Analyse als Fallback
     price_elem = soup.find('span', {'class': 'details-product-pricevalue'})
     if price_elem:
         return price_elem.text.strip()
     
-    # 2. Alternatives Attribut 'content' im itemprop='price' Element
+    # 3. Alternatives Attribut 'content' im itemprop='price' Element
     price_attr = soup.find(attrs={'itemprop': 'price'})
     if price_attr and price_attr.has_attr('content'):
         try:
             price_val = float(price_attr['content'])
-            return f"{price_val}€"
+            return f"{price_val:.2f}€".replace('.', ',')
         except (ValueError, TypeError):
             pass
     
-    # 3. Generische Selektoren als Fallback
+    # 4. Generische Selektoren als Fallback
     for selector in ['.price', '.product-price', '.details-product-price__value', '.product-details__product-price']:
         elem = soup.select_one(selector)
         if elem:
             return elem.text.strip()
     
-    # 4. Regex-basierte Extraktion als letzter Fallback
+    # 5. Regex-basierte Extraktion als letzter Fallback
     page_text = soup.get_text()
     price_match = re.search(r'(\d+[,.]\d+)\s*[€$£]', page_text)
     if price_match:
