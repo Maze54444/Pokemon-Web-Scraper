@@ -1,20 +1,20 @@
 """
-Spezieller Scraper für mighty-cards.de, der die Sitemap verwendet
-um Produkte zu finden und zu verarbeiten.
-Optimiert mit Multithreading und verbesserter Name-vs-Typ Erkennung.
+Spezieller Scraper für mighty-cards.de mit Sitemap-Integration und Multithreading.
+Implementiert robuste Verfügbarkeitsprüfung und präzise Produkttyperkennung.
 """
 
 import requests
-import logging
-import re
-import json
 import hashlib
+import re
 import time
-import concurrent.futures
-import os
-from threading import Lock
+import random
+import logging
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote_plus
+from threading import Lock
+import os
+import json
+import concurrent.futures
 from pathlib import Path
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text, clean_text
 from utils.stock import update_product_status
@@ -115,8 +115,8 @@ def save_cache(cache_data):
 
 def check_product_availability(soup):
     """
-    Verbesserte Verfügbarkeitsprüfung für mighty-cards.de, die beide mögliche Darstellungen 
-    von "Ausverkauft" berücksichtigt und den Warenkorb-Button überprüft.
+    Verbesserte Verfügbarkeitsprüfung für mighty-cards.de, die verschiedene 
+    Darstellungen von "Ausverkauft" berücksichtigt und mehrere Indikatoren prüft.
     
     :param soup: BeautifulSoup-Objekt der Produktseite
     :return: Tuple (is_available, price, status_text)
@@ -124,13 +124,15 @@ def check_product_availability(soup):
     # 1. Preisinformation extrahieren mit verbessertem Selektor
     price = extract_price(soup)
     
-    # 2. Prüfung auf "Ausverkauft"-Textelemente (beide mögliche Strukturen)
+    # 2. Prüfung auf "Ausverkauft"-Textelemente (mehrere Strukturen)
     # Erste Variante: <div class="label__text">Ausverkauft</div>
     sold_out_label = soup.find('div', {'class': 'label__text'}, text="Ausverkauft")
     
     # Zweite Variante: <span>Ausverkauft</span> in einem div mit bestimmten Klassen
-    sold_out_span = soup.find(lambda tag: tag.name == 'span' and tag.text.strip() == 'Ausverkauft' and 
-                             tag.parent and 'details-product-purchaseplace' in tag.parent.get('class', []))
+    sold_out_div = soup.find('div', {'class': 'details-product-purchaseplace'})
+    sold_out_span = None
+    if sold_out_div:
+        sold_out_span = sold_out_div.find('span', text="Ausverkauft")
     
     # Alternative: Jeglicher Ausverkauft-Text in relevanten Elementen
     sold_out_text = None
@@ -139,11 +141,12 @@ def check_product_availability(soup):
             sold_out_text = elem
             break
     
+    # Wenn irgendeines der Ausverkauft-Elemente gefunden wurde
     if sold_out_label or sold_out_span or sold_out_text:
         return False, price, "[X] Ausverkauft (Text gefunden)"
     
     # 3. Prüfung auf "In den Warenkorb"-Button
-    # Finde den exakten Button mit dem Text
+    # Suche nach dem Button mit dem spezifischen Text
     cart_button = None
     for elem in soup.find_all(['button', 'span']):
         if elem.text and "In den Warenkorb" in elem.text:
@@ -170,12 +173,25 @@ def check_product_availability(soup):
     if preorder_elements:
         return True, price, "[V] Vorbestellbar"
     
-    # 5. Fallback: Wenn offensichtliche Ausverkauft-Merkmale fehlen, but kein Warenkorb-Button vorhanden ist
+    # 5. Zusätzliche Prüfung: Form-Control-Button mit In den Warenkorb
+    form_control_button = soup.find('button', {'class': 'form-controlbutton'})
+    if form_control_button:
+        button_text = form_control_button.find('span', {'class': 'form-controlbutton-text'})
+        if button_text and "In den Warenkorb" in button_text.text:
+            # Prüfe, ob der Button deaktiviert ist
+            if 'disabled' not in form_control_button.attrs and 'disabled' not in form_control_button.get('class', []):
+                return True, price, "[V] Verfügbar (Form-Control Warenkorb-Button aktiv)"
+    
+    # 6. Fallback: Wenn offensichtliche Ausverkauft-Merkmale fehlen, aber kein Warenkorb-Button vorhanden ist
     page_text = soup.get_text().lower()
     if "ausverkauft" in page_text:
         return False, price, "[X] Ausverkauft (Text in Seiteninhalt)"
     
-    # 6. Fallback: Wenn "in den warenkorb" im Text, aber nicht als Button gefunden
+    # 7. Prüfung ob irgendein Text/Element mit "nicht verfügbar" oder "nicht lieferbar" existiert
+    if any(term in page_text for term in ["nicht verfügbar", "nicht lieferbar", "vergriffen"]):
+        return False, price, "[X] Ausverkauft (Nicht verfügbar/lieferbar)"
+    
+    # 8. Fallback: Wenn "in den warenkorb" im Text, aber nicht als Button gefunden
     if "in den warenkorb" in page_text:
         # Prüfe, ob der Text in einem deaktivierten Element steht
         disabled_elements = soup.select('.disabled, [disabled]')
@@ -186,8 +202,18 @@ def check_product_availability(soup):
         # Wenn kein deaktivierter Button gefunden wurde, aber der Text vorhanden ist
         return True, price, "[V] Wahrscheinlich verfügbar (Warenkorb-Text gefunden)"
     
-    # 7. Standardergebnis: Status unbekannt, als nicht verfügbar interpretieren
-    return False, price, "[?] Status unbekannt, als nicht verfügbar interpretiert"
+    # 9. Prüfung auf klassische Shop-Elemente die auf Verfügbarkeit hindeuten
+    availability_indicators = soup.select('.availability-label, .product-availability, .stock-label')
+    for indicator in availability_indicators:
+        indicator_text = indicator.text.lower()
+        if any(term in indicator_text for term in ["auf lager", "lieferbar", "in stock", "verfügbar"]):
+            return True, price, f"[V] Verfügbar (Shop-Indikator: {indicator.text.strip()})"
+        if any(term in indicator_text for term in ["ausverkauft", "nicht lieferbar", "nicht verfügbar", "out of stock"]):
+            return False, price, f"[X] Ausverkauft (Shop-Indikator: {indicator.text.strip()})"
+    
+    # 10. Standard-Fallback: Bei unklaren Fällen als nicht verfügbar einstufen
+    # Diese Änderung ist kritisch, da wir im Zweifelsfall eher falsch-negativ als falsch-positiv sein wollen
+    return False, price, "[X] Status unklar, als nicht verfügbar eingestuft"
 
 def extract_price(soup):
     """
@@ -1231,7 +1257,7 @@ def create_product_id(title, base_id="mightycards"):
         normalized_title = normalized_title[:50]
     
     # Erstelle eine strukturierte ID
-    product_id = f"{base_id}_{product_code}_{product_type}_{language}_{normalized_title}"
+    product_id = f"{base_id}_{product_code}_{product_type}_{language}"
     
     # Zusatzinformationen
     if "18er" in title_lower:
