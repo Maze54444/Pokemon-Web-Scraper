@@ -130,9 +130,11 @@ def check_product_availability(soup):
         status_text = status_element.get_text(strip=True).lower()
         logger.debug(f"Gefundener Status-Text: '{status_text}'")
         
-        if "nicht" in status_text or "ausverkauft" in status_text:
+        # KORREKTUR: Prüfe zuerst auf negative Bedingungen (nicht verfügbar, ausverkauft)
+        if any(term in status_text for term in ["nicht verfügbar", "nicht auf lager", "nicht lieferbar", "ausverkauft"]):
             return False, price, f"[X] Ausverkauft ({status_text})"
-        elif "verfügbar" in status_text:
+        # Dann erst auf positive Bedingungen prüfen
+        elif any(term in status_text for term in ["sofort verfügbar", "verfügbar", "auf lager"]):
             return True, price, f"[V] Verfügbar ({status_text})"
     
     # 3. Prüfung auf "Ausverkauft"-Textelemente (mehrere Strukturen als Fallback)
@@ -246,12 +248,30 @@ def extract_price(soup):
         except (ValueError, AttributeError):
             logger.debug(f"Konnte Preis nicht aus '{price_element.text}' extrahieren")
     
-    # 2. Versuche den exakten Selektor basierend auf der HTML-Analyse als Fallback
-    price_elem = soup.find('span', {'class': 'details-product-pricevalue'})
-    if price_elem:
-        return price_elem.text.strip()
+    # 2. HINZUGEFÜGT: Meta-Tag mit itemprop="price" (höchste Priorität im Fallback)
+    meta_price = soup.find("meta", {"itemprop": "price"})
+    if meta_price and meta_price.has_attr("content"):
+        try:
+            price_val = float(meta_price["content"])
+            return f"{price_val:.2f}€".replace('.', ',')
+        except (ValueError, TypeError):
+            logger.debug(f"Konnte Preis nicht aus Meta-Tag extrahieren: {meta_price['content']}")
     
-    # 3. Alternatives Attribut 'content' im itemprop='price' Element
+    # 3. Versuche den alternativen Selektor gemäß Anforderung
+    price_elem = soup.select_one(".details-product-pricevalue")
+    if price_elem:
+        try:
+            raw_price = price_elem.text.strip()
+            # Versuche, eine Zahl zu extrahieren
+            if "€" in raw_price:
+                numeric_part = raw_price.replace("€", "").replace("*", "").replace(".", "").replace(",", ".").strip()
+                price_val = float(numeric_part)
+                return f"{price_val:.2f}€".replace('.', ',')
+            return raw_price
+        except (ValueError, AttributeError):
+            logger.debug(f"Konnte Preis nicht aus details-product-pricevalue extrahieren: {price_elem.text}")
+    
+    # 4. Alternatives Attribut 'content' im itemprop='price' Element
     price_attr = soup.find(attrs={'itemprop': 'price'})
     if price_attr and price_attr.has_attr('content'):
         try:
@@ -260,17 +280,24 @@ def extract_price(soup):
         except (ValueError, TypeError):
             pass
     
-    # 4. Generische Selektoren als Fallback
+    # 5. Generische Selektoren als Fallback
     for selector in ['.price', '.product-price', '.details-product-price__value', '.product-details__product-price']:
         elem = soup.select_one(selector)
         if elem:
             return elem.text.strip()
     
-    # 5. Regex-basierte Extraktion als letzter Fallback
+    # 6. Regex-basierte Extraktion als letzter Fallback gemäß Anforderung
     page_text = soup.get_text()
     price_match = re.search(r'(\d+[,.]\d+)\s*[€$£]', page_text)
     if price_match:
-        return f"{price_match.group(1)}€"
+        try:
+            # Versuche, den Preis zu normalisieren
+            price_str = price_match.group(1).replace(',', '.')
+            price_val = float(price_str)
+            return f"{price_val:.2f}€".replace('.', ',')
+        except (ValueError, TypeError):
+            # Falls das Parsen fehlschlägt, gib den Rohtext zurück
+            return f"{price_match.group(1)}€"
     
     # Kein Preis gefunden
     return "Preis nicht verfügbar"
