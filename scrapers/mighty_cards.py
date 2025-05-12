@@ -104,9 +104,9 @@ CACHE_FILE = "data/mighty_cards_cache.json"
 
 # Selenium-Konfiguration
 SELENIUM_TIMEOUT = 15  # Sekunden
-SELENIUM_HEADLESS = True
-BROWSER_POOL_SIZE = 3  # Anzahl der Browser im Pool
-BROWSER_MAX_USES = 10  # Maximale Nutzung eines Browsers bevor er neugestartet wird
+SELENIUM_HEADLESS = os.environ.get('SELENIUM_HEADLESS', 'true').lower() == 'true'
+BROWSER_POOL_SIZE = int(os.environ.get('BROWSER_POOL_SIZE', '3'))
+BROWSER_MAX_USES = int(os.environ.get('BROWSER_MAX_USES', '10'))
 
 # Browser-Pool und Zähler
 browser_pool = queue.Queue()
@@ -131,12 +131,43 @@ def create_browser():
     """Erstellt einen neuen Selenium-Browser mit optimierten Einstellungen"""
     options = Options()
     
+    # Chrome Binary Pfad konfigurieren - zuerst aus Umgebungsvariable, dann Standardpfade prüfen
+    chrome_binary = os.environ.get('SELENIUM_BROWSER_BINARY')
+    
+    # Liste möglicher Chrome-Binaries
+    potential_paths = [
+        # Linux
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+        # MacOS
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        # Windows
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    ]
+    
+    # Wenn keine Umgebungsvariable gesetzt ist, versuche Standardpfade
+    if not chrome_binary:
+        for path in potential_paths:
+            if os.path.exists(path):
+                chrome_binary = path
+                logger.info(f"🔍 Chrome-Binary gefunden unter: {chrome_binary}")
+                break
+    
+    # Wenn immer noch kein Binary gefunden wurde, eine Warnung ausgeben
+    if chrome_binary:
+        options.binary_location = chrome_binary
+    else:
+        logger.warning("⚠️ Kein Chrome-Binary gefunden! Selenium wird versuchen, Chrome automatisch zu finden.")
+    
     if SELENIUM_HEADLESS:
         options.add_argument("--headless=new")
     
     # Performance-Optimierungen
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--no-sandbox")
+    options.add_argument("--no-sandbox")  # Wichtig für Container/CI-Umgebungen
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-infobars")
@@ -147,6 +178,13 @@ def create_browser():
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+    
+    # Bei Server-Umgebungen ohne Display
+    if os.environ.get('RENDER_ENVIRONMENT') == 'true' or os.environ.get('CI') == 'true':
+        logger.info("🖥️ Server-Umgebung erkannt, konfiguriere für Headless-Betrieb")
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--window-size=1920,1080")
     
     # Zufälliger User-Agent für natürlicheres Verhalten
     user_agents = [
@@ -1427,7 +1465,7 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     cache_valid = len(cached_products) > 0
     force_refresh = current_time - last_update > 86400  # Alle 24 Stunden Cache aktualisieren
     
-    # Prüfen, ob wir den Cache verwenden können
+    # Prüfen, ob wir neue Keywords haben, die nicht im Cache sind
     found_all_products = True
     
     # Prüfen, ob alle gesuchten Produkte im Cache sind
@@ -1462,6 +1500,7 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
             logger.info(f"🔄 Überprüfe {len(valid_product_urls)} zwischengespeicherte Produkte")
             
             # Parallelisierte Verarbeitung der gecachten Produkt-URLs
+            import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(valid_product_urls), 10)) as executor:
                 futures = []
                 
@@ -1542,6 +1581,7 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
         # Bestimme optimale Worker-Anzahl basierend auf CPU-Kernen und URL-Anzahl
         max_workers = min(20, len(sitemap_products))  # Max 20 Worker
         
+        import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Dictionary zum Speichern der Future-Objekte mit ihren URLs
             future_to_url = {

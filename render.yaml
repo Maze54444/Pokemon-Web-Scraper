@@ -29,14 +29,32 @@ services:
         libxrandr2 \
         xdg-utils \
         libxshmfence1 \
-        xvfb         # Virtueller Framebuffer für Headless Chrome
-      # Install Chrome
+        xvfb
+
+      # Install Chrome with proper verification
       wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
       echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list
-      apt-get update && apt-get install -y google-chrome-stable
+      apt-get update
+      apt-get install -y google-chrome-stable
+
+      # Verify Chrome installation and print version
+      google-chrome-stable --version || echo "Chrome installation failed"
+
+      # Create Chrome symlink to ensure it's findable
+      ln -sf /usr/bin/google-chrome-stable /usr/local/bin/chrome
+      ln -sf /usr/bin/google-chrome-stable /usr/local/bin/google-chrome
+
       # Install Python packages
       pip install -r requirements.txt
-    startCommand: python main.py --no-selenium
+    startCommand: |
+      # Start Xvfb in background
+      Xvfb :99 -screen 0 1280x1024x24 &
+      
+      # Wait for Xvfb to start
+      sleep 2
+      
+      # Start the scraper with --no-selenium fallback if needed
+      python main.py --mode loop
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
@@ -49,8 +67,10 @@ services:
       - key: SELENIUM_NO_SANDBOX
         value: "true"
       - key: BROWSER_POOL_SIZE
-        value: "1"
+        value: "2"
       - key: BROWSER_MAX_USES
         value: "5"
       - key: RENDER_ENVIRONMENT
         value: "true"
+      - key: PATH
+        value: "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
