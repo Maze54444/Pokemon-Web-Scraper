@@ -113,6 +113,76 @@ def save_cache(cache_data):
         logger.error(f"❌ Fehler beim Speichern des Caches: {e}")
         return False
 
+def check_product_availability(soup):
+    """
+    Verbesserte Verfügbarkeitsprüfung für mighty-cards.de, die beide mögliche Darstellungen 
+    von "Ausverkauft" berücksichtigt und den Warenkorb-Button überprüft.
+    
+    :param soup: BeautifulSoup-Objekt der Produktseite
+    :return: Tuple (is_available, price, status_text)
+    """
+    # 1. Preisinformation extrahieren mit verbessertem Selektor
+    price_elem = soup.find('span', {'class': 'details-product-price__value'})
+    if price_elem:
+        price = price_elem.text.strip()
+    else:
+        # Fallback für andere Preisformate
+        price_elem = soup.select_one('.product-details__product-price, .price')
+        price = price_elem.text.strip() if price_elem else "Preis nicht verfügbar"
+    
+    # 2. Positivprüfung: Suche nach "In den Warenkorb"-Button
+    cart_button = None
+    
+    # Suche nach dem Button-Element mit dem Text "In den Warenkorb"
+    for elem in soup.find_all(['button', 'span']):
+        if elem.text and "In den Warenkorb" in elem.text:
+            cart_button = elem
+            # Prüfe, ob das Elternelement ein Button ist
+            parent = elem.parent
+            while parent and parent.name != 'button' and parent.name != 'form':
+                parent = parent.parent
+            
+            if parent and parent.name == 'button':
+                # Prüfe, ob der Button deaktiviert ist
+                if parent.has_attr('disabled'):
+                    cart_button = None  # Button ist deaktiviert
+                else:
+                    cart_button = parent
+            break
+    
+    if cart_button:
+        return True, price, "[V] Verfügbar (Warenkorb-Button aktiv)"
+    
+    # 3. Negativprüfung: Suche nach beiden möglichen "Ausverkauft"-Elementen
+    # a) Als div mit class="label__text"
+    sold_out_label = soup.find('div', {'class': 'label__text'}, text="Ausverkauft")
+    
+    # b) Als span innerhalb eines div
+    sold_out_span = soup.find('span', text="Ausverkauft")
+    
+    # c) Prüfe auf Vorbestellung
+    is_preorder = False
+    preorder_text = soup.find(string=re.compile("Vorbestellung", re.IGNORECASE))
+    if preorder_text:
+        is_preorder = True
+        return True, price, "[V] Vorbestellbar"
+    
+    if sold_out_label or sold_out_span:
+        return False, price, "[X] Ausverkauft"
+    
+    # 4. Wenn nichts eindeutiges gefunden wurde, versuche eine heuristische Annäherung
+    # Untersuche den gesamten Text nach Indizien für Verfügbarkeit oder Nichtverfügbarkeit
+    page_text = soup.get_text().lower()
+    
+    if "ausverkauft" in page_text:
+        return False, price, "[X] Ausverkauft (Text gefunden)"
+    
+    if "in den warenkorb" in page_text and "ausverkauft" not in page_text:
+        return True, price, "[V] Wahrscheinlich verfügbar"
+    
+    # 5. Standardergebnis: Verfügbarkeitsstatus unbekannt (als nicht verfügbar interpretieren)
+    return False, price, "[?] Status unbekannt, als nicht verfügbar interpretiert"
+
 def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     """
     Spezieller Scraper für mighty-cards.de mit Sitemap-Integration und Multithreading
@@ -390,8 +460,8 @@ def process_cached_product(product_url, product_data, product_info, seen, out_of
         else:
             title = title_elem.text.strip()
         
-        # Verwende das Availability-Modul für Verfügbarkeitserkennnung
-        is_available, price, status_text = detect_availability(soup, product_url)
+        # VERBESSERT: Verwende die neue Verfügbarkeitsprüfung
+        is_available, price, status_text = check_product_availability(soup)
         
         # Eindeutige ID für das Produkt erstellen
         product_id = product_data.get("product_id") or create_product_id(title)
@@ -423,6 +493,19 @@ def process_cached_product(product_url, product_data, product_info, seen, out_of
             
             # Extrahiere Produkttyp
             detected_product_type = extract_product_type_from_text(title)
+            
+            # VERBESSERT: Überprüfe, ob der Produkttyp dem ursprünglichen Suchbegriff entspricht
+            search_term_product_type = None
+            for item in product_info:
+                if item["original_term"] == search_term:
+                    search_term_product_type = item["product_type"]
+                    break
+            
+            # Wenn der erkannte Produkttyp nicht mit dem gesuchten übereinstimmt, überspringen
+            if (search_term_product_type and search_term_product_type != "unknown" and 
+                detected_product_type != "unknown" and search_term_product_type != detected_product_type):
+                logger.debug(f"⚠️ Produkttyp-Diskrepanz: Gesucht {search_term_product_type}, gefunden {detected_product_type}: {title}")
+                return True, False
             
             # Produkt-Daten sammeln
             product_data = {
@@ -844,37 +927,8 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
         # DEBUG: Zeige Titel für Debugging-Zwecke
         logger.debug(f"Titel: {title}")
         
-        # Strikte Titel-Validierung mit verbesserter Typ-vs-Name Unterscheidung
-        title_lower = title.lower()
-        
-        # 1. "Pokemon" muss korrekt im Titel positioniert sein
-        # Bei mighty-cards ist "Pokemon" oft am Ende des Titels
-        is_valid_pokemon_product = False
-        
-        # Muster 1: Pokemon ist am Anfang (Standard)
-        if title_lower.startswith("pokemon"):
-            is_valid_pokemon_product = True
-        
-        # Muster 2: Pokemon steht am Ende (typisch für mighty-cards.de)
-        if title_lower.endswith("pokemon"):
-            is_valid_pokemon_product = True
-            
-        # Muster 3: Pokémon TCG am Anfang
-        if title_lower.startswith("pokémon") or "pokemon tcg" in title_lower:
-            is_valid_pokemon_product = True
-        
-        # Wenn kein gültiges Pokemon-Produkt, abbrechen
-        if not is_valid_pokemon_product:
-            return False
-            
-        # 2. Enthält keine Blacklist-Begriffe
-        if contains_blacklist_terms(title_lower):
-            # Explizit "one piece card game" prüfen, da dieser häufig falsch erkannt wird
-            if "one piece" in title_lower or "op01" in title_lower or "op02" in title_lower:
-                return False
-                
-            logger.debug(f"❌ Titel enthält Blacklist-Begriff: {title}")
-            return False
+        # VERBESSERT: Verwende die neue Verfügbarkeitsprüfung
+        is_available, price, status_text = check_product_availability(soup)
         
         # URL-Segmente für zuverlässigere Erkennung aufteilen
         url_segments = product_url.split('/')
@@ -962,6 +1016,16 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
                     type_match = True
                     current_score += 3
                 
+                # VERBESSERT: Striktere Typprüfung - wenn gesuchter Typ und erkannter Typ bekannt
+                # sind und nicht übereinstimmen, reduziere den Score
+                if product["product_type"] != "unknown" and detected_product_type != "unknown":
+                    if product["product_type"] != detected_product_type:
+                        # Bei Display besonders streng sein
+                        if product["product_type"] == "display" and detected_product_type != "display":
+                            current_score -= 20  # Stark reduzieren, wenn wir Display suchen aber etwas anderes finden
+                        else:
+                            current_score -= 5  # Weniger stark reduzieren für andere Typen
+                
                 # 3.4 Wähle das Produkt mit dem höchsten Score
                 if current_score > matching_score:
                     matched_product = product
@@ -984,21 +1048,10 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
                 logger.debug(f"❌ Produkt passt nicht zu Suchbegriffen (Score {matching_score}): {title}")
                 return False
         
-        # Bei Produkttyp-Unstimmigkeit: Weniger strenge Prüfung
-        # Da wir bereits durch die URL-Prüfung gegangen sind (KP09/18er oder KP09/36er)
-        if direct_url_match:
-            # Wenn es ein direkter URL-Match ist, akzeptieren wir es ohne weitere Prüfung
-            pass
-        elif matching_score >= 5 and matched_product["product_type"] != "unknown" and detected_product_type != "unknown":
-            # Wenn sowohl der gesuchte als auch der erkannte Typ bekannt sind und nicht übereinstimmen
-            if matched_product["product_type"] != detected_product_type:
-                # Beispiel: Wir suchen nach "reisegefährten display", aber gefunden wird "reisegefährten blister"
-                logger.debug(f"❌ Produkttyp stimmt nicht überein: Gesucht {matched_product['product_type']}, gefunden {detected_product_type} - {title}")
-                # Wir lassen es trotzdem zu, protokollieren es aber
-                pass
-        
-        # Verwende das Availability-Modul für Verfügbarkeitserkennnung
-        is_available, price, status_text = detect_availability(soup, product_url)
+        # VERBESSERT: Bei Blister/ETB Produkten, wenn wir eigentlich Display suchen, ablehnen
+        if matched_product["product_type"] == "display" and detected_product_type != "unknown" and detected_product_type != "display":
+            logger.debug(f"❌ Produkttyp stimmt nicht überein: Gesucht '{matched_product['product_type']}', gefunden '{detected_product_type}': {title}")
+            return False
         
         # Eindeutige ID für das Produkt erstellen
         product_id = create_product_id(title)
