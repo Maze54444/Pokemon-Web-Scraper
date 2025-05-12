@@ -1,21 +1,37 @@
 """
-Spezieller Scraper für mighty-cards.de, der die Sitemap verwendet
-um Produkte zu finden und zu verarbeiten.
-Optimiert mit Multithreading und verbesserter Name-vs-Typ Erkennung.
+Spezieller Scraper für mighty-cards.de mit Sitemap-Integration und zweistufigem Ansatz:
+1. BeautifulSoup für schnelle URL-Filterung
+2. Selenium für präzise Preis-/Verfügbarkeitserkennung der gefundenen Treffer
+
+Diese kombinierte Lösung bietet hohe Performance und Genauigkeit.
 """
 
 import requests
-import logging
+import hashlib
 import re
 import json
-import hashlib
 import time
-import concurrent.futures
+import random
+import logging
 import os
+import threading
+import queue
+from pathlib import Path
 from threading import Lock
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote_plus
-from pathlib import Path
+
+# Selenium Imports
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+
+# Projekt-spezifische Importe
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text, clean_text
 from utils.stock import update_product_status
 from utils.availability import detect_availability
@@ -81,9 +97,349 @@ UMLAUT_MAPPING = {
 url_lock = Lock()
 data_lock = Lock()
 cache_lock = Lock()
+browser_pool_lock = Lock()
 
 # Cache-Datei
 CACHE_FILE = "data/mighty_cards_cache.json"
+
+# Selenium-Konfiguration
+SELENIUM_TIMEOUT = 15  # Sekunden
+SELENIUM_HEADLESS = True
+BROWSER_POOL_SIZE = 3  # Anzahl der Browser im Pool
+BROWSER_MAX_USES = 10  # Maximale Nutzung eines Browsers bevor er neugestartet wird
+
+# Browser-Pool und Zähler
+browser_pool = queue.Queue()
+browser_use_count = {}
+
+# Semaphore zum Begrenzen der gleichzeitigen Selenium-Anfragen
+browser_semaphore = threading.Semaphore(BROWSER_POOL_SIZE)
+
+def initialize_browser_pool():
+    """Initialisiert den Browser-Pool für Selenium"""
+    logger.info(f"🔄 Initialisiere Browser-Pool mit {BROWSER_POOL_SIZE} Browsern")
+    for _ in range(BROWSER_POOL_SIZE):
+        try:
+            browser = create_browser()
+            browser_id = id(browser)
+            browser_use_count[browser_id] = 0
+            browser_pool.put(browser)
+        except Exception as e:
+            logger.error(f"❌ Fehler beim Erstellen eines Browsers: {e}")
+
+def create_browser():
+    """Erstellt einen neuen Selenium-Browser mit optimierten Einstellungen"""
+    options = Options()
+    
+    if SELENIUM_HEADLESS:
+        options.add_argument("--headless=new")
+    
+    # Performance-Optimierungen
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--disable-popup-blocking")
+    
+    # Verhindert Bot-Erkennung
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    
+    # Zufälliger User-Agent für natürlicheres Verhalten
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
+    ]
+    options.add_argument(f"--user-agent={random.choice(user_agents)}")
+    
+    # Verwende webdriver_manager für automatische Updates des ChromeDrivers
+    try:
+        service = Service(ChromeDriverManager().install())
+        browser = webdriver.Chrome(service=service, options=options)
+        
+        # Anti-Bot-Detection: Execute CDP commands
+        browser.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            """
+        })
+        
+        # Setze angemessene Timeouts
+        browser.set_page_load_timeout(SELENIUM_TIMEOUT)
+        browser.implicitly_wait(5)
+        
+        return browser
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Erstellen des Browsers: {e}")
+        raise
+
+def get_browser_from_pool():
+    """Holt einen Browser aus dem Pool oder erstellt einen neuen bei Bedarf"""
+    with browser_pool_lock:
+        if browser_pool.empty():
+            logger.info("🔄 Browser-Pool leer, erstelle neuen Browser")
+            browser = create_browser()
+            browser_id = id(browser)
+            browser_use_count[browser_id] = 0
+            return browser
+        
+        browser = browser_pool.get()
+        browser_id = id(browser)
+        
+        # Prüfe, ob Browser zu oft verwendet wurde und erstelle ggf. einen neuen
+        if browser_use_count.get(browser_id, 0) >= BROWSER_MAX_USES:
+            logger.info(f"🔄 Browser hat Nutzungslimit erreicht ({BROWSER_MAX_USES}), erstelle neuen Browser")
+            try:
+                browser.quit()
+            except:
+                pass
+            
+            browser = create_browser()
+            browser_id = id(browser)
+            browser_use_count[browser_id] = 0
+        
+        return browser
+
+def return_browser_to_pool(browser):
+    """Gibt einen Browser zurück in den Pool"""
+    with browser_pool_lock:
+        browser_id = id(browser)
+        
+        # Erhöhe Nutzungszähler
+        if browser_id in browser_use_count:
+            browser_use_count[browser_id] += 1
+        else:
+            browser_use_count[browser_id] = 1
+        
+        # Zurück in den Pool
+        browser_pool.put(browser)
+
+def shutdown_browser_pool():
+    """Schließt alle Browser im Pool"""
+    logger.info("🔄 Schließe Browser-Pool")
+    with browser_pool_lock:
+        while not browser_pool.empty():
+            browser = browser_pool.get()
+            try:
+                browser.quit()
+            except:
+                pass
+
+def extract_product_info_with_selenium(product_url, timeout=SELENIUM_TIMEOUT):
+    """
+    Extrahiert präzise Preis- und Verfügbarkeitsinformationen mit Selenium
+    
+    :param product_url: URL der Produktseite
+    :param timeout: Timeout in Sekunden
+    :return: Dictionary mit Produktdetails (title, price, is_available, status_text)
+    """
+    browser = None
+    result = {
+        "title": None,
+        "price": "Preis nicht verfügbar",
+        "is_available": False,
+        "status_text": "[?] Status unbekannt"
+    }
+    
+    with browser_semaphore:
+        try:
+            browser = get_browser_from_pool()
+            logger.info(f"🌐 Lade Produktseite mit Selenium: {product_url}")
+            
+            # Zufällige Verzögerung für natürlicheres Verhalten
+            time.sleep(random.uniform(1, 2))
+            
+            # Seite laden
+            browser.get(product_url)
+            
+            # Warte auf das Laden der Seite
+            WebDriverWait(browser, timeout).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            
+            # Titel extrahieren
+            try:
+                title_element = WebDriverWait(browser, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".product-details__product-title, h1.title, h1"))
+                )
+                result["title"] = title_element.text.strip()
+            except (TimeoutException, NoSuchElementException):
+                logger.warning(f"⚠️ Titel konnte nicht gefunden werden für {product_url}")
+            
+            # Preis extrahieren mit verschiedenen Selektoren
+            price_selectors = [
+                ".details-product-price__value",
+                ".product-details__product-price",
+                ".price"
+            ]
+            
+            for selector in price_selectors:
+                try:
+                    price_element = WebDriverWait(browser, 3).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                    )
+                    result["price"] = price_element.text.strip()
+                    logger.info(f"💰 Preis gefunden: {result['price']}")
+                    break
+                except (TimeoutException, NoSuchElementException):
+                    continue
+            
+            # Verfügbarkeit prüfen (erst negative, dann positive Indikatoren)
+            
+            # 1. Negative Indikatoren (nicht verfügbar)
+            not_available_indicators = [
+                # Text-basierte Indikatoren
+                ("text", "Ausverkauft"),
+                ("text", "nicht verfügbar"),
+                ("text", "nicht auf Lager"),
+                ("text", "vergriffen"),
+                
+                # Element-basierte Indikatoren
+                ("selector", ".badge.badge-danger"),
+                ("selector", ".not-available"),
+                ("selector", ".sold-out"),
+                ("selector", "button.disabled"),
+                ("selector", "[disabled]")
+            ]
+            
+            for indicator_type, indicator in not_available_indicators:
+                try:
+                    if indicator_type == "text":
+                        # Suche nach Text in der Seite
+                        page_text = browser.find_element(By.TAG_NAME, "body").text
+                        if indicator in page_text:
+                            result["is_available"] = False
+                            result["status_text"] = f"[X] Ausverkauft ({indicator} gefunden)"
+                            logger.info(f"❌ Produkt nicht verfügbar: {indicator} im Text gefunden")
+                            return result
+                    else:
+                        # Suche nach Element mit Selektor
+                        if browser.find_elements(By.CSS_SELECTOR, indicator):
+                            result["is_available"] = False
+                            result["status_text"] = f"[X] Ausverkauft (Element {indicator} gefunden)"
+                            logger.info(f"❌ Produkt nicht verfügbar: Element {indicator} gefunden")
+                            return result
+                except Exception:
+                    pass
+            
+            # 2. Prüfung auf Vorbestellung
+            preorder_indicators = [
+                ("text", "Vorbestellung"),
+                ("text", "vorbestellen"),
+                ("text", "Pre-Order"),
+                ("text", "Preorder"),
+                ("selector", ".preorder"),
+                ("selector", ".pre-order")
+            ]
+            
+            for indicator_type, indicator in preorder_indicators:
+                try:
+                    if indicator_type == "text":
+                        page_text = browser.find_element(By.TAG_NAME, "body").text
+                        if indicator in page_text:
+                            result["is_available"] = True
+                            result["status_text"] = f"[V] Vorbestellbar ({indicator} gefunden)"
+                            logger.info(f"✅ Produkt vorbestellbar: {indicator} im Text gefunden")
+                            return result
+                    else:
+                        if browser.find_elements(By.CSS_SELECTOR, indicator):
+                            result["is_available"] = True
+                            result["status_text"] = f"[V] Vorbestellbar (Element {indicator} gefunden)"
+                            logger.info(f"✅ Produkt vorbestellbar: Element {indicator} gefunden")
+                            return result
+                except Exception:
+                    pass
+            
+            # 3. Positive Indikatoren (verfügbar)
+            available_indicators = [
+                # Warenkorb-Button
+                ("selector", "button:not([disabled]).add-to-cart, button:not([disabled]) .form-control__button-text"),
+                
+                # Text-basierte Indikatoren
+                ("text", "In den Warenkorb"),
+                ("text", "Auf Lager"),
+                ("text", "Lieferbar"),
+                ("text", "Verfügbar"),
+                
+                # Element-basierte Indikatoren
+                ("selector", ".available"),
+                ("selector", ".in-stock"),
+                ("selector", ".badge-success")
+            ]
+            
+            for indicator_type, indicator in available_indicators:
+                try:
+                    if indicator_type == "text":
+                        # Prüfen, ob der Text im Kontext eines nicht-deaktivierten Buttons vorkommt
+                        if indicator == "In den Warenkorb":
+                            # Spezialfall für den Warenkorb-Button
+                            cart_buttons = browser.find_elements(By.XPATH, 
+                                f"//button[contains(text(), '{indicator}') and not(@disabled)]")
+                            
+                            if not cart_buttons:
+                                # Suche nach Span-Element innerhalb eines Buttons
+                                cart_buttons = browser.find_elements(By.XPATH, 
+                                    f"//button[not(@disabled)]//span[contains(text(), '{indicator}')]")
+                            
+                            if cart_buttons:
+                                result["is_available"] = True
+                                result["status_text"] = f"[V] Verfügbar (Warenkorb-Button aktiv)"
+                                logger.info(f"✅ Produkt verfügbar: Warenkorb-Button aktiv")
+                                return result
+                        else:
+                            # Andere Text-Indikatoren
+                            page_text = browser.find_element(By.TAG_NAME, "body").text
+                            if indicator in page_text:
+                                result["is_available"] = True
+                                result["status_text"] = f"[V] Verfügbar ({indicator} gefunden)"
+                                logger.info(f"✅ Produkt verfügbar: {indicator} im Text gefunden")
+                                return result
+                    else:
+                        # Suche nach Element mit Selektor
+                        if browser.find_elements(By.CSS_SELECTOR, indicator):
+                            result["is_available"] = True
+                            result["status_text"] = f"[V] Verfügbar (Element {indicator} gefunden)"
+                            logger.info(f"✅ Produkt verfügbar: Element {indicator} gefunden")
+                            return result
+                except Exception:
+                    pass
+            
+            # Fallback wenn keine eindeutigen Indikatoren gefunden wurden
+            # Prüfe, ob der Warenkorb-Button existiert und nicht deaktiviert ist
+            try:
+                add_to_cart = browser.find_element(By.XPATH, "//button[contains(., 'In den Warenkorb')]")
+                if "disabled" not in add_to_cart.get_attribute("class") and not add_to_cart.get_attribute("disabled"):
+                    result["is_available"] = True
+                    result["status_text"] = "[V] Wahrscheinlich verfügbar (Warenkorb-Button vorhanden)"
+                else:
+                    result["is_available"] = False
+                    result["status_text"] = "[X] Wahrscheinlich nicht verfügbar (Warenkorb-Button deaktiviert)"
+            except NoSuchElementException:
+                # Default wenn nichts erkannt wurde
+                result["status_text"] = "[?] Status unbekannt (als nicht verfügbar behandelt)"
+            
+            logger.info(f"🔍 Selenium-Extraktion abgeschlossen für {product_url}: {result['status_text']}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Fehler bei der Selenium-Extraktion für {product_url}: {e}")
+            result["status_text"] = f"[?] Fehler bei der Verfügbarkeitsprüfung: {str(e)}"
+            return result
+        finally:
+            # Browser zurück in den Pool
+            if browser:
+                try:
+                    # Cookies löschen für sauberen nächsten Besuch
+                    browser.delete_all_cookies()
+                    return_browser_to_pool(browser)
+                except Exception as e:
+                    logger.warning(f"⚠️ Fehler beim Zurückgeben des Browsers in den Pool: {e}")
 
 def load_cache():
     """Lädt den Cache mit gefundenen Produkten"""
@@ -115,8 +471,8 @@ def save_cache(cache_data):
 
 def check_product_availability(soup):
     """
-    Verbesserte Verfügbarkeitsprüfung für mighty-cards.de, die beide mögliche Darstellungen 
-    von "Ausverkauft" berücksichtigt und den Warenkorb-Button überprüft.
+    Verbesserte Verfügbarkeitsprüfung für mighty-cards.de mit BeautifulSoup
+    (Wird als erster Schritt vor Selenium verwendet)
     
     :param soup: BeautifulSoup-Objekt der Produktseite
     :return: Tuple (is_available, price, status_text)
@@ -130,7 +486,14 @@ def check_product_availability(soup):
         price_elem = soup.select_one('.product-details__product-price, .price')
         price = price_elem.text.strip() if price_elem else "Preis nicht verfügbar"
     
-    # 2. Positivprüfung: Suche nach "In den Warenkorb"-Button
+    # 2. Prüfe auf Vorbestellung
+    is_preorder = False
+    preorder_text = soup.find(string=re.compile("Vorbestellung", re.IGNORECASE))
+    if preorder_text:
+        is_preorder = True
+        return True, price, "[V] Vorbestellbar"
+    
+    # 3. Positivprüfung: Suche nach "In den Warenkorb"-Button
     cart_button = None
     
     # Suche nach dem Button-Element mit dem Text "In den Warenkorb"
@@ -153,539 +516,20 @@ def check_product_availability(soup):
     if cart_button:
         return True, price, "[V] Verfügbar (Warenkorb-Button aktiv)"
     
-    # 3. Negativprüfung: Suche nach beiden möglichen "Ausverkauft"-Elementen
+    # 4. Negativprüfung: Suche nach beiden möglichen "Ausverkauft"-Elementen
     # a) Als div mit class="label__text"
     sold_out_label = soup.find('div', {'class': 'label__text'}, text="Ausverkauft")
     
     # b) Als span innerhalb eines div
     sold_out_span = soup.find('span', text="Ausverkauft")
     
-    # c) Prüfe auf Vorbestellung
-    is_preorder = False
-    preorder_text = soup.find(string=re.compile("Vorbestellung", re.IGNORECASE))
-    if preorder_text:
-        is_preorder = True
-        return True, price, "[V] Vorbestellbar"
-    
     if sold_out_label or sold_out_span:
         return False, price, "[X] Ausverkauft"
     
-    # 4. Wenn nichts eindeutiges gefunden wurde, versuche eine heuristische Annäherung
-    # Untersuche den gesamten Text nach Indizien für Verfügbarkeit oder Nichtverfügbarkeit
-    page_text = soup.get_text().lower()
-    
-    if "ausverkauft" in page_text:
-        return False, price, "[X] Ausverkauft (Text gefunden)"
-    
-    if "in den warenkorb" in page_text and "ausverkauft" not in page_text:
-        return True, price, "[V] Wahrscheinlich verfügbar"
-    
-    # 5. Standardergebnis: Verfügbarkeitsstatus unbekannt (als nicht verfügbar interpretieren)
-    return False, price, "[?] Status unbekannt, als nicht verfügbar interpretiert"
-
-def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
-    """
-    Spezieller Scraper für mighty-cards.de mit Sitemap-Integration und Multithreading
-    
-    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
-    :param seen: Set mit bereits gesehenen Produkttiteln
-    :param out_of_stock: Set mit ausverkauften Produkten
-    :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
-    :return: Liste der neuen Treffer
-    """
-    start_time = time.time()
-    logger.info("🌐 Starte speziellen Scraper für mighty-cards.de mit Sitemap-Integration und Multithreading")
-    
-    # Thread-sichere Kollektionen
-    new_matches = []
-    all_products = []  # Liste für alle gefundenen Produkte
-    found_product_ids = set()  # Set für Deduplizierung von gefundenen Produkten
-    
-    # Sammle Produkt-Information aus keywords_map
-    product_info = extract_product_name_type_info(keywords_map)
-    logger.info(f"🔍 Extrahierte Produktinformationen: {len(product_info)} Einträge")
-    
-    # Standardheader erstellen
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
-    
-    # Cache laden
-    cache_data = load_cache()
-    cached_products = cache_data.get("products", {})
-    last_update = cache_data.get("last_update", 0)
-    current_time = int(time.time())
-    
-    # Cache-Kriterien
-    cache_valid = len(cached_products) > 0
-    force_refresh = current_time - last_update > 86400  # Alle 24 Stunden Cache aktualisieren
-    
-    # Prüfen, ob wir den Cache verwenden können
-    found_all_products = True
-    
-    # Prüfen, ob alle gesuchten Produkte im Cache sind
-    for item in product_info:
-        original_term = item["original_term"]
-        if not any(original_term == cached["search_term"] for cached in cached_products.values()):
-            found_all_products = False
-            break
-    
-    # Entscheiden, ob wir den Cache verwenden oder neu scannen
-    if cache_valid and found_all_products and not force_refresh:
-        logger.info(f"✅ Verwende Cache mit {len(cached_products)} Produkten")
-        
-        # Überprüfe jedes zwischengespeicherte Produkt erneut
-        valid_product_urls = []
-        cached_items_to_remove = []
-        
-        for product_id, product_data in cached_products.items():
-            product_url = product_data.get("url")
-            if not product_url:
-                cached_items_to_remove.append(product_id)
-                continue
-                
-            valid_product_urls.append((product_url, product_data))
-        
-        # Entferne ungültige Einträge aus dem Cache
-        for item_id in cached_items_to_remove:
-            del cached_products[item_id]
-        
-        # Wenn wir gültige Produkt-URLs haben, verarbeite sie direkt
-        if valid_product_urls:
-            logger.info(f"🔄 Überprüfe {len(valid_product_urls)} zwischengespeicherte Produkte")
-            
-            # Parallelisierte Verarbeitung der gecachten Produkt-URLs
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(valid_product_urls), 10)) as executor:
-                futures = []
-                
-                for product_url, product_data in valid_product_urls:
-                    future = executor.submit(
-                        process_cached_product,
-                        product_url, product_data, product_info, seen, out_of_stock, only_available,
-                        headers, all_products, new_matches, found_product_ids, cached_products
-                    )
-                    futures.append((future, product_url))
-                
-                # Sammle Ergebnisse und prüfe auf 404-Fehler
-                need_rescan = False
-                completed = 0
-                
-                for future, url in futures:
-                    try:
-                        result, error_404 = future.result()
-                        completed += 1
-                        
-                        # Wenn einer der URLs 404 zurückgibt, müssen wir neu scannen
-                        if error_404:
-                            need_rescan = True
-                            logger.warning(f"⚠️ Gecachte URL nicht mehr erreichbar: {url}")
-                            
-                            # Entferne URL aus dem Cache
-                            for pid, pdata in list(cached_products.items()):
-                                if pdata.get("url") == url:
-                                    del cached_products[pid]
-                    except Exception as e:
-                        logger.error(f"❌ Fehler bei der Verarbeitung von {url}: {e}")
-                        completed += 1
-                
-                # Zeige Fortschritt
-                if len(futures) > 0:
-                    logger.info(f"✅ {completed}/{len(futures)} cache URLs verarbeitet")
-            
-            # Wenn wir einen 404-Fehler hatten oder nicht alle Produkte gefunden haben, scannen wir neu
-            if need_rescan or not new_matches:
-                logger.info("🔄 Einige gecachte URLs lieferten 404 oder keine Treffer - führe vollständigen Scan durch")
-                # Führe einen vollständigen Scan mit Sitemap durch (siehe unten)
-            else:
-                # Cache aktualisieren
-                cache_data["products"] = cached_products
-                cache_data["last_update"] = current_time
-                save_cache(cache_data)
-                
-                # Sende Benachrichtigungen für gefundene Produkte
-                if all_products:
-                    send_batch_notifications(all_products)
-                
-                # Messung der Gesamtlaufzeit
-                elapsed_time = time.time() - start_time
-                logger.info(f"✅ Cache-basiertes Scraping abgeschlossen in {elapsed_time:.2f} Sekunden, {len(new_matches)} Treffer gefunden")
-                
-                return new_matches
-    
-    # Vollständiger Scan erforderlich
-    logger.info("🔍 Führe vollständigen Scan mit Sitemap durch")
-    
-    # 1. Zugriff über die Sitemap mit Vorfilterung
-    logger.info("🔍 Lade und filtere Produkte aus der Sitemap")
-    sitemap_products = fetch_filtered_products_from_sitemap_with_retry(headers, product_info)
-    
-    if sitemap_products:
-        logger.info(f"🔍 Nach Vorfilterung verbleiben {len(sitemap_products)} relevante URLs")
-        
-        # 2. Parallelisierte Verarbeitung der gefilterten Produkt-URLs
-        logger.info(f"🔄 Starte parallele Verarbeitung von {len(sitemap_products)} URLs")
-        
-        # Bestimme optimale Worker-Anzahl basierend auf CPU-Kernen und URL-Anzahl
-        max_workers = min(20, len(sitemap_products))  # Max 20 Worker
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Dictionary zum Speichern der Future-Objekte mit ihren URLs
-            future_to_url = {
-                executor.submit(
-                    process_mighty_cards_product, 
-                    url, product_info, seen, out_of_stock, only_available, 
-                    headers, all_products, new_matches, found_product_ids, cached_products
-                ): url for url in sitemap_products
-            }
-            
-            # Sammle die Ergebnisse ein, während sie fertig werden
-            completed = 0
-            total = len(future_to_url)
-            
-            for future in concurrent.futures.as_completed(future_to_url):
-                url = future_to_url[future]
-                completed += 1
-                
-                # Gib alle 10% einen Fortschrittsindikator aus
-                if completed % max(1, total // 10) == 0 or completed == total:
-                    percent = (completed / total) * 100
-                    logger.info(f"⏳ Fortschritt: {completed}/{total} URLs verarbeitet ({percent:.1f}%)")
-                
-                try:
-                    # Das Ergebnis wird bereits in den übergebenen Listen gespeichert
-                    future.result()
-                except Exception as e:
-                    logger.error(f"❌ Fehler bei der Verarbeitung von {url}: {e}")
-    
-    # 3. Fallback: Direkte Suche nach Produkten, wenn nichts gefunden wurde
-    if len(all_products) < 2:
-        logger.info("🔍 Nicht genug Produkte über Sitemap gefunden, versuche direkte Suche")
-        
-        # Verwende unterschiedliche Suchbegriffe für die direkte Suche
-        search_terms = []
-        for product_item in product_info:
-            for name_variant in product_item["name_variants"]:
-                if name_variant not in search_terms:
-                    search_terms.append(name_variant)
-                    if len(search_terms) >= 5:  # Begrenze auf max. 5 Suchbegriffe
-                        break
-        
-        # Füge auch immer die Produktcodes hinzu
-        for product_item in product_info:
-            if product_item["product_code"] and product_item["product_code"] not in search_terms:
-                search_terms.append(product_item["product_code"])
-        
-        # Direktsuche mit den generierten Suchbegriffen
-        for search_term in search_terms:
-            # Verwende Original-Term und Ersetzungsversion (ohne Umlaute)
-            search_products = search_mighty_cards_products(search_term, headers)
-            
-            # Verarbeite gefundene Produkte sequentiell (meist weniger)
-            for product_url in search_products:
-                with url_lock:  # Thread-sicher prüfen, ob URL bereits verarbeitet wurde
-                    if product_url in sitemap_products:
-                        continue  # Vermeidet Duplikate
-                
-                process_mighty_cards_product(product_url, product_info, seen, out_of_stock, only_available, 
-                                            headers, all_products, new_matches, found_product_ids, cached_products)
-    
-    # Cache aktualisieren
-    if cached_products:
-        cache_data["products"] = cached_products
-        cache_data["last_update"] = current_time
-        save_cache(cache_data)
-    
-    # 4. Sende Benachrichtigungen für gefundene Produkte
-    if all_products:
-        send_batch_notifications(all_products)
-    
-    # Messung der Gesamtlaufzeit
-    elapsed_time = time.time() - start_time
-    logger.info(f"✅ Scraping abgeschlossen in {elapsed_time:.2f} Sekunden, {len(new_matches)} neue Treffer gefunden")
-    
-    return new_matches
-
-def send_batch_notifications(all_products):
-    """Sendet Benachrichtigungen in Batches"""
-    from utils.telegram import send_batch_notification
-    
-    # Gruppiere Produkte in kleinere Batches (max. 20 pro Batch)
-    batch_size = 20
-    product_batches = [all_products[i:i+batch_size] for i in range(0, len(all_products), batch_size)]
-    
-    for i, batch in enumerate(product_batches):
-        logger.info(f"📤 Sende Batch {i+1}/{len(product_batches)} mit {len(batch)} Produkten")
-        send_batch_notification(batch)
-        # Kurze Pause zwischen Batches
-        if i < len(product_batches) - 1:
-            time.sleep(1)
-
-def process_cached_product(product_url, product_data, product_info, seen, out_of_stock, only_available,
-                         headers, all_products, new_matches, found_product_ids, cached_products):
-    """
-    Verarbeitet ein bereits im Cache gespeichertes Produkt
-    
-    :return: (success, error_404) - Erfolg und ob ein 404-Fehler aufgetreten ist
-    """
-    search_term = product_data.get("search_term")
-    
-    try:
-        # Produkt-Detailseite abrufen
-        try:
-            response = requests.get(product_url, headers=headers, timeout=15)
-            
-            # Wenn 404 zurückgegeben wird, müssen wir die Sitemap neu scannen
-            if response.status_code == 404:
-                return False, True
-                
-            if response.status_code != 200:
-                logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: Status {response.status_code}")
-                return False, False
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: {e}")
-            return False, False
-        
-        soup = BeautifulSoup(response.content, "html.parser")
-        
-        # Titel extrahieren und validieren
-        title_elem = soup.find('h1', {'class': 'product-details__product-title'})
-        if not title_elem:
-            title_elem = soup.find('h1')
-        
-        if not title_elem:
-            # Wenn kein Titel gefunden wird, verwende den zwischengespeicherten
-            title = product_data.get("title", "Pokemon Produkt")
-        else:
-            title = title_elem.text.strip()
-        
-        # VERBESSERT: Verwende die neue Verfügbarkeitsprüfung
-        is_available, price, status_text = check_product_availability(soup)
-        
-        # Eindeutige ID für das Produkt erstellen
-        product_id = product_data.get("product_id") or create_product_id(title)
-        
-        # Thread-sichere Prüfung auf Duplikate
-        with url_lock:
-            if product_id in found_product_ids:
-                return True, False
-        
-        # Status aktualisieren
-        should_notify, is_back_in_stock = update_product_status(
-            product_id, is_available, seen, out_of_stock
-        )
-        
-        # Bei "nur verfügbare" Option, nicht verfügbare Produkte überspringen
-        if only_available and not is_available:
-            # Aktualisiere Verfügbarkeitsstatus im Cache
-            with cache_lock:
-                if product_id in cached_products:
-                    cached_products[product_id]["is_available"] = is_available
-                    cached_products[product_id]["price"] = price
-                    cached_products[product_id]["last_checked"] = int(time.time())
-            return True, False
-        
-        if should_notify:
-            # Status anpassen wenn wieder verfügbar
-            if is_back_in_stock:
-                status_text = "🎉 Wieder verfügbar!"
-            
-            # Extrahiere Produkttyp
-            detected_product_type = extract_product_type_from_text(title)
-            
-            # VERBESSERT: Überprüfe, ob der Produkttyp dem ursprünglichen Suchbegriff entspricht
-            search_term_product_type = None
-            for item in product_info:
-                if item["original_term"] == search_term:
-                    search_term_product_type = item["product_type"]
-                    break
-            
-            # Wenn der erkannte Produkttyp nicht mit dem gesuchten übereinstimmt, überspringen
-            if (search_term_product_type and search_term_product_type != "unknown" and 
-                detected_product_type != "unknown" and search_term_product_type != detected_product_type):
-                logger.debug(f"⚠️ Produkttyp-Diskrepanz: Gesucht {search_term_product_type}, gefunden {detected_product_type}: {title}")
-                return True, False
-            
-            # Produkt-Daten sammeln
-            product_data = {
-                "title": title,
-                "url": product_url,
-                "price": price,
-                "status_text": status_text,
-                "is_available": is_available,
-                "matched_term": search_term,
-                "product_type": detected_product_type,
-                "shop": "mighty-cards.de"
-            }
-            
-            # Thread-sicher zu Ergebnissen hinzufügen
-            with data_lock:
-                all_products.append(product_data)
-                new_matches.append(product_id)
-                found_product_ids.add(product_id)
-                
-            logger.info(f"✅ Gecachtes Produkt aktualisiert: {title} - {status_text}")
-        
-        # Aktualisiere Produkt im Cache
-        with cache_lock:
-            cached_products[product_id] = {
-                "product_id": product_id,
-                "title": title,
-                "url": product_url,
-                "search_term": search_term,
-                "is_available": is_available,
-                "price": price,
-                "last_checked": int(time.time())
-            }
-        
-        return True, False
-    
-    except Exception as e:
-        logger.error(f"❌ Fehler bei der Verarbeitung von gecachtem Produkt {product_url}: {e}")
-        return False, False
-
-def fetch_filtered_products_from_sitemap_with_retry(headers, product_info, max_retries=4, timeout=15):
-    """
-    Lädt und filtert Produkt-URLs aus der Sitemap mit verbessertem Retry-Mechanismus
-    
-    :param headers: HTTP-Headers für die Anfragen
-    :param product_info: Liste mit extrahierten Produktinformationen
-    :param max_retries: Maximale Anzahl von Wiederholungsversuchen (3-4)
-    :param timeout: Timeout pro Versuch in Sekunden
-    :return: Liste mit vorgefilterterten Produkt-URLs
-    """
-    sitemap_url = "https://www.mighty-cards.de/wp-sitemap-ecstore-1.xml"
-    
-    # Mehrere Versuche, die Sitemap zu laden
-    for retry in range(max_retries):
-        try:
-            logger.info(f"🔍 Lade Sitemap von {sitemap_url} (Versuch {retry+1}/{max_retries})")
-            response = requests.get(sitemap_url, headers=headers, timeout=timeout)
-            
-            if response.status_code == 200:
-                # Sitemap erfolgreich geladen
-                try:
-                    # Versuche zuerst mit lxml-xml Parser
-                    soup = BeautifulSoup(response.content, "lxml-xml")
-                except Exception:
-                    try:
-                        # Fallback zu html.parser
-                        soup = BeautifulSoup(response.content, "html.parser")
-                        logger.warning("⚠️ Verwende html.parser statt lxml-xml für XML-Parsing")
-                    except Exception as e:
-                        logger.error(f"❌ Fehler beim Parsen der Sitemap: {e}")
-                        continue  # Zum nächsten Versuch
-                
-                # Alle URLs aus der Sitemap extrahieren
-                all_product_urls = []
-                for url_tag in soup.find_all("url"):
-                    loc_tag = url_tag.find("loc")
-                    if loc_tag and loc_tag.text:
-                        url = loc_tag.text.strip()
-                        # Nur Shop-URLs hinzufügen
-                        if "/shop/" in url:
-                            all_product_urls.append(url)
-                
-                if all_product_urls:
-                    logger.info(f"🔍 {len(all_product_urls)} Produkt-URLs aus Sitemap extrahiert")
-                    
-                    # Filtern der URLs wie zuvor
-                    return filter_sitemap_products(all_product_urls, product_info)
-                else:
-                    logger.warning(f"⚠️ Keine Produkt-URLs in der Sitemap gefunden (Versuch {retry+1}/{max_retries})")
-            else:
-                logger.warning(f"⚠️ Fehler beim Laden der Sitemap: Status {response.status_code} (Versuch {retry+1}/{max_retries})")
-        
-        except requests.exceptions.Timeout:
-            logger.warning(f"⚠️ Timeout beim Laden der Sitemap (Versuch {retry+1}/{max_retries})")
-        except Exception as e:
-            logger.warning(f"⚠️ Fehler beim Laden der Sitemap: {e} (Versuch {retry+1}/{max_retries})")
-        
-        # Warte exponentiell länger vor dem nächsten Versuch, wenn nicht der letzte Versuch
-        if retry < max_retries - 1:
-            wait_time = 2 ** retry  # 1, 2, 4, 8 Sekunden...
-            logger.info(f"🕒 Warte {wait_time} Sekunden vor dem nächsten Versuch...")
-            time.sleep(wait_time)
-    
-    # Wenn alle Versuche fehlschlagen, leere Liste zurückgeben
-    logger.error(f"❌ Alle {max_retries} Versuche zum Laden der Sitemap sind fehlgeschlagen")
-    return []
-
-def filter_sitemap_products(all_product_urls, product_info):
-    """
-    Filtert Produkt-URLs aus der Sitemap basierend auf den Produktinformationen
-    
-    :param all_product_urls: Liste aller Produkt-URLs aus der Sitemap
-    :param product_info: Liste mit extrahierten Produktinformationen
-    :return: Liste mit gefilterten Produkt-URLs
-    """
-    # Sammle alle relevanten Keyword-Varianten für die Filterung
-    relevant_keywords = []
-    product_codes = []
-    
-    for product in product_info:
-        # Produktnamen-Varianten
-        for variant in product["name_variants"]:
-            if variant and len(variant) > 3 and variant not in relevant_keywords:
-                relevant_keywords.append(variant)
-        
-        # Produktcodes
-        if product["product_code"] and product["product_code"] not in product_codes:
-            product_codes.append(product["product_code"])
-    
-    logger.info(f"🔍 Filterung mit {len(relevant_keywords)} Namen-Varianten und {len(product_codes)} Produktcodes")
-    
-    # Vorfilterung der URLs direkt nach dem Laden
-    filtered_urls = []
-    direct_matches = []  # Für besonders relevante URLs (direkte Treffer)
-    
-    for url in all_product_urls:
-        url_lower = url.lower()
-        
-        # 1. Muss "pokemon" im URL enthalten
-        if "pokemon" not in url_lower:
-            continue
-            
-        # 2. Darf keine Blacklist-Begriffe enthalten
-        if contains_blacklist_terms(url_lower):
-            continue
-        
-        # Prüfe auf direkte Übereinstimmung mit Produktcode oder Setnamen
-        # z.B. "kp09" oder "reisegefahrten" im URL
-        is_direct_match = False
-        
-        # Prüfe zuerst auf Produktcodes (höchste Priorität)
-        for code in product_codes:
-            if code and code.lower() in url_lower:
-                is_direct_match = True
-                direct_matches.append(url)
-                break
-        
-        if is_direct_match:
-            continue  # Wurde bereits zu direct_matches hinzugefügt
-        
-        # Prüfe auf alle Namen-Varianten (inkl. ohne Umlaute)
-        relevant_match = False
-        for kw in relevant_keywords:
-            if kw and kw.lower() in url_lower:
-                relevant_match = True
-                break
-        
-        # URLs mit relevantem Keyword hinzufügen
-        if relevant_match:
-            filtered_urls.append(url)
-        # URLs, die allgemein relevante Begriffe enthalten, als Fallback
-        elif any(term in url_lower for term in ["karmesin", "purpur", "scarlet", "violet", "kp09", "sv09"]):
-            filtered_urls.append(url)
-    
-    # Direkte Matches haben höchste Priorität
-    # (Diese sollten definitiv Ergebnisse liefern)
-    logger.info(f"🔍 {len(direct_matches)} direkte Treffer und {len(filtered_urls)} potentielle Treffer gefunden")
-    
-    # Direkte Matches zuerst, dann andere gefilterte URLs
-    result = direct_matches + [url for url in filtered_urls if url not in direct_matches]
-    return result
+    # 5. Wenn nichts eindeutiges gefunden wurde, versuche eine heuristische Annäherung
+    # Da wir wissen, dass BeautifulSoup bei JavaScript-generierten Inhalten unzuverlässig ist,
+    # markieren wir den Status als unbekannt - Selenium wird später genauer prüfen
+    return None, price, "[?] Status unbekannt"
 
 def replace_umlauts(text):
     """
@@ -861,6 +705,422 @@ def search_mighty_cards_products(search_term, headers):
         logger.warning(f"⚠️ Fehler bei der Suche nach {search_term}: {e}")
     
     return product_urls
+
+def fetch_filtered_products_from_sitemap_with_retry(headers, product_info, max_retries=4, timeout=15):
+    """
+    Lädt und filtert Produkt-URLs aus der Sitemap mit verbessertem Retry-Mechanismus
+    
+    :param headers: HTTP-Headers für die Anfragen
+    :param product_info: Liste mit extrahierten Produktinformationen
+    :param max_retries: Maximale Anzahl von Wiederholungsversuchen (3-4)
+    :param timeout: Timeout pro Versuch in Sekunden
+    :return: Liste mit vorgefilterterten Produkt-URLs
+    """
+    sitemap_url = "https://www.mighty-cards.de/wp-sitemap-ecstore-1.xml"
+    
+    # Mehrere Versuche, die Sitemap zu laden
+    for retry in range(max_retries):
+        try:
+            logger.info(f"🔍 Lade Sitemap von {sitemap_url} (Versuch {retry+1}/{max_retries})")
+            response = requests.get(sitemap_url, headers=headers, timeout=timeout)
+            
+            if response.status_code == 200:
+                # Sitemap erfolgreich geladen
+                try:
+                    # Versuche zuerst mit lxml-xml Parser
+                    soup = BeautifulSoup(response.content, "lxml-xml")
+                except Exception:
+                    try:
+                        # Fallback zu html.parser
+                        soup = BeautifulSoup(response.content, "html.parser")
+                        logger.warning("⚠️ Verwende html.parser statt lxml-xml für XML-Parsing")
+                    except Exception as e:
+                        logger.error(f"❌ Fehler beim Parsen der Sitemap: {e}")
+                        continue  # Zum nächsten Versuch
+                
+                # Alle URLs aus der Sitemap extrahieren
+                all_product_urls = []
+                for url_tag in soup.find_all("url"):
+                    loc_tag = url_tag.find("loc")
+                    if loc_tag and loc_tag.text:
+                        url = loc_tag.text.strip()
+                        # Nur Shop-URLs hinzufügen
+                        if "/shop/" in url:
+                            all_product_urls.append(url)
+                
+                if all_product_urls:
+                    logger.info(f"🔍 {len(all_product_urls)} Produkt-URLs aus Sitemap extrahiert")
+                    
+                    # Filtern der URLs wie zuvor
+                    return filter_sitemap_products(all_product_urls, product_info)
+                else:
+                    logger.warning(f"⚠️ Keine Produkt-URLs in der Sitemap gefunden (Versuch {retry+1}/{max_retries})")
+            else:
+                logger.warning(f"⚠️ Fehler beim Laden der Sitemap: Status {response.status_code} (Versuch {retry+1}/{max_retries})")
+        
+        except requests.exceptions.Timeout:
+            logger.warning(f"⚠️ Timeout beim Laden der Sitemap (Versuch {retry+1}/{max_retries})")
+        except Exception as e:
+            logger.warning(f"⚠️ Fehler beim Laden der Sitemap: {e} (Versuch {retry+1}/{max_retries})")
+        
+        # Warte exponentiell länger vor dem nächsten Versuch, wenn nicht der letzte Versuch
+        if retry < max_retries - 1:
+            wait_time = 2 ** retry  # 1, 2, 4, 8 Sekunden...
+            logger.info(f"🕒 Warte {wait_time} Sekunden vor dem nächsten Versuch...")
+            time.sleep(wait_time)
+    
+    # Wenn alle Versuche fehlschlagen, leere Liste zurückgeben
+    logger.error(f"❌ Alle {max_retries} Versuche zum Laden der Sitemap sind fehlgeschlagen")
+    return []
+
+def filter_sitemap_products(all_product_urls, product_info):
+    """
+    Filtert Produkt-URLs aus der Sitemap basierend auf den Produktinformationen
+    
+    :param all_product_urls: Liste aller Produkt-URLs aus der Sitemap
+    :param product_info: Liste mit extrahierten Produktinformationen
+    :return: Liste mit gefilterten Produkt-URLs
+    """
+    # Sammle alle relevanten Keyword-Varianten für die Filterung
+    relevant_keywords = []
+    product_codes = []
+    
+    for product in product_info:
+        # Produktnamen-Varianten
+        for variant in product["name_variants"]:
+            if variant and len(variant) > 3 and variant not in relevant_keywords:
+                relevant_keywords.append(variant)
+        
+        # Produktcodes
+        if product["product_code"] and product["product_code"] not in product_codes:
+            product_codes.append(product["product_code"])
+    
+    logger.info(f"🔍 Filterung mit {len(relevant_keywords)} Namen-Varianten und {len(product_codes)} Produktcodes")
+    
+    # Vorfilterung der URLs direkt nach dem Laden
+    filtered_urls = []
+    direct_matches = []  # Für besonders relevante URLs (direkte Treffer)
+    
+    for url in all_product_urls:
+        url_lower = url.lower()
+        
+        # 1. Muss "pokemon" im URL enthalten
+        if "pokemon" not in url_lower:
+            continue
+            
+        # 2. Darf keine Blacklist-Begriffe enthalten
+        if contains_blacklist_terms(url_lower):
+            continue
+        
+        # Prüfe auf direkte Übereinstimmung mit Produktcode oder Setnamen
+        # z.B. "kp09" oder "reisegefahrten" im URL
+        is_direct_match = False
+        
+        # Prüfe zuerst auf Produktcodes (höchste Priorität)
+        for code in product_codes:
+            if code and code.lower() in url_lower:
+                is_direct_match = True
+                direct_matches.append(url)
+                break
+        
+        if is_direct_match:
+            continue  # Wurde bereits zu direct_matches hinzugefügt
+        
+        # Prüfe auf alle Namen-Varianten (inkl. ohne Umlaute)
+        relevant_match = False
+        for kw in relevant_keywords:
+            if kw and kw.lower() in url_lower:
+                relevant_match = True
+                break
+        
+        # URLs mit relevantem Keyword hinzufügen
+        if relevant_match:
+            filtered_urls.append(url)
+        # URLs, die allgemein relevante Begriffe enthalten, als Fallback
+        elif any(term in url_lower for term in ["karmesin", "purpur", "scarlet", "violet", "kp09", "sv09"]):
+            filtered_urls.append(url)
+    
+    # Direkte Matches haben höchste Priorität
+    # (Diese sollten definitiv Ergebnisse liefern)
+    logger.info(f"🔍 {len(direct_matches)} direkte Treffer und {len(filtered_urls)} potentielle Treffer gefunden")
+    
+    # Direkte Matches zuerst, dann andere gefilterte URLs
+    result = direct_matches + [url for url in filtered_urls if url not in direct_matches]
+    return result
+
+def extract_title_from_url(url):
+    """
+    Extrahiert einen Titel aus der URL-Struktur
+    
+    :param url: URL der Produktseite
+    :return: Extrahierter Titel
+    """
+    try:
+        # Extrahiere den letzten Teil des Pfads
+        path_parts = url.rstrip('/').split('/')
+        last_part = path_parts[-1]
+        
+        # Entferne produktID am Ende (zB -p12345)
+        last_part = re.sub(r'-p\d+$', '', last_part)
+        
+        # Ersetze Bindestriche durch Leerzeichen und formatiere
+        title = last_part.replace('-', ' ').title()
+        
+        # Stelle sicher, dass "Pokemon" im Titel vorkommt (am Ende, wie typisch für mighty-cards)
+        if "pokemon" not in title.lower():
+            title = title + " Pokemon"
+        
+        return title
+    except Exception as e:
+        return "Pokemon Produkt"
+
+def create_product_id(title, base_id="mightycards"):
+    """
+    Erstellt eine eindeutige Produkt-ID basierend auf dem Titel
+    
+    :param title: Produkttitel
+    :param base_id: Basis-ID (Website-Name)
+    :return: Eindeutige Produkt-ID
+    """
+    # Extrahiere relevante Informationen für die ID
+    title_lower = title.lower()
+    
+    # Sprache (DE/EN)
+    if "deutsch" in title_lower:
+        language = "DE"
+    elif "english" in title_lower or "eng" in title_lower:
+        language = "EN"
+    else:
+        language = "UNK"
+    
+    # Produkttyp
+    product_type = extract_product_type_from_text(title)
+    
+    # Produktcode (sv09, kp09, etc.)
+    code_match = re.search(r'(kp\d+|sv\d+)', title_lower)
+    product_code = code_match.group(0) if code_match else "unknown"
+    
+    # Normalisiere Titel für einen Identifizierer
+    normalized_title = re.sub(r'\s+(display|box|tin|etb)$', '', title_lower)
+    normalized_title = re.sub(r'\s+', '-', normalized_title)
+    normalized_title = re.sub(r'[^a-z0-9\-]', '', normalized_title)
+    
+    # Begrenze die Länge
+    if len(normalized_title) > 50:
+        normalized_title = normalized_title[:50]
+    
+    # Erstelle eine strukturierte ID
+    product_id = f"{base_id}_{product_code}_{product_type}_{language}_{normalized_title}"
+    
+    # Zusatzinformationen
+    if "18er" in title_lower:
+        product_id += "_18er"
+    elif "36er" in title_lower:
+        product_id += "_36er"
+    
+    return product_id
+
+def process_product_matches_with_selenium(positive_matches):
+    """
+    Verarbeitet die positiven Treffer mit Selenium für präzise Verfügbarkeits- und Preisinformationen
+    
+    :param positive_matches: Liste der positiven Treffer aus dem BeautifulSoup-Scanning
+    :return: Liste der aktualisierten Produktinformationen
+    """
+    if not positive_matches:
+        return []
+    
+    logger.info(f"🔄 Starte Selenium-Verarbeitung für {len(positive_matches)} positive Treffer")
+    
+    # Initialisiere den Browser-Pool
+    try:
+        initialize_browser_pool()
+    except Exception as e:
+        logger.error(f"❌ Fehler bei der Initialisierung des Browser-Pools: {e}")
+        return positive_matches  # Fallback auf die ursprünglichen Matches
+    
+    # Liste für aktualisierte Produkt-Daten
+    updated_matches = []
+    
+    try:
+        # Verarbeite jedes positive Match
+        for product in positive_matches:
+            url = product.get("url")
+            if not url:
+                updated_matches.append(product)
+                continue
+            
+            logger.info(f"🔄 Verarbeite positiven Treffer mit Selenium: {product.get('title')}")
+            
+            # Extrahiere Produktdaten mit Selenium
+            selenium_data = extract_product_info_with_selenium(url)
+            
+            # Aktualisiere die Produktdaten
+            if selenium_data:
+                # Behalte Originaltitel, falls Selenium keinen findet
+                if not selenium_data["title"]:
+                    selenium_data["title"] = product.get("title")
+                
+                # Aktualisiere die Produktdaten
+                updated_product = product.copy()
+                updated_product["price"] = selenium_data["price"]
+                updated_product["is_available"] = selenium_data["is_available"]
+                updated_product["status_text"] = selenium_data["status_text"]
+                
+                # Füge zu den aktualisierten Matches hinzu
+                updated_matches.append(updated_product)
+                logger.info(f"✅ Aktualisiertes Produkt: {updated_product['title']} - {updated_product['status_text']}")
+            else:
+                # Fallback auf die ursprünglichen Daten
+                updated_matches.append(product)
+                logger.warning(f"⚠️ Selenium-Extraktion fehlgeschlagen für {url}, verwende ursprüngliche Daten")
+    
+    except Exception as e:
+        logger.error(f"❌ Fehler bei der Selenium-Verarbeitung: {e}")
+        # Fallback auf die ursprünglichen Matches
+        return positive_matches
+    
+    finally:
+        # Schließe den Browser-Pool
+        try:
+            shutdown_browser_pool()
+        except Exception as e:
+            logger.warning(f"⚠️ Fehler beim Schließen des Browser-Pools: {e}")
+    
+    return updated_matches
+
+def send_batch_notifications(all_products):
+    """Sendet Benachrichtigungen in Batches"""
+    from utils.telegram import send_batch_notification
+    
+    if all_products:
+        logger.info(f"📤 Sende Batch {1}/{1} mit {len(all_products)} Produkten")
+        send_batch_notification(all_products)
+    else:
+        logger.info("ℹ️ Keine Produkte für Benachrichtigung gefunden")
+
+def process_cached_product(product_url, product_data, product_info, seen, out_of_stock, only_available,
+                         headers, all_products, new_matches, found_product_ids, cached_products):
+    """
+    Verarbeitet ein bereits im Cache gespeichertes Produkt
+    
+    :return: (success, error_404) - Erfolg und ob ein 404-Fehler aufgetreten ist
+    """
+    search_term = product_data.get("search_term")
+    
+    try:
+        # Produkt-Detailseite abrufen
+        try:
+            response = requests.get(product_url, headers=headers, timeout=15)
+            
+            # Wenn 404 zurückgegeben wird, müssen wir die Sitemap neu scannen
+            if response.status_code == 404:
+                return False, True
+                
+            if response.status_code != 200:
+                logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: Status {response.status_code}")
+                return False, False
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: {e}")
+            return False, False
+        
+        soup = BeautifulSoup(response.content, "html.parser")
+        
+        # Titel extrahieren und validieren
+        title_elem = soup.find('h1', {'class': 'product-details__product-title'})
+        if not title_elem:
+            title_elem = soup.find('h1')
+        
+        if not title_elem:
+            # Wenn kein Titel gefunden wird, verwende den zwischengespeicherten
+            title = product_data.get("title", "Pokemon Produkt")
+        else:
+            title = title_elem.text.strip()
+        
+        # VERBESSERT: Verwende die neue Verfügbarkeitsprüfung
+        is_available, price, status_text = check_product_availability(soup)
+        
+        # Eindeutige ID für das Produkt erstellen
+        product_id = product_data.get("product_id") or create_product_id(title)
+        
+        # Thread-sichere Prüfung auf Duplikate
+        with url_lock:
+            if product_id in found_product_ids:
+                return True, False
+        
+        # Status aktualisieren
+        should_notify, is_back_in_stock = update_product_status(
+            product_id, is_available, seen, out_of_stock
+        )
+        
+        # Bei "nur verfügbare" Option, nicht verfügbare Produkte überspringen
+        if only_available and not is_available:
+            # Aktualisiere Verfügbarkeitsstatus im Cache
+            with cache_lock:
+                if product_id in cached_products:
+                    cached_products[product_id]["is_available"] = is_available
+                    cached_products[product_id]["price"] = price
+                    cached_products[product_id]["last_checked"] = int(time.time())
+            return True, False
+        
+        if should_notify:
+            # Status anpassen wenn wieder verfügbar
+            if is_back_in_stock:
+                status_text = "🎉 Wieder verfügbar!"
+            
+            # Extrahiere Produkttyp
+            detected_product_type = extract_product_type_from_text(title)
+            
+            # VERBESSERT: Überprüfe, ob der Produkttyp dem ursprünglichen Suchbegriff entspricht
+            search_term_product_type = None
+            for item in product_info:
+                if item["original_term"] == search_term:
+                    search_term_product_type = item["product_type"]
+                    break
+            
+            # Wenn der erkannte Produkttyp nicht mit dem gesuchten übereinstimmt, überspringen
+            if (search_term_product_type and search_term_product_type != "unknown" and 
+                detected_product_type != "unknown" and search_term_product_type != detected_product_type):
+                logger.debug(f"⚠️ Produkttyp-Diskrepanz: Gesucht {search_term_product_type}, gefunden {detected_product_type}: {title}")
+                return True, False
+            
+            # Produkt-Daten sammeln
+            product_data = {
+                "title": title,
+                "url": product_url,
+                "price": price,
+                "status_text": status_text,
+                "is_available": is_available,
+                "matched_term": search_term,
+                "product_type": detected_product_type,
+                "shop": "mighty-cards.de"
+            }
+            
+            # Thread-sicher zu Ergebnissen hinzufügen
+            with data_lock:
+                all_products.append(product_data)
+                new_matches.append(product_id)
+                found_product_ids.add(product_id)
+                
+            logger.info(f"✅ Gecachtes Produkt aktualisiert: {title} - {status_text}")
+        
+        # Aktualisiere Produkt im Cache
+        with cache_lock:
+            cached_products[product_id] = {
+                "product_id": product_id,
+                "title": title,
+                "url": product_url,
+                "search_term": search_term,
+                "is_available": is_available,
+                "price": price,
+                "last_checked": int(time.time())
+            }
+        
+        return True, False
+    
+    except Exception as e:
+        logger.error(f"❌ Fehler bei der Verarbeitung von gecachtem Produkt {product_url}: {e}")
+        return False, False
 
 def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, only_available, 
                                headers, all_products, new_matches, found_product_ids, cached_products=None):
@@ -1127,74 +1387,242 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
     
     return False
 
-def extract_title_from_url(url):
+def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     """
-    Extrahiert einen Titel aus der URL-Struktur
+    Hauptfunktion: Zweistufiger Scaper mit BeautifulSoup zur schnellen URL-Filterung
+    und Selenium für die präzise Preis-/Verfügbarkeitserkennung bei positiven Treffern
     
-    :param url: URL der Produktseite
-    :return: Extrahierter Titel
+    :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
+    :param seen: Set mit bereits gesehenen Produkten
+    :param out_of_stock: Set mit ausverkauften Produkten
+    :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
+    :return: Liste der neuen Treffer
     """
-    try:
-        # Extrahiere den letzten Teil des Pfads
-        path_parts = url.rstrip('/').split('/')
-        last_part = path_parts[-1]
-        
-        # Entferne produktID am Ende (zB -p12345)
-        last_part = re.sub(r'-p\d+$', '', last_part)
-        
-        # Ersetze Bindestriche durch Leerzeichen und formatiere
-        title = last_part.replace('-', ' ').title()
-        
-        # Stelle sicher, dass "Pokemon" im Titel vorkommt (am Ende, wie typisch für mighty-cards)
-        if "pokemon" not in title.lower():
-            title = title + " Pokemon"
-        
-        return title
-    except Exception as e:
-        return "Pokemon Produkt"
-
-def create_product_id(title, base_id="mightycards"):
-    """
-    Erstellt eine eindeutige Produkt-ID basierend auf dem Titel
+    start_time = time.time()
+    logger.info("🌐 Starte speziellen Scraper für mighty-cards.de mit Sitemap-Integration und Multithreading")
     
-    :param title: Produkttitel
-    :param base_id: Basis-ID (Website-Name)
-    :return: Eindeutige Produkt-ID
-    """
-    # Extrahiere relevante Informationen für die ID
-    title_lower = title.lower()
+    # Thread-sichere Kollektionen
+    new_matches = []
+    all_products = []  # Liste für alle gefundenen Produkte
+    found_product_ids = set()  # Set für Deduplizierung von gefundenen Produkten
     
-    # Sprache (DE/EN)
-    if "deutsch" in title_lower:
-        language = "DE"
-    elif "english" in title_lower or "eng" in title_lower:
-        language = "EN"
+    # Sammle Produkt-Information aus keywords_map
+    product_info = extract_product_name_type_info(keywords_map)
+    logger.info(f"🔍 Extrahierte Produktinformationen: {len(product_info)} Einträge")
+    
+    # Standardheader erstellen
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
+    
+    # Cache laden
+    cache_data = load_cache()
+    cached_products = cache_data.get("products", {})
+    last_update = cache_data.get("last_update", 0)
+    current_time = int(time.time())
+    
+    # Cache-Kriterien
+    cache_valid = len(cached_products) > 0
+    force_refresh = current_time - last_update > 86400  # Alle 24 Stunden Cache aktualisieren
+    
+    # Prüfen, ob wir den Cache verwenden können
+    found_all_products = True
+    
+    # Prüfen, ob alle gesuchten Produkte im Cache sind
+    for item in product_info:
+        original_term = item["original_term"]
+        if not any(original_term == cached["search_term"] for cached in cached_products.values()):
+            found_all_products = False
+            break
+    
+    # Entscheiden, ob wir den Cache verwenden oder neu scannen
+    if cache_valid and found_all_products and not force_refresh:
+        logger.info(f"✅ Verwende Cache mit {len(cached_products)} Produkten")
+        
+        # Überprüfe jedes zwischengespeicherte Produkt erneut
+        valid_product_urls = []
+        cached_items_to_remove = []
+        
+        for product_id, product_data in cached_products.items():
+            product_url = product_data.get("url")
+            if not product_url:
+                cached_items_to_remove.append(product_id)
+                continue
+                
+            valid_product_urls.append((product_url, product_data))
+        
+        # Entferne ungültige Einträge aus dem Cache
+        for item_id in cached_items_to_remove:
+            del cached_products[item_id]
+        
+        # Wenn wir gültige Produkt-URLs haben, verarbeite sie direkt
+        if valid_product_urls:
+            logger.info(f"🔄 Überprüfe {len(valid_product_urls)} zwischengespeicherte Produkte")
+            
+            # Parallelisierte Verarbeitung der gecachten Produkt-URLs
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(valid_product_urls), 10)) as executor:
+                futures = []
+                
+                for product_url, product_data in valid_product_urls:
+                    future = executor.submit(
+                        process_cached_product,
+                        product_url, product_data, product_info, seen, out_of_stock, only_available,
+                        headers, all_products, new_matches, found_product_ids, cached_products
+                    )
+                    futures.append((future, product_url))
+                
+                # Sammle Ergebnisse und prüfe auf 404-Fehler
+                need_rescan = False
+                completed = 0
+                
+                for future, url in futures:
+                    try:
+                        result, error_404 = future.result()
+                        completed += 1
+                        
+                        # Wenn einer der URLs 404 zurückgibt, müssen wir neu scannen
+                        if error_404:
+                            need_rescan = True
+                            logger.warning(f"⚠️ Gecachte URL nicht mehr erreichbar: {url}")
+                            
+                            # Entferne URL aus dem Cache
+                            for pid, pdata in list(cached_products.items()):
+                                if pdata.get("url") == url:
+                                    del cached_products[pid]
+                    except Exception as e:
+                        logger.error(f"❌ Fehler bei der Verarbeitung von {url}: {e}")
+                        completed += 1
+                
+                # Zeige Fortschritt
+                if len(futures) > 0:
+                    logger.info(f"✅ {completed}/{len(futures)} cache URLs verarbeitet")
+            
+            # Wenn wir einen 404-Fehler hatten oder nicht alle Produkte gefunden haben, scannen wir neu
+            if need_rescan or not new_matches:
+                logger.info("🔄 Einige gecachte URLs lieferten 404 oder keine Treffer - führe vollständigen Scan durch")
+                # Führe einen vollständigen Scan mit Sitemap durch (siehe unten)
+            else:
+                # Produkte für die zweite Stufe (Selenium) sammeln
+                if all_products:
+                    # Verarbeite die positiven Treffer mit Selenium für präzise Daten
+                    updated_products = process_product_matches_with_selenium(all_products)
+                    
+                    # Sende Benachrichtigungen für die aktualisierten Produkte
+                    if updated_products:
+                        # Überschreibe die vorherigen Ergebnisse
+                        all_products = updated_products
+                        send_batch_notifications(all_products)
+                
+                # Cache aktualisieren
+                cache_data["products"] = cached_products
+                cache_data["last_update"] = current_time
+                save_cache(cache_data)
+                
+                # Messung der Gesamtlaufzeit
+                elapsed_time = time.time() - start_time
+                logger.info(f"✅ Cache-basiertes Scraping abgeschlossen in {elapsed_time:.2f} Sekunden, {len(new_matches)} Treffer gefunden")
+                
+                return new_matches
+    
+    # Vollständiger Scan erforderlich
+    logger.info("🔍 Führe vollständigen Scan mit Sitemap durch")
+    
+    # 1. Zugriff über die Sitemap mit Vorfilterung
+    logger.info("🔍 Lade und filtere Produkte aus der Sitemap")
+    sitemap_products = fetch_filtered_products_from_sitemap_with_retry(headers, product_info)
+    
+    if sitemap_products:
+        logger.info(f"🔍 Nach Vorfilterung verbleiben {len(sitemap_products)} relevante URLs")
+        
+        # 2. Parallelisierte Verarbeitung der gefilterten Produkt-URLs
+        logger.info(f"🔄 Starte parallele Verarbeitung von {len(sitemap_products)} URLs")
+        
+        # Bestimme optimale Worker-Anzahl basierend auf CPU-Kernen und URL-Anzahl
+        max_workers = min(20, len(sitemap_products))  # Max 20 Worker
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Dictionary zum Speichern der Future-Objekte mit ihren URLs
+            future_to_url = {
+                executor.submit(
+                    process_mighty_cards_product, 
+                    url, product_info, seen, out_of_stock, only_available, 
+                    headers, all_products, new_matches, found_product_ids, cached_products
+                ): url for url in sitemap_products
+            }
+            
+            # Sammle die Ergebnisse ein, während sie fertig werden
+            completed = 0
+            total = len(future_to_url)
+            
+            for future in concurrent.futures.as_completed(future_to_url):
+                url = future_to_url[future]
+                completed += 1
+                
+                # Gib alle 10% einen Fortschrittsindikator aus
+                if completed % max(1, total // 10) == 0 or completed == total:
+                    percent = (completed / total) * 100
+                    logger.info(f"⏳ Fortschritt: {completed}/{total} URLs verarbeitet ({percent:.1f}%)")
+                
+                try:
+                    # Das Ergebnis wird bereits in den übergebenen Listen gespeichert
+                    future.result()
+                except Exception as e:
+                    logger.error(f"❌ Fehler bei der Verarbeitung von {url}: {e}")
+    
+    # 3. Fallback: Direkte Suche nach Produkten, wenn nichts gefunden wurde
+    if len(all_products) < 2:
+        logger.info("🔍 Nicht genug Produkte über Sitemap gefunden, versuche direkte Suche")
+        
+        # Verwende unterschiedliche Suchbegriffe für die direkte Suche
+        search_terms = []
+        for product_item in product_info:
+            for name_variant in product_item["name_variants"]:
+                if name_variant not in search_terms:
+                    search_terms.append(name_variant)
+                    if len(search_terms) >= 5:  # Begrenze auf max. 5 Suchbegriffe
+                        break
+        
+        # Füge auch immer die Produktcodes hinzu
+        for product_item in product_info:
+            if product_item["product_code"] and product_item["product_code"] not in search_terms:
+                search_terms.append(product_item["product_code"])
+        
+        # Direktsuche mit den generierten Suchbegriffen
+        for search_term in search_terms:
+            # Verwende Original-Term und Ersetzungsversion (ohne Umlaute)
+            search_products = search_mighty_cards_products(search_term, headers)
+            
+            # Verarbeite gefundene Produkte sequentiell (meist weniger)
+            for product_url in search_products:
+                with url_lock:  # Thread-sicher prüfen, ob URL bereits verarbeitet wurde
+                    if product_url in sitemap_products:
+                        continue  # Vermeidet Duplikate
+                
+                process_mighty_cards_product(product_url, product_info, seen, out_of_stock, only_available, 
+                                            headers, all_products, new_matches, found_product_ids, cached_products)
+    
+    # Cache aktualisieren
+    if cached_products:
+        cache_data["products"] = cached_products
+        cache_data["last_update"] = current_time
+        save_cache(cache_data)
+    
+    # 4. Zweite Stufe: Verarbeite positive Treffer mit Selenium für präzise Daten
+    if all_products:
+        updated_products = process_product_matches_with_selenium(all_products)
+        
+        # Sende Benachrichtigungen für die aktualisierten Produkte
+        if updated_products:
+            # Überschreibe die vorherigen Ergebnisse
+            all_products = updated_products
+            send_batch_notifications(all_products)
     else:
-        language = "UNK"
+        logger.info("ℹ️ Keine Produkte für Selenium-Verarbeitung gefunden")
     
-    # Produkttyp
-    product_type = extract_product_type_from_text(title)
+    # Messung der Gesamtlaufzeit
+    elapsed_time = time.time() - start_time
+    logger.info(f"✅ Scraping abgeschlossen in {elapsed_time:.2f} Sekunden, {len(new_matches)} neue Treffer gefunden")
     
-    # Produktcode (sv09, kp09, etc.)
-    code_match = re.search(r'(kp\d+|sv\d+)', title_lower)
-    product_code = code_match.group(0) if code_match else "unknown"
-    
-    # Normalisiere Titel für einen Identifizierer
-    normalized_title = re.sub(r'\s+(display|box|tin|etb)$', '', title_lower)
-    normalized_title = re.sub(r'\s+', '-', normalized_title)
-    normalized_title = re.sub(r'[^a-z0-9\-]', '', normalized_title)
-    
-    # Begrenze die Länge
-    if len(normalized_title) > 50:
-        normalized_title = normalized_title[:50]
-    
-    # Erstelle eine strukturierte ID
-    product_id = f"{base_id}_{product_code}_{product_type}_{language}_{normalized_title}"
-    
-    # Zusatzinformationen
-    if "18er" in title_lower:
-        product_id += "_18er"
-    elif "36er" in title_lower:
-        product_id += "_36er"
-    
-    return product_id
+    return new_matches

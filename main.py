@@ -5,6 +5,7 @@ import traceback
 from datetime import datetime
 import concurrent.futures
 import random
+import atexit
 
 # Neue Importe für verbesserte Konfigurationsverwaltung und Request-Handling
 from utils.config_manager import (
@@ -19,7 +20,7 @@ from utils.requests_handler import get_page_content, fetch_url
 from scrapers.tcgviert import scrape_tcgviert
 from scrapers.generic import scrape_generic
 from scrapers.sapphire_cards import scrape_sapphire_cards
-from scrapers.mighty_cards import scrape_mighty_cards
+from scrapers.mighty_cards import scrape_mighty_cards, initialize_browser_pool, shutdown_browser_pool
 from scrapers.games_island import scrape_games_island  # Neuer Import für games-island.eu
 
 # Logger-Konfiguration
@@ -33,12 +34,31 @@ logging.basicConfig(
     ]
 )
 
-def run_once(only_available=False, reset_seen=False):
+# Flag für Selenium-Initialisierung
+selenium_initialized = False
+
+# Funktion zur Sicherstellung, dass Browser-Pool geschlossen wird
+def cleanup_selenium():
+    """Stellt sicher, dass der Selenium-Browser-Pool beim Beenden geschlossen wird"""
+    global selenium_initialized
+    if selenium_initialized:
+        logger.info("[CLEANUP] Schließe Selenium-Browser-Pool")
+        try:
+            shutdown_browser_pool()
+            selenium_initialized = False
+        except Exception as e:
+            logger.error(f"[ERROR] Fehler beim Schließen des Browser-Pools: {e}")
+
+# Registriere Cleanup-Funktion für graceful shutdown
+atexit.register(cleanup_selenium)
+
+def run_once(only_available=False, reset_seen=False, use_selenium=True):
     """
     Führt einen einzelnen Scan-Durchlauf aus
     
     :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
     :param reset_seen: Ob die Liste der gesehenen Produkte zurückgesetzt werden soll
+    :param use_selenium: Ob Selenium für mighty-cards.de verwendet werden soll
     :return: Intervall für den nächsten Durchlauf
     """
     logger.info("[START] Einzelscan gestartet")
@@ -62,6 +82,18 @@ def run_once(only_available=False, reset_seen=False):
     
     all_matches = []
     all_urls = urls.copy()  # Kopie erstellen, damit die Originalliste intakt bleibt
+    
+    # Initialisiere Selenium nur wenn mighty-cards.de gescrapt wird und use_selenium True ist
+    global selenium_initialized
+    if use_selenium and any("mighty-cards.de" in url for url in all_urls):
+        try:
+            logger.info("[SELENIUM] Initialisiere Browser-Pool für mighty-cards.de")
+            initialize_browser_pool()
+            selenium_initialized = True
+        except Exception as e:
+            logger.error(f"[ERROR] Fehler bei der Initialisierung des Browser-Pools: {e}")
+            logger.warning("[WARNING] Fortfahren ohne Selenium für mighty-cards.de")
+            selenium_initialized = False
     
     # Sapphire-Cards spezifischer Scraper (wichtig: keine URLs mehr entfernen)
     sapphire_urls = [url for url in all_urls if "sapphire-cards.de" in url]
@@ -166,41 +198,59 @@ def run_once(only_available=False, reset_seen=False):
     else:
         logger.info("[INFO] Keine neuen Treffer in diesem Durchlauf")
     
+    # Selenium-Ressourcen freigeben, wenn nach dem Durchlauf beendet werden soll
+    if selenium_initialized and not run_loop_active:
+        cleanup_selenium()
+    
     interval = get_current_interval()
     logger.info(f"[DONE] Fertig. Nächster Durchlauf in {interval} Sekunden")
     return interval
 
-def run_loop(only_available=False):
+# Flag für aktiven Loop-Modus
+run_loop_active = False
+
+def run_loop(only_available=False, use_selenium=True):
     """
     Startet den Scraper im Dauerbetrieb mit verbesserter Fehlerbehandlung
     
     :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
+    :param use_selenium: Ob Selenium für mighty-cards.de verwendet werden soll
     """
+    global run_loop_active
+    run_loop_active = True
+    
     logger.info("[START] Dauerbetrieb gestartet")
     consecutive_errors = 0
     max_consecutive_errors = 5
     
-    while True:
-        try:
-            interval = run_once(only_available=only_available)
-            consecutive_errors = 0  # Fehler zurücksetzen bei erfolgreichem Durchlauf
-            time.sleep(interval)
-        except Exception as e:
-            consecutive_errors += 1
-            logger.error(f"[ERROR] Fehler im Hauptloop: {str(e)}")
-            logger.error(traceback.format_exc())
-            
-            # Exponentielles Backoff bei wiederholten Fehlern
-            retry_time = min(60 * (2 ** (consecutive_errors - 1)), 3600)  # Max 1 Stunde
-            
-            # Bei zu vielen aufeinanderfolgenden Fehlern, Benachrichtigung senden
-            if consecutive_errors >= max_consecutive_errors:
-                error_msg = f"⚠️ *WARNUNG*: Der Scraper hat {consecutive_errors} Fehler in Folge. Letzte Fehlermeldung: {str(e)}"
-                send_telegram_message(error_msg)
-                consecutive_errors = 0  # Zähler zurücksetzen nach Benachrichtigung
-            
-            logger.warning(f"[RETRY] Neustart in {retry_time} Sekunden...")
-            time.sleep(retry_time)
+    try:
+        while run_loop_active:
+            try:
+                interval = run_once(only_available=only_available, use_selenium=use_selenium)
+                consecutive_errors = 0  # Fehler zurücksetzen bei erfolgreichem Durchlauf
+                time.sleep(interval)
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(f"[ERROR] Fehler im Hauptloop: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # Exponentielles Backoff bei wiederholten Fehlern
+                retry_time = min(60 * (2 ** (consecutive_errors - 1)), 3600)  # Max 1 Stunde
+                
+                # Bei zu vielen aufeinanderfolgenden Fehlern, Benachrichtigung senden
+                if consecutive_errors >= max_consecutive_errors:
+                    error_msg = f"⚠️ *WARNUNG*: Der Scraper hat {consecutive_errors} Fehler in Folge. Letzte Fehlermeldung: {str(e)}"
+                    send_telegram_message(error_msg)
+                    consecutive_errors = 0  # Zähler zurücksetzen nach Benachrichtigung
+                
+                logger.warning(f"[RETRY] Neustart in {retry_time} Sekunden...")
+                time.sleep(retry_time)
+    except KeyboardInterrupt:
+        logger.info("[INFO] Dauerbetrieb durch Benutzer beendet")
+    finally:
+        run_loop_active = False
+        # Stelle sicher, dass Selenium-Ressourcen freigegeben werden
+        cleanup_selenium()
 
 def test_telegram():
     """Testet die Telegram-Benachrichtigungsfunktion"""
@@ -359,13 +409,52 @@ def test_mighty_cards():
     seen = set()
     out_of_stock = set()
     
-    from scrapers.mighty_cards import scrape_mighty_cards
-    matches = scrape_mighty_cards(keywords_map, seen, out_of_stock)
+    try:
+        # Initialisiere Browser-Pool für Selenium-Unterstützung
+        logger.info("[SELENIUM] Initialisiere Browser-Pool für Test")
+        initialize_browser_pool()
+        
+        # Führe Test aus
+        matches = scrape_mighty_cards(keywords_map, seen, out_of_stock)
+        
+        if matches:
+            logger.info(f"[SUCCESS] Test erfolgreich, {len(matches)} Treffer gefunden")
+        else:
+            logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
+    except Exception as e:
+        logger.error(f"[ERROR] Fehler beim Testen von Mighty-Cards: {e}")
+    finally:
+        # Stelle sicher, dass Browser-Pool geschlossen wird
+        logger.info("[CLEANUP] Schließe Browser-Pool nach Test")
+        shutdown_browser_pool()
+
+def test_mighty_cards_selenium():
+    """Testet die Selenium-Funktionalität für Mighty-Cards isoliert"""
+    logger.info("[TEST] Teste Mighty-Cards Selenium-Extraktion")
     
-    if matches:
-        logger.info(f"[SUCCESS] Test erfolgreich, {len(matches)} Treffer gefunden")
-    else:
-        logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
+    test_url = "https://www.mighty-cards.de/shop/p194968154_pokemon-sv09-journey-together-englisch-elite-trainer-box.html"
+    
+    try:
+        # Initialisiere Browser-Pool
+        from scrapers.mighty_cards import initialize_browser_pool, extract_product_info_with_selenium, shutdown_browser_pool
+        
+        logger.info("[SELENIUM] Initialisiere Browser-Pool für Test")
+        initialize_browser_pool()
+        
+        # Teste die Extraktion
+        logger.info(f"[TEST] Extrahiere Produktinfos von {test_url}")
+        result = extract_product_info_with_selenium(test_url)
+        
+        logger.info(f"[RESULT] Ergebnis: {result}")
+        
+        return result
+    except Exception as e:
+        logger.error(f"[ERROR] Fehler beim Selenium-Test: {e}")
+        return None
+    finally:
+        # Stelle sicher, dass Browser-Pool geschlossen wird
+        logger.info("[CLEANUP] Schließe Browser-Pool nach Test")
+        shutdown_browser_pool()
 
 def test_games_island():
     """Testet den Games-Island Scraper isoliert"""
@@ -446,7 +535,7 @@ def clean_database():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pokémon TCG Scraper mit verbesserten Filtern")
     parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", "availability_test", 
-                                          "sapphire_test", "mighty_cards_test", "games_island_test",  # Neue Test-Option
+                                          "sapphire_test", "mighty_cards_test", "games_island_test", "mighty_cards_selenium_test",
                                           "request_test", "show_out_of_stock", "clean"], 
                         default="loop", help="Ausführungsmodus")
     parser.add_argument("--only-available", action="store_true", 
@@ -455,6 +544,8 @@ if __name__ == "__main__":
                         help="Liste der gesehenen Produkte zurücksetzen")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                         default="INFO", help="Log-Level einstellen")
+    parser.add_argument("--no-selenium", action="store_true",
+                        help="Selenium für mighty-cards.de deaktivieren (nur BeautifulSoup verwenden)")
     args = parser.parse_args()
 
     # Log-Level entsprechend setzen
@@ -463,10 +554,15 @@ if __name__ == "__main__":
     
     logger.info(f"[START] Modus gewählt: {args.mode} - Log-Level: {args.log_level}")
     
+    # Verwende Selenium standardmäßig, es sei denn --no-selenium wurde angegeben
+    use_selenium = not args.no_selenium
+    if args.no_selenium:
+        logger.info("[CONFIG] Selenium für mighty-cards.de deaktiviert")
+    
     if args.mode == "once":
-        run_once(only_available=args.only_available, reset_seen=args.reset)
+        run_once(only_available=args.only_available, reset_seen=args.reset, use_selenium=use_selenium)
     elif args.mode == "loop":
-        run_loop(only_available=args.only_available)
+        run_loop(only_available=args.only_available, use_selenium=use_selenium)
     elif args.mode == "test":
         test_telegram()
     elif args.mode == "match_test":
@@ -477,7 +573,9 @@ if __name__ == "__main__":
         test_sapphire()
     elif args.mode == "mighty_cards_test":
         test_mighty_cards()
-    elif args.mode == "games_island_test":  # Neue Testoption
+    elif args.mode == "mighty_cards_selenium_test":
+        test_mighty_cards_selenium()
+    elif args.mode == "games_island_test":
         test_games_island()
     elif args.mode == "request_test":
         test_request_handler()

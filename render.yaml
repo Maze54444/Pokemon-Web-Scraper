@@ -28,18 +28,29 @@ services:
         libxkbcommon0 \
         libxrandr2 \
         xdg-utils \
-        libxshmfence1
+        libxshmfence1 \
+        xvfb         # Virtueller Framebuffer für Headless Chrome
       # Install Chrome
       wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
       echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list
       apt-get update && apt-get install -y google-chrome-stable
       # Install Python packages
       pip install -r requirements.txt
-    startCommand: python main.py
+    startCommand: python main.py --no-selenium
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: DISPLAY
         value: ":99"
       - key: SELENIUM_HEADLESS
+        value: "true"
+      - key: SELENIUM_BROWSER_BINARY
+        value: "/usr/bin/google-chrome-stable"
+      - key: SELENIUM_NO_SANDBOX
+        value: "true"
+      - key: BROWSER_POOL_SIZE
+        value: "1"
+      - key: BROWSER_MAX_USES
+        value: "5"
+      - key: RENDER_ENVIRONMENT
         value: "true"
