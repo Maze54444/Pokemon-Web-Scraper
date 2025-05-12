@@ -2,7 +2,6 @@
 Spezieller Scraper für mighty-cards.de, der die Sitemap verwendet
 um Produkte zu finden und zu verarbeiten.
 Optimiert mit Multithreading und verbesserter Name-vs-Typ Erkennung.
-Mit Selenium-Unterstützung für JavaScript-generierte Inhalte.
 """
 
 import requests
@@ -20,14 +19,6 @@ from pathlib import Path
 from utils.matcher import is_keyword_in_text, extract_product_type_from_text, clean_text
 from utils.stock import update_product_status
 from utils.availability import detect_availability
-
-# Selenium-Imports
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
@@ -90,98 +81,9 @@ UMLAUT_MAPPING = {
 url_lock = Lock()
 data_lock = Lock()
 cache_lock = Lock()
-browser_lock = Lock()
 
 # Cache-Datei
 CACHE_FILE = "data/mighty_cards_cache.json"
-
-# Selenium Browser-Pool
-BROWSER_POOL = []
-MAX_POOL_SIZE = 3  # Maximale Anzahl der Browser im Pool
-BROWSER_USAGE_LIMIT = 10  # Maximale Nutzungen eines Browsers, bevor er neu erstellt wird
-
-# Klasse zur Verwaltung des Browser-Pools
-class BrowserManager:
-    def __init__(self, max_size=MAX_POOL_SIZE, usage_limit=BROWSER_USAGE_LIMIT):
-        self.max_size = max_size
-        self.usage_limit = usage_limit
-        self.pool = []
-        self.lock = Lock()
-    
-    def get_browser(self):
-        """Holt einen Browser aus dem Pool oder erstellt einen neuen"""
-        with self.lock:
-            # Versuche, einen verfügbaren Browser zu finden
-            for browser_data in self.pool:
-                if not browser_data['in_use']:
-                    browser_data['in_use'] = True
-                    browser_data['usage_count'] += 1
-                    # Wenn der Browser zu oft verwendet wurde, erstelle einen neuen
-                    if browser_data['usage_count'] > self.usage_limit:
-                        try:
-                            browser_data['browser'].quit()
-                        except:
-                            pass
-                        browser_data['browser'] = self._create_browser()
-                        browser_data['usage_count'] = 1
-                    return browser_data['browser']
-            
-            # Wenn kein verfügbarer Browser gefunden wurde, erstelle einen neuen
-            if len(self.pool) < self.max_size:
-                browser = self._create_browser()
-                self.pool.append({
-                    'browser': browser,
-                    'in_use': True,
-                    'usage_count': 1
-                })
-                return browser
-            
-            # Wenn der Pool voll ist, warte und versuche erneut
-            return None
-    
-    def release_browser(self, browser):
-        """Gibt einen Browser zurück in den Pool"""
-        with self.lock:
-            for browser_data in self.pool:
-                if browser_data['browser'] == browser:
-                    browser_data['in_use'] = False
-                    return True
-            return False
-    
-    def _create_browser(self):
-        """Erstellt einen neuen Browser mit den richtigen Optionen"""
-        options = Options()
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--window-size=1920,1080')
-        options.add_argument('--disable-infobars')
-        options.add_argument('--disable-extensions')
-        
-        # User-Agent setzen
-        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36')
-        
-        # Browser erstellen
-        browser = webdriver.Chrome(options=options)
-        
-        # Timeout setzen
-        browser.set_page_load_timeout(30)
-        
-        return browser
-    
-    def close_all(self):
-        """Schließt alle Browser im Pool"""
-        with self.lock:
-            for browser_data in self.pool:
-                try:
-                    browser_data['browser'].quit()
-                except:
-                    pass
-            self.pool = []
-
-# Browser-Manager instanziieren
-browser_manager = BrowserManager()
 
 def load_cache():
     """Lädt den Cache mit gefundenen Produkten"""
@@ -211,134 +113,12 @@ def save_cache(cache_data):
         logger.error(f"❌ Fehler beim Speichern des Caches: {e}")
         return False
 
-def check_product_availability_selenium(url, wait_time=5):
-    """
-    Verbesserte Verfügbarkeitsprüfung für mighty-cards.de mit Selenium
-    
-    :param url: URL der Produktseite
-    :param wait_time: Wartezeit für JavaScript-Ausführung in Sekunden
-    :return: Tuple (is_available, price, status_text, title)
-    """
-    browser = None
-    try:
-        # Browser aus dem Pool holen
-        browser = browser_manager.get_browser()
-        if not browser:
-            # Wenn kein Browser verfügbar ist, warte kurz und versuche erneut
-            time.sleep(2)
-            browser = browser_manager.get_browser()
-            if not browser:
-                logger.warning(f"⚠️ Kein Browser verfügbar für: {url}")
-                return None, "Preis nicht verfügbar", "[?] Status unbekannt", None
-        
-        # Seite laden
-        browser.get(url)
-        
-        # Warten, bis die Seite geladen ist
-        WebDriverWait(browser, wait_time).until(
-            EC.presence_of_element_located((By.TAG_NAME, "h1"))
-        )
-        
-        # Titel extrahieren
-        title_element = None
-        try:
-            title_element = browser.find_element(By.CLASS_NAME, 'product-details__product-title')
-        except NoSuchElementException:
-            try:
-                title_element = browser.find_element(By.TAG_NAME, 'h1')
-            except NoSuchElementException:
-                pass
-        
-        title = title_element.text.strip() if title_element else None
-        
-        # Preis extrahieren
-        price = "Preis nicht verfügbar"
-        try:
-            price_element = WebDriverWait(browser, 2).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".details-product-price__value, .product-details__product-price, .price"))
-            )
-            price = price_element.text.strip()
-        except (TimeoutException, NoSuchElementException):
-            # Fallback-Suche nach Preiselementen
-            try:
-                price_elements = browser.find_elements(By.CSS_SELECTOR, ".price, span[itemprop='price']")
-                if price_elements:
-                    price = price_elements[0].text.strip()
-            except:
-                logger.debug(f"⚠️ Preis nicht gefunden für: {url}")
-        
-        # Prüfe auf Vorbestellung (Preorder)
-        is_preorder = False
-        page_text = browser.page_source.lower()
-        if "vorbestellung" in page_text or "pre-order" in page_text or "preorder" in page_text:
-            is_preorder = True
-        
-        # 1. HTML-basierte Verfügbarkeitsprüfung
-        # Suche nach "Ausverkauft"-Text
-        sold_out_elements = browser.find_elements(By.XPATH, "//*[contains(text(), 'Ausverkauft')]")
-        if sold_out_elements:
-            return False, price, "[X] Ausverkauft (Text gefunden)", title
-        
-        # 2. Suche nach dem "In den Warenkorb"-Button
-        cart_button = None
-        try:
-            cart_button = browser.find_element(By.XPATH, "//span[contains(text(), 'In den Warenkorb')]/ancestor::button[not(@disabled)]")
-            if cart_button:
-                if is_preorder:
-                    return True, price, "[V] Vorbestellbar", title
-                return True, price, "[V] Verfügbar (Warenkorb-Button aktiv)", title
-        except NoSuchElementException:
-            # Button nicht gefunden oder deaktiviert
-            pass
-        
-        # 3. Prüfe auf "NEW"-Badge (meist nur bei verfügbaren Produkten)
-        try:
-            new_badge = browser.find_element(By.CSS_SELECTOR, '.product-details__label--NEW')
-            if new_badge:
-                if is_preorder:
-                    return True, price, "[V] Vorbestellbar (NEW-Badge)", title
-                return True, price, "[V] Verfügbar (NEW-Badge gefunden)", title
-        except NoSuchElementException:
-            pass
-        
-        # 4. Prüfe auf "nicht verfügbar"-Text im Seiteninhalt
-        if "nicht verfügbar" in page_text or "nicht mehr verfügbar" in page_text:
-            return False, price, "[X] Ausverkauft (Nicht verfügbar im Text)", title
-        
-        # 5. Fallback: Prüfe auf Warenkorb-Symbole und -Texte
-        try:
-            cart_icon = browser.find_element(By.CSS_SELECTOR, ".fa-shopping-cart, .icon-shopping-cart")
-            # Prüfe, ob das Icon in einem nicht-deaktivierten Element ist
-            parent_element = cart_icon.find_element(By.XPATH, "./..")
-            if not "disabled" in parent_element.get_attribute("class"):
-                if is_preorder:
-                    return True, price, "[V] Vorbestellbar (Warenkorb-Icon)", title
-                return True, price, "[V] Verfügbar (Warenkorb-Icon)", title
-        except NoSuchElementException:
-            pass
-        
-        # 6. Wenn wir wissen, dass es eine Vorbestellung ist, aber keine eindeutigen Anzeichen für Nicht-Verfügbarkeit
-        if is_preorder:
-            return True, price, "[V] Vorbestellbar (Vorbestelltext gefunden)", title
-        
-        # 7. Fallback: Wenn nichts eindeutiges gefunden wurde
-        return False, price, "[X] Wahrscheinlich ausverkauft (keine Verfügbarkeitsindikatoren)", title
-    
-    except Exception as e:
-        logger.error(f"❌ Fehler bei der Selenium-Verfügbarkeitsprüfung: {e}")
-        return None, "Preis nicht verfügbar", f"[?] Fehler bei der Prüfung: {str(e)[:50]}...", None
-    
-    finally:
-        # Browser zurück in den Pool geben
-        if browser:
-            browser_manager.release_browser(browser)
-
 def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     """
     Spezieller Scraper für mighty-cards.de mit Sitemap-Integration und Multithreading
     
     :param keywords_map: Dictionary mit Suchbegriffen und ihren Tokens
-    :param seen: Set mit bereits gesehenen Produkten
+    :param seen: Set mit bereits gesehenen Produkttiteln
     :param out_of_stock: Set mit ausverkauften Produkten
     :param only_available: Ob nur verfügbare Produkte gemeldet werden sollen
     :return: Liste der neuen Treffer
@@ -458,9 +238,6 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
                 if all_products:
                     send_batch_notifications(all_products)
                 
-                # Browser-Pool schließen
-                browser_manager.close_all()
-                
                 # Messung der Gesamtlaufzeit
                 elapsed_time = time.time() - start_time
                 logger.info(f"✅ Cache-basiertes Scraping abgeschlossen in {elapsed_time:.2f} Sekunden, {len(new_matches)} Treffer gefunden")
@@ -554,9 +331,6 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     if all_products:
         send_batch_notifications(all_products)
     
-    # Browser-Pool schließen
-    browser_manager.close_all()
-    
     # Messung der Gesamtlaufzeit
     elapsed_time = time.time() - start_time
     logger.info(f"✅ Scraping abgeschlossen in {elapsed_time:.2f} Sekunden, {len(new_matches)} neue Treffer gefunden")
@@ -581,34 +355,43 @@ def send_batch_notifications(all_products):
 def process_cached_product(product_url, product_data, product_info, seen, out_of_stock, only_available,
                          headers, all_products, new_matches, found_product_ids, cached_products):
     """
-    Verarbeitet ein bereits im Cache gespeichertes Produkt mit Selenium für präzise Datenextraktion
+    Verarbeitet ein bereits im Cache gespeichertes Produkt
     
     :return: (success, error_404) - Erfolg und ob ein 404-Fehler aufgetreten ist
     """
     search_term = product_data.get("search_term")
     
     try:
-        # Prüfe zuerst, ob die URL noch existiert
+        # Produkt-Detailseite abrufen
         try:
-            response = requests.head(product_url, headers=headers, timeout=10)
+            response = requests.get(product_url, headers=headers, timeout=15)
             
             # Wenn 404 zurückgegeben wird, müssen wir die Sitemap neu scannen
             if response.status_code == 404:
                 return False, True
                 
-            if response.status_code >= 400:
+            if response.status_code != 200:
                 logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: Status {response.status_code}")
-                return False, response.status_code == 404
+                return False, False
         except requests.exceptions.RequestException as e:
             logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: {e}")
             return False, False
         
-        # Verwende Selenium, um die Verfügbarkeit zu prüfen
-        is_available, price, status_text, title = check_product_availability_selenium(product_url)
+        soup = BeautifulSoup(response.content, "html.parser")
         
-        # Wenn Selenium-Fehler auftrat, verwende den gecachten Titel
-        if title is None:
+        # Titel extrahieren und validieren
+        title_elem = soup.find('h1', {'class': 'product-details__product-title'})
+        if not title_elem:
+            title_elem = soup.find('h1')
+        
+        if not title_elem:
+            # Wenn kein Titel gefunden wird, verwende den zwischengespeicherten
             title = product_data.get("title", "Pokemon Produkt")
+        else:
+            title = title_elem.text.strip()
+        
+        # Verwende das Availability-Modul für Verfügbarkeitserkennnung
+        is_available, price, status_text = detect_availability(soup, product_url)
         
         # Eindeutige ID für das Produkt erstellen
         product_id = product_data.get("product_id") or create_product_id(title)
@@ -640,19 +423,6 @@ def process_cached_product(product_url, product_data, product_info, seen, out_of
             
             # Extrahiere Produkttyp
             detected_product_type = extract_product_type_from_text(title)
-            
-            # VERBESSERT: Überprüfe, ob der Produkttyp dem ursprünglichen Suchbegriff entspricht
-            search_term_product_type = None
-            for item in product_info:
-                if item["original_term"] == search_term:
-                    search_term_product_type = item["product_type"]
-                    break
-            
-            # Wenn der erkannte Produkttyp nicht mit dem gesuchten übereinstimmt, überspringen
-            if (search_term_product_type and search_term_product_type != "unknown" and 
-                detected_product_type != "unknown" and search_term_product_type != detected_product_type):
-                logger.debug(f"⚠️ Produkttyp-Diskrepanz: Gesucht {search_term_product_type}, gefunden {detected_product_type}: {title}")
-                return True, False
             
             # Produkt-Daten sammeln
             product_data = {
@@ -1012,7 +782,8 @@ def search_mighty_cards_products(search_term, headers):
 def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, only_available, 
                                headers, all_products, new_matches, found_product_ids, cached_products=None):
     """
-    Verarbeitet ein einzelnes Produkt von mighty-cards.de (Thread-sicher) mit Selenium
+    Verarbeitet ein einzelnes Produkt von mighty-cards.de (Thread-sicher) mit verbesserter
+    Produkttyp- und Produktnamen-Validierung.
     
     :param product_url: URL des Produkts
     :param product_info: Liste mit extrahierten Produktinformationen
@@ -1046,50 +817,80 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
         if contains_blacklist_terms(url_lower):
             return False
         
-        # 4. URL-Segmente für zuverlässigere Erkennung aufteilen
+        # Produkt-Detailseite abrufen
+        try:
+            response = requests.get(product_url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: Status {response.status_code}")
+                return False
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: {e}")
+            return False
+        
+        soup = BeautifulSoup(response.content, "html.parser")
+        
+        # Titel extrahieren und validieren
+        title_elem = soup.find('h1', {'class': 'product-details__product-title'})
+        if not title_elem:
+            title_elem = soup.find('h1')
+        
+        if not title_elem:
+            # Wenn kein Titel gefunden wird, versuche aus URL zu generieren
+            title = extract_title_from_url(product_url)
+            logger.debug(f"⚠️ Kein Titel für {product_url} gefunden, generiere aus URL: {title}")
+        else:
+            title = title_elem.text.strip()
+        
+        # DEBUG: Zeige Titel für Debugging-Zwecke
+        logger.debug(f"Titel: {title}")
+        
+        # Strikte Titel-Validierung mit verbesserter Typ-vs-Name Unterscheidung
+        title_lower = title.lower()
+        
+        # 1. "Pokemon" muss korrekt im Titel positioniert sein
+        # Bei mighty-cards ist "Pokemon" oft am Ende des Titels
+        is_valid_pokemon_product = False
+        
+        # Muster 1: Pokemon ist am Anfang (Standard)
+        if title_lower.startswith("pokemon"):
+            is_valid_pokemon_product = True
+        
+        # Muster 2: Pokemon steht am Ende (typisch für mighty-cards.de)
+        if title_lower.endswith("pokemon"):
+            is_valid_pokemon_product = True
+            
+        # Muster 3: Pokémon TCG am Anfang
+        if title_lower.startswith("pokémon") or "pokemon tcg" in title_lower:
+            is_valid_pokemon_product = True
+        
+        # Wenn kein gültiges Pokemon-Produkt, abbrechen
+        if not is_valid_pokemon_product:
+            return False
+            
+        # 2. Enthält keine Blacklist-Begriffe
+        if contains_blacklist_terms(title_lower):
+            # Explizit "one piece card game" prüfen, da dieser häufig falsch erkannt wird
+            if "one piece" in title_lower or "op01" in title_lower or "op02" in title_lower:
+                return False
+                
+            logger.debug(f"❌ Titel enthält Blacklist-Begriff: {title}")
+            return False
+        
+        # URL-Segmente für zuverlässigere Erkennung aufteilen
         url_segments = product_url.split('/')
         url_filename = url_segments[-1].lower() if url_segments else ""
         
-        # 5. Produktcode aus URL extrahieren (z.B. KP09, SV09)
+        # Produktcode aus URL extrahieren (z.B. KP09, SV09)
         url_code_match = re.search(r'(kp\d+|sv\d+)', url_filename, re.IGNORECASE)
         url_product_code = url_code_match.group(0).lower() if url_code_match else None
         
-        # 6. Prüfe die URL mit Selenium
-        is_available, price, status_text, title = check_product_availability_selenium(product_url)
+        # Produkttyp aus dem Titel extrahieren
+        detected_product_type = extract_product_type_from_text(title)
         
-        # Wenn Selenium-Fehler auftrat oder kein Titel gefunden wurde, verwende Fallback mit BeautifulSoup
-        if title is None:
-            try:
-                # Fallback: Produktdetails mit requests/BeautifulSoup holen
-                response = requests.get(product_url, headers=headers, timeout=15)
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.content, "html.parser")
-                    
-                    # Titel extrahieren
-                    title_elem = soup.find('h1', {'class': 'product-details__product-title'})
-                    if not title_elem:
-                        title_elem = soup.find('h1')
-                    
-                    if title_elem:
-                        title = title_elem.text.strip()
-                    else:
-                        # Keine gute Möglichkeit, den Titel zu finden
-                        return False
-                else:
-                    # URL nicht erreichbar
-                    return False
-            except Exception as e:
-                logger.warning(f"⚠️ Fallback-Fehler für {product_url}: {e}")
-                return False
-        
-        # Wenn immer noch kein Titel, dann aus URL extrahieren
-        if not title:
-            title = extract_title_from_url(product_url)
-        
-        # Bereinigter Titel für besseres Matching
+        # Bereinigter Titel für besseres Matching (ohne Sonderzeichen)
         clean_title_lower = clean_text(title).lower()
         
-        # 7. Verbesserte URL-basierte Prüfung: Wenn KP09/SV09 in der URL ist, direkt annehmen
+        # 3. Verbesserte URL-basierte Prüfung: Wenn KP09/SV09 in der URL ist, direkt annehmen
         direct_url_match = False
         matched_product = None
         matching_score = 0
@@ -1125,18 +926,18 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
                             break
             
         # Wenn kein direkter URL-Match, dann Titel-basierte Prüfung
-        if not direct_url_match and title:
+        if not direct_url_match:
             for product in product_info:
                 current_score = 0
                 name_match = False
                 type_match = False
                 
-                # 7.1 Prüfe Produktcode-Match (höchste Priorität)
+                # 3.1 Prüfe Produktcode-Match (höchste Priorität)
                 if product["product_code"] and product["product_code"].lower() in clean_title_lower:
                     current_score += 10
                     name_match = True  # Wenn Produktcode stimmt, gilt der Name als übereinstimmend
                 
-                # 7.2 Prüfe Produktnamen-Match in verschiedenen Varianten
+                # 3.2 Prüfe Produktnamen-Match in verschiedenen Varianten
                 if not name_match:
                     for name_variant in product["name_variants"]:
                         if name_variant and name_variant.lower() in clean_title_lower:
@@ -1148,7 +949,7 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
                 if not name_match:
                     continue
                     
-                # 7.3 Prüfe Produkttyp-Match in verschiedenen Varianten
+                # 3.3 Prüfe Produkttyp-Match in verschiedenen Varianten
                 for type_variant in product["type_variants"]:
                     # Prüfe, ob der Variantentyp im Titel vorkommt
                     if type_variant and type_variant.lower() in clean_title_lower:
@@ -1157,21 +958,11 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
                         break
                     
                 # Alternative: Prüfe, ob der erkannte Produkttyp mit dem gesuchten übereinstimmt
-                if not type_match and product["product_type"] == extract_product_type_from_text(title):
+                if not type_match and product["product_type"] == detected_product_type:
                     type_match = True
                     current_score += 3
                 
-                # VERBESSERT: Striktere Typprüfung - wenn gesuchter Typ und erkannter Typ bekannt
-                # sind und nicht übereinstimmen, reduziere den Score
-                if product["product_type"] != "unknown" and extract_product_type_from_text(title) != "unknown":
-                    if product["product_type"] != extract_product_type_from_text(title):
-                        # Bei Display besonders streng sein
-                        if product["product_type"] == "display" and extract_product_type_from_text(title) != "display":
-                            current_score -= 20  # Stark reduzieren, wenn wir Display suchen aber etwas anderes finden
-                        else:
-                            current_score -= 5  # Weniger stark reduzieren für andere Typen
-                
-                # 7.4 Wähle das Produkt mit dem höchsten Score
+                # 3.4 Wähle das Produkt mit dem höchsten Score
                 if current_score > matching_score:
                     matched_product = product
                     matching_score = current_score
@@ -1193,10 +984,21 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
                 logger.debug(f"❌ Produkt passt nicht zu Suchbegriffen (Score {matching_score}): {title}")
                 return False
         
-        # VERBESSERT: Bei Blister/ETB Produkten, wenn wir eigentlich Display suchen, ablehnen
-        if matched_product["product_type"] == "display" and extract_product_type_from_text(title) != "unknown" and extract_product_type_from_text(title) != "display":
-            logger.debug(f"❌ Produkttyp stimmt nicht überein: Gesucht '{matched_product['product_type']}', gefunden '{extract_product_type_from_text(title)}': {title}")
-            return False
+        # Bei Produkttyp-Unstimmigkeit: Weniger strenge Prüfung
+        # Da wir bereits durch die URL-Prüfung gegangen sind (KP09/18er oder KP09/36er)
+        if direct_url_match:
+            # Wenn es ein direkter URL-Match ist, akzeptieren wir es ohne weitere Prüfung
+            pass
+        elif matching_score >= 5 and matched_product["product_type"] != "unknown" and detected_product_type != "unknown":
+            # Wenn sowohl der gesuchte als auch der erkannte Typ bekannt sind und nicht übereinstimmen
+            if matched_product["product_type"] != detected_product_type:
+                # Beispiel: Wir suchen nach "reisegefährten display", aber gefunden wird "reisegefährten blister"
+                logger.debug(f"❌ Produkttyp stimmt nicht überein: Gesucht {matched_product['product_type']}, gefunden {detected_product_type} - {title}")
+                # Wir lassen es trotzdem zu, protokollieren es aber
+                pass
+        
+        # Verwende das Availability-Modul für Verfügbarkeitserkennnung
+        is_available, price, status_text = detect_availability(soup, product_url)
         
         # Eindeutige ID für das Produkt erstellen
         product_id = create_product_id(title)
@@ -1240,7 +1042,7 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
                 "status_text": status_text,
                 "is_available": is_available,
                 "matched_term": matched_product["original_term"],
-                "product_type": extract_product_type_from_text(title),
+                "product_type": detected_product_type,
                 "shop": "mighty-cards.de"
             }
             
