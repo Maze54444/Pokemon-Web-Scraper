@@ -16,25 +16,15 @@ import logging
 import os
 import threading
 import queue
+import concurrent.futures
 from pathlib import Path
 from threading import Lock
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote_plus
 
-# Selenium Imports
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
-
-# Projekt-spezifische Importe
-from utils.matcher import is_keyword_in_text, extract_product_type_from_text, clean_text
-from utils.stock import update_product_status
-from utils.availability import detect_availability
+# Importiere die neuen Module für Selenium-Funktionalität
+import selenium_manager
+import mighty_cards_extraction
 
 # Logger konfigurieren
 logger = logging.getLogger(__name__)
@@ -97,387 +87,38 @@ UMLAUT_MAPPING = {
 url_lock = Lock()
 data_lock = Lock()
 cache_lock = Lock()
-browser_pool_lock = Lock()
 
 # Cache-Datei
 CACHE_FILE = "data/mighty_cards_cache.json"
 
-# Selenium-Konfiguration
-SELENIUM_TIMEOUT = 15  # Sekunden
-SELENIUM_HEADLESS = os.environ.get('SELENIUM_HEADLESS', 'true').lower() == 'true'
-BROWSER_POOL_SIZE = int(os.environ.get('BROWSER_POOL_SIZE', '3'))
-BROWSER_MAX_USES = int(os.environ.get('BROWSER_MAX_USES', '10'))
-
-# Browser-Pool und Zähler
-browser_pool = queue.Queue()
-browser_use_count = {}
-
-# Semaphore zum Begrenzen der gleichzeitigen Selenium-Anfragen
-browser_semaphore = threading.Semaphore(BROWSER_POOL_SIZE)
-
 def initialize_browser_pool():
     """Initialisiert den Browser-Pool für Selenium"""
-    logger.info(f"🔄 Initialisiere Browser-Pool mit {BROWSER_POOL_SIZE} Browsern")
-    for _ in range(BROWSER_POOL_SIZE):
-        try:
-            browser = create_browser()
-            browser_id = id(browser)
-            browser_use_count[browser_id] = 0
-            browser_pool.put(browser)
-        except Exception as e:
-            logger.error(f"❌ Fehler beim Erstellen eines Browsers: {e}")
-
-def create_browser():
-    """Erstellt einen neuen Selenium-Browser mit optimierten Einstellungen"""
-    options = Options()
-    
-    # Chrome Binary Pfad konfigurieren - zuerst aus Umgebungsvariable, dann Standardpfade prüfen
-    chrome_binary = os.environ.get('SELENIUM_BROWSER_BINARY')
-    
-    # Liste möglicher Chrome-Binaries
-    potential_paths = [
-        # Linux
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/chromium",
-        # MacOS
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        # Windows
-        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    ]
-    
-    # Wenn keine Umgebungsvariable gesetzt ist, versuche Standardpfade
-    if not chrome_binary:
-        for path in potential_paths:
-            if os.path.exists(path):
-                chrome_binary = path
-                logger.info(f"🔍 Chrome-Binary gefunden unter: {chrome_binary}")
-                break
-    
-    # Wenn immer noch kein Binary gefunden wurde, eine Warnung ausgeben
-    if chrome_binary:
-        options.binary_location = chrome_binary
-    else:
-        logger.warning("⚠️ Kein Chrome-Binary gefunden! Selenium wird versuchen, Chrome automatisch zu finden.")
-    
-    if SELENIUM_HEADLESS:
-        options.add_argument("--headless=new")
-    
-    # Performance-Optimierungen
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--no-sandbox")  # Wichtig für Container/CI-Umgebungen
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--disable-popup-blocking")
-    
-    # Verhindert Bot-Erkennung
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    
-    # Bei Server-Umgebungen ohne Display
-    if os.environ.get('RENDER_ENVIRONMENT') == 'true' or os.environ.get('CI') == 'true':
-        logger.info("🖥️ Server-Umgebung erkannt, konfiguriere für Headless-Betrieb")
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--window-size=1920,1080")
-    
-    # Zufälliger User-Agent für natürlicheres Verhalten
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-    ]
-    options.add_argument(f"--user-agent={random.choice(user_agents)}")
-    
-    # Verwende webdriver_manager für automatische Updates des ChromeDrivers
-    try:
-        service = Service(ChromeDriverManager().install())
-        browser = webdriver.Chrome(service=service, options=options)
-        
-        # Anti-Bot-Detection: Execute CDP commands
-        browser.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": """
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            """
-        })
-        
-        # Setze angemessene Timeouts
-        browser.set_page_load_timeout(SELENIUM_TIMEOUT)
-        browser.implicitly_wait(5)
-        
-        return browser
-    except Exception as e:
-        logger.error(f"❌ Fehler beim Erstellen des Browsers: {e}")
-        raise
-
-def get_browser_from_pool():
-    """Holt einen Browser aus dem Pool oder erstellt einen neuen bei Bedarf"""
-    with browser_pool_lock:
-        if browser_pool.empty():
-            logger.info("🔄 Browser-Pool leer, erstelle neuen Browser")
-            browser = create_browser()
-            browser_id = id(browser)
-            browser_use_count[browser_id] = 0
-            return browser
-        
-        browser = browser_pool.get()
-        browser_id = id(browser)
-        
-        # Prüfe, ob Browser zu oft verwendet wurde und erstelle ggf. einen neuen
-        if browser_use_count.get(browser_id, 0) >= BROWSER_MAX_USES:
-            logger.info(f"🔄 Browser hat Nutzungslimit erreicht ({BROWSER_MAX_USES}), erstelle neuen Browser")
-            try:
-                browser.quit()
-            except:
-                pass
-            
-            browser = create_browser()
-            browser_id = id(browser)
-            browser_use_count[browser_id] = 0
-        
-        return browser
-
-def return_browser_to_pool(browser):
-    """Gibt einen Browser zurück in den Pool"""
-    with browser_pool_lock:
-        browser_id = id(browser)
-        
-        # Erhöhe Nutzungszähler
-        if browser_id in browser_use_count:
-            browser_use_count[browser_id] += 1
-        else:
-            browser_use_count[browser_id] = 1
-        
-        # Zurück in den Pool
-        browser_pool.put(browser)
+    logger.info(f"🔄 Initialisiere Browser-Pool für mighty-cards.de")
+    return selenium_manager.initialize_browser_pool()
 
 def shutdown_browser_pool():
-    """Schließt alle Browser im Pool"""
+    """Schließt den Browser-Pool"""
     logger.info("🔄 Schließe Browser-Pool")
-    with browser_pool_lock:
-        while not browser_pool.empty():
-            browser = browser_pool.get()
-            try:
-                browser.quit()
-            except:
-                pass
+    return selenium_manager.shutdown_browser_pool()
 
-def extract_product_info_with_selenium(product_url, timeout=SELENIUM_TIMEOUT):
+def extract_product_info_with_selenium(product_url, timeout=15):
     """
     Extrahiert präzise Preis- und Verfügbarkeitsinformationen mit Selenium
     
     :param product_url: URL der Produktseite
     :param timeout: Timeout in Sekunden
-    :return: Dictionary mit Produktdetails (title, price, is_available, status_text)
+    :return: Dictionary mit Produktdetails
     """
-    browser = None
-    result = {
-        "title": None,
-        "price": "Preis nicht verfügbar",
-        "is_available": False,
-        "status_text": "[?] Status unbekannt"
-    }
+    return mighty_cards_extraction.extract_product_info_with_selenium(product_url, timeout)
+
+def check_product_availability(soup):
+    """
+    Prüft die Verfügbarkeit eines Produkts mit BeautifulSoup
     
-    with browser_semaphore:
-        try:
-            browser = get_browser_from_pool()
-            logger.info(f"🌐 Lade Produktseite mit Selenium: {product_url}")
-            
-            # Zufällige Verzögerung für natürlicheres Verhalten
-            time.sleep(random.uniform(1, 2))
-            
-            # Seite laden
-            browser.get(product_url)
-            
-            # Warte auf das Laden der Seite
-            WebDriverWait(browser, timeout).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
-            
-            # Titel extrahieren
-            try:
-                title_element = WebDriverWait(browser, 5).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".product-details__product-title, h1.title, h1"))
-                )
-                result["title"] = title_element.text.strip()
-            except (TimeoutException, NoSuchElementException):
-                logger.warning(f"⚠️ Titel konnte nicht gefunden werden für {product_url}")
-            
-            # Preis extrahieren mit verschiedenen Selektoren
-            price_selectors = [
-                ".details-product-price__value",
-                ".product-details__product-price",
-                ".price"
-            ]
-            
-            for selector in price_selectors:
-                try:
-                    price_element = WebDriverWait(browser, 3).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                    )
-                    result["price"] = price_element.text.strip()
-                    logger.info(f"💰 Preis gefunden: {result['price']}")
-                    break
-                except (TimeoutException, NoSuchElementException):
-                    continue
-            
-            # Verfügbarkeit prüfen (erst negative, dann positive Indikatoren)
-            
-            # 1. Negative Indikatoren (nicht verfügbar)
-            not_available_indicators = [
-                # Text-basierte Indikatoren
-                ("text", "Ausverkauft"),
-                ("text", "nicht verfügbar"),
-                ("text", "nicht auf Lager"),
-                ("text", "vergriffen"),
-                
-                # Element-basierte Indikatoren
-                ("selector", ".badge.badge-danger"),
-                ("selector", ".not-available"),
-                ("selector", ".sold-out"),
-                ("selector", "button.disabled"),
-                ("selector", "[disabled]")
-            ]
-            
-            for indicator_type, indicator in not_available_indicators:
-                try:
-                    if indicator_type == "text":
-                        # Suche nach Text in der Seite
-                        page_text = browser.find_element(By.TAG_NAME, "body").text
-                        if indicator in page_text:
-                            result["is_available"] = False
-                            result["status_text"] = f"[X] Ausverkauft ({indicator} gefunden)"
-                            logger.info(f"❌ Produkt nicht verfügbar: {indicator} im Text gefunden")
-                            return result
-                    else:
-                        # Suche nach Element mit Selektor
-                        if browser.find_elements(By.CSS_SELECTOR, indicator):
-                            result["is_available"] = False
-                            result["status_text"] = f"[X] Ausverkauft (Element {indicator} gefunden)"
-                            logger.info(f"❌ Produkt nicht verfügbar: Element {indicator} gefunden")
-                            return result
-                except Exception:
-                    pass
-            
-            # 2. Prüfung auf Vorbestellung
-            preorder_indicators = [
-                ("text", "Vorbestellung"),
-                ("text", "vorbestellen"),
-                ("text", "Pre-Order"),
-                ("text", "Preorder"),
-                ("selector", ".preorder"),
-                ("selector", ".pre-order")
-            ]
-            
-            for indicator_type, indicator in preorder_indicators:
-                try:
-                    if indicator_type == "text":
-                        page_text = browser.find_element(By.TAG_NAME, "body").text
-                        if indicator in page_text:
-                            result["is_available"] = True
-                            result["status_text"] = f"[V] Vorbestellbar ({indicator} gefunden)"
-                            logger.info(f"✅ Produkt vorbestellbar: {indicator} im Text gefunden")
-                            return result
-                    else:
-                        if browser.find_elements(By.CSS_SELECTOR, indicator):
-                            result["is_available"] = True
-                            result["status_text"] = f"[V] Vorbestellbar (Element {indicator} gefunden)"
-                            logger.info(f"✅ Produkt vorbestellbar: Element {indicator} gefunden")
-                            return result
-                except Exception:
-                    pass
-            
-            # 3. Positive Indikatoren (verfügbar)
-            available_indicators = [
-                # Warenkorb-Button
-                ("selector", "button:not([disabled]).add-to-cart, button:not([disabled]) .form-control__button-text"),
-                
-                # Text-basierte Indikatoren
-                ("text", "In den Warenkorb"),
-                ("text", "Auf Lager"),
-                ("text", "Lieferbar"),
-                ("text", "Verfügbar"),
-                
-                # Element-basierte Indikatoren
-                ("selector", ".available"),
-                ("selector", ".in-stock"),
-                ("selector", ".badge-success")
-            ]
-            
-            for indicator_type, indicator in available_indicators:
-                try:
-                    if indicator_type == "text":
-                        # Prüfen, ob der Text im Kontext eines nicht-deaktivierten Buttons vorkommt
-                        if indicator == "In den Warenkorb":
-                            # Spezialfall für den Warenkorb-Button
-                            cart_buttons = browser.find_elements(By.XPATH, 
-                                f"//button[contains(text(), '{indicator}') and not(@disabled)]")
-                            
-                            if not cart_buttons:
-                                # Suche nach Span-Element innerhalb eines Buttons
-                                cart_buttons = browser.find_elements(By.XPATH, 
-                                    f"//button[not(@disabled)]//span[contains(text(), '{indicator}')]")
-                            
-                            if cart_buttons:
-                                result["is_available"] = True
-                                result["status_text"] = f"[V] Verfügbar (Warenkorb-Button aktiv)"
-                                logger.info(f"✅ Produkt verfügbar: Warenkorb-Button aktiv")
-                                return result
-                        else:
-                            # Andere Text-Indikatoren
-                            page_text = browser.find_element(By.TAG_NAME, "body").text
-                            if indicator in page_text:
-                                result["is_available"] = True
-                                result["status_text"] = f"[V] Verfügbar ({indicator} gefunden)"
-                                logger.info(f"✅ Produkt verfügbar: {indicator} im Text gefunden")
-                                return result
-                    else:
-                        # Suche nach Element mit Selektor
-                        if browser.find_elements(By.CSS_SELECTOR, indicator):
-                            result["is_available"] = True
-                            result["status_text"] = f"[V] Verfügbar (Element {indicator} gefunden)"
-                            logger.info(f"✅ Produkt verfügbar: Element {indicator} gefunden")
-                            return result
-                except Exception:
-                    pass
-            
-            # Fallback wenn keine eindeutigen Indikatoren gefunden wurden
-            # Prüfe, ob der Warenkorb-Button existiert und nicht deaktiviert ist
-            try:
-                add_to_cart = browser.find_element(By.XPATH, "//button[contains(., 'In den Warenkorb')]")
-                if "disabled" not in add_to_cart.get_attribute("class") and not add_to_cart.get_attribute("disabled"):
-                    result["is_available"] = True
-                    result["status_text"] = "[V] Wahrscheinlich verfügbar (Warenkorb-Button vorhanden)"
-                else:
-                    result["is_available"] = False
-                    result["status_text"] = "[X] Wahrscheinlich nicht verfügbar (Warenkorb-Button deaktiviert)"
-            except NoSuchElementException:
-                # Default wenn nichts erkannt wurde
-                result["status_text"] = "[?] Status unbekannt (als nicht verfügbar behandelt)"
-            
-            logger.info(f"🔍 Selenium-Extraktion abgeschlossen für {product_url}: {result['status_text']}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Fehler bei der Selenium-Extraktion für {product_url}: {e}")
-            result["status_text"] = f"[?] Fehler bei der Verfügbarkeitsprüfung: {str(e)}"
-            return result
-        finally:
-            # Browser zurück in den Pool
-            if browser:
-                try:
-                    # Cookies löschen für sauberen nächsten Besuch
-                    browser.delete_all_cookies()
-                    return_browser_to_pool(browser)
-                except Exception as e:
-                    logger.warning(f"⚠️ Fehler beim Zurückgeben des Browsers in den Pool: {e}")
+    :param soup: BeautifulSoup-Objekt der Produktseite
+    :return: Tuple (is_available, price, status_text)
+    """
+    return mighty_cards_extraction.check_product_availability_with_bs4(soup)
 
 def load_cache():
     """Lädt den Cache mit gefundenen Produkten"""
@@ -506,68 +147,6 @@ def save_cache(cache_data):
     except Exception as e:
         logger.error(f"❌ Fehler beim Speichern des Caches: {e}")
         return False
-
-def check_product_availability(soup):
-    """
-    Verbesserte Verfügbarkeitsprüfung für mighty-cards.de mit BeautifulSoup
-    (Wird als erster Schritt vor Selenium verwendet)
-    
-    :param soup: BeautifulSoup-Objekt der Produktseite
-    :return: Tuple (is_available, price, status_text)
-    """
-    # 1. Preisinformation extrahieren mit verbessertem Selektor
-    price_elem = soup.find('span', {'class': 'details-product-price__value'})
-    if price_elem:
-        price = price_elem.text.strip()
-    else:
-        # Fallback für andere Preisformate
-        price_elem = soup.select_one('.product-details__product-price, .price')
-        price = price_elem.text.strip() if price_elem else "Preis nicht verfügbar"
-    
-    # 2. Prüfe auf Vorbestellung
-    is_preorder = False
-    preorder_text = soup.find(string=re.compile("Vorbestellung", re.IGNORECASE))
-    if preorder_text:
-        is_preorder = True
-        return True, price, "[V] Vorbestellbar"
-    
-    # 3. Positivprüfung: Suche nach "In den Warenkorb"-Button
-    cart_button = None
-    
-    # Suche nach dem Button-Element mit dem Text "In den Warenkorb"
-    for elem in soup.find_all(['button', 'span']):
-        if elem.text and "In den Warenkorb" in elem.text:
-            cart_button = elem
-            # Prüfe, ob das Elternelement ein Button ist
-            parent = elem.parent
-            while parent and parent.name != 'button' and parent.name != 'form':
-                parent = parent.parent
-            
-            if parent and parent.name == 'button':
-                # Prüfe, ob der Button deaktiviert ist
-                if parent.has_attr('disabled'):
-                    cart_button = None  # Button ist deaktiviert
-                else:
-                    cart_button = parent
-            break
-    
-    if cart_button:
-        return True, price, "[V] Verfügbar (Warenkorb-Button aktiv)"
-    
-    # 4. Negativprüfung: Suche nach beiden möglichen "Ausverkauft"-Elementen
-    # a) Als div mit class="label__text"
-    sold_out_label = soup.find('div', {'class': 'label__text'}, text="Ausverkauft")
-    
-    # b) Als span innerhalb eines div
-    sold_out_span = soup.find('span', text="Ausverkauft")
-    
-    if sold_out_label or sold_out_span:
-        return False, price, "[X] Ausverkauft"
-    
-    # 5. Wenn nichts eindeutiges gefunden wurde, versuche eine heuristische Annäherung
-    # Da wir wissen, dass BeautifulSoup bei JavaScript-generierten Inhalten unzuverlässig ist,
-    # markieren wir den Status als unbekannt - Selenium wird später genauer prüfen
-    return None, price, "[?] Status unbekannt"
 
 def replace_umlauts(text):
     """
@@ -960,205 +539,12 @@ def create_product_id(title, base_id="mightycards"):
 
 def process_product_matches_with_selenium(positive_matches):
     """
-    Verarbeitet die positiven Treffer mit Selenium für präzise Verfügbarkeits- und Preisinformationen
+    Verarbeitet die positiven Treffer mit Selenium für präzise Preis- und Verfügbarkeitsinformationen
     
     :param positive_matches: Liste der positiven Treffer aus dem BeautifulSoup-Scanning
     :return: Liste der aktualisierten Produktinformationen
     """
-    if not positive_matches:
-        return []
-    
-    logger.info(f"🔄 Starte Selenium-Verarbeitung für {len(positive_matches)} positive Treffer")
-    
-    # Initialisiere den Browser-Pool
-    try:
-        initialize_browser_pool()
-    except Exception as e:
-        logger.error(f"❌ Fehler bei der Initialisierung des Browser-Pools: {e}")
-        return positive_matches  # Fallback auf die ursprünglichen Matches
-    
-    # Liste für aktualisierte Produkt-Daten
-    updated_matches = []
-    
-    try:
-        # Verarbeite jedes positive Match
-        for product in positive_matches:
-            url = product.get("url")
-            if not url:
-                updated_matches.append(product)
-                continue
-            
-            logger.info(f"🔄 Verarbeite positiven Treffer mit Selenium: {product.get('title')}")
-            
-            # Extrahiere Produktdaten mit Selenium
-            selenium_data = extract_product_info_with_selenium(url)
-            
-            # Aktualisiere die Produktdaten
-            if selenium_data:
-                # Behalte Originaltitel, falls Selenium keinen findet
-                if not selenium_data["title"]:
-                    selenium_data["title"] = product.get("title")
-                
-                # Aktualisiere die Produktdaten
-                updated_product = product.copy()
-                updated_product["price"] = selenium_data["price"]
-                updated_product["is_available"] = selenium_data["is_available"]
-                updated_product["status_text"] = selenium_data["status_text"]
-                
-                # Füge zu den aktualisierten Matches hinzu
-                updated_matches.append(updated_product)
-                logger.info(f"✅ Aktualisiertes Produkt: {updated_product['title']} - {updated_product['status_text']}")
-            else:
-                # Fallback auf die ursprünglichen Daten
-                updated_matches.append(product)
-                logger.warning(f"⚠️ Selenium-Extraktion fehlgeschlagen für {url}, verwende ursprüngliche Daten")
-    
-    except Exception as e:
-        logger.error(f"❌ Fehler bei der Selenium-Verarbeitung: {e}")
-        # Fallback auf die ursprünglichen Matches
-        return positive_matches
-    
-    finally:
-        # Schließe den Browser-Pool
-        try:
-            shutdown_browser_pool()
-        except Exception as e:
-            logger.warning(f"⚠️ Fehler beim Schließen des Browser-Pools: {e}")
-    
-    return updated_matches
-
-def send_batch_notifications(all_products):
-    """Sendet Benachrichtigungen in Batches"""
-    from utils.telegram import send_batch_notification
-    
-    if all_products:
-        logger.info(f"📤 Sende Batch {1}/{1} mit {len(all_products)} Produkten")
-        send_batch_notification(all_products)
-    else:
-        logger.info("ℹ️ Keine Produkte für Benachrichtigung gefunden")
-
-def process_cached_product(product_url, product_data, product_info, seen, out_of_stock, only_available,
-                         headers, all_products, new_matches, found_product_ids, cached_products):
-    """
-    Verarbeitet ein bereits im Cache gespeichertes Produkt
-    
-    :return: (success, error_404) - Erfolg und ob ein 404-Fehler aufgetreten ist
-    """
-    search_term = product_data.get("search_term")
-    
-    try:
-        # Produkt-Detailseite abrufen
-        try:
-            response = requests.get(product_url, headers=headers, timeout=15)
-            
-            # Wenn 404 zurückgegeben wird, müssen wir die Sitemap neu scannen
-            if response.status_code == 404:
-                return False, True
-                
-            if response.status_code != 200:
-                logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: Status {response.status_code}")
-                return False, False
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: {e}")
-            return False, False
-        
-        soup = BeautifulSoup(response.content, "html.parser")
-        
-        # Titel extrahieren und validieren
-        title_elem = soup.find('h1', {'class': 'product-details__product-title'})
-        if not title_elem:
-            title_elem = soup.find('h1')
-        
-        if not title_elem:
-            # Wenn kein Titel gefunden wird, verwende den zwischengespeicherten
-            title = product_data.get("title", "Pokemon Produkt")
-        else:
-            title = title_elem.text.strip()
-        
-        # VERBESSERT: Verwende die neue Verfügbarkeitsprüfung
-        is_available, price, status_text = check_product_availability(soup)
-        
-        # Eindeutige ID für das Produkt erstellen
-        product_id = product_data.get("product_id") or create_product_id(title)
-        
-        # Thread-sichere Prüfung auf Duplikate
-        with url_lock:
-            if product_id in found_product_ids:
-                return True, False
-        
-        # Status aktualisieren
-        should_notify, is_back_in_stock = update_product_status(
-            product_id, is_available, seen, out_of_stock
-        )
-        
-        # Bei "nur verfügbare" Option, nicht verfügbare Produkte überspringen
-        if only_available and not is_available:
-            # Aktualisiere Verfügbarkeitsstatus im Cache
-            with cache_lock:
-                if product_id in cached_products:
-                    cached_products[product_id]["is_available"] = is_available
-                    cached_products[product_id]["price"] = price
-                    cached_products[product_id]["last_checked"] = int(time.time())
-            return True, False
-        
-        if should_notify:
-            # Status anpassen wenn wieder verfügbar
-            if is_back_in_stock:
-                status_text = "🎉 Wieder verfügbar!"
-            
-            # Extrahiere Produkttyp
-            detected_product_type = extract_product_type_from_text(title)
-            
-            # VERBESSERT: Überprüfe, ob der Produkttyp dem ursprünglichen Suchbegriff entspricht
-            search_term_product_type = None
-            for item in product_info:
-                if item["original_term"] == search_term:
-                    search_term_product_type = item["product_type"]
-                    break
-            
-            # Wenn der erkannte Produkttyp nicht mit dem gesuchten übereinstimmt, überspringen
-            if (search_term_product_type and search_term_product_type != "unknown" and 
-                detected_product_type != "unknown" and search_term_product_type != detected_product_type):
-                logger.debug(f"⚠️ Produkttyp-Diskrepanz: Gesucht {search_term_product_type}, gefunden {detected_product_type}: {title}")
-                return True, False
-            
-            # Produkt-Daten sammeln
-            product_data = {
-                "title": title,
-                "url": product_url,
-                "price": price,
-                "status_text": status_text,
-                "is_available": is_available,
-                "matched_term": search_term,
-                "product_type": detected_product_type,
-                "shop": "mighty-cards.de"
-            }
-            
-            # Thread-sicher zu Ergebnissen hinzufügen
-            with data_lock:
-                all_products.append(product_data)
-                new_matches.append(product_id)
-                found_product_ids.add(product_id)
-                
-            logger.info(f"✅ Gecachtes Produkt aktualisiert: {title} - {status_text}")
-        
-        # Aktualisiere Produkt im Cache
-        with cache_lock:
-            cached_products[product_id] = {
-                "product_id": product_id,
-                "title": title,
-                "url": product_url,
-                "search_term": search_term,
-                "is_available": is_available,
-                "price": price,
-                "last_checked": int(time.time())
-            }
-        
-        return True, False
-    
-    except Exception as e:
-        logger.error(f"❌ Fehler bei der Verarbeitung von gecachtem Produkt {product_url}: {e}")
-        return False, False
+    return mighty_cards_extraction.process_product_matches_with_selenium(positive_matches)
 
 def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, only_available, 
                                headers, all_products, new_matches, found_product_ids, cached_products=None):
@@ -1425,6 +811,30 @@ def process_mighty_cards_product(product_url, product_info, seen, out_of_stock, 
     
     return False
 
+# Import für extract_product_type_from_text
+def extract_product_type_from_text(text):
+    """
+    Extrahiert den Produkttyp aus einem Text für strengere Filterung
+    
+    :param text: Text, aus dem der Produkttyp extrahiert werden soll
+    :return: Produkttyp als String oder "unknown" wenn nicht eindeutig
+    """
+    # Diese Funktion muss importiert werden von utils.matcher
+    from utils.matcher import extract_product_type_from_text as extract_type
+    return extract_type(text)
+
+# Import für clean_text
+def clean_text(text):
+    """
+    Bereinigt einen Text (Kleinbuchstaben, ohne Sonderzeichen)
+    
+    :param text: Zu bereinigender Text
+    :return: Bereinigter Text
+    """
+    # Diese Funktion muss importiert werden von utils.matcher
+    from utils.matcher import clean_text as clean
+    return clean(text)
+
 def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     """
     Hauptfunktion: Zweistufiger Scaper mit BeautifulSoup zur schnellen URL-Filterung
@@ -1546,13 +956,18 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
                 # Produkte für die zweite Stufe (Selenium) sammeln
                 if all_products:
                     # Verarbeite die positiven Treffer mit Selenium für präzise Daten
-                    updated_products = process_product_matches_with_selenium(all_products)
-                    
-                    # Sende Benachrichtigungen für die aktualisierten Produkte
-                    if updated_products:
+                    # Prüfen, ob Selenium verfügbar ist
+                    if selenium_manager.is_selenium_available():
+                        updated_products = process_product_matches_with_selenium(all_products)
+                        
                         # Überschreibe die vorherigen Ergebnisse
                         all_products = updated_products
-                        send_batch_notifications(all_products)
+                    else:
+                        logger.warning("⚠️ Selenium nicht verfügbar - verwende BeautifulSoup-Daten ohne Validierung")
+                
+                    # Sende Benachrichtigungen für die aktualisierten Produkte
+                    from utils.telegram import send_batch_notification
+                    send_batch_notification(all_products)
                 
                 # Cache aktualisieren
                 cache_data["products"] = cached_products
@@ -1651,13 +1066,18 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     
     # 4. Zweite Stufe: Verarbeite positive Treffer mit Selenium für präzise Daten
     if all_products:
-        updated_products = process_product_matches_with_selenium(all_products)
-        
-        # Sende Benachrichtigungen für die aktualisierten Produkte
-        if updated_products:
+        # Prüfen, ob Selenium verfügbar ist
+        if selenium_manager.is_selenium_available():
+            updated_products = process_product_matches_with_selenium(all_products)
+            
             # Überschreibe die vorherigen Ergebnisse
             all_products = updated_products
-            send_batch_notifications(all_products)
+        else:
+            logger.warning("⚠️ Selenium nicht verfügbar - verwende BeautifulSoup-Daten ohne Validierung")
+        
+        # Sende Benachrichtigungen für die aktualisierten Produkte
+        from utils.telegram import send_batch_notification
+        send_batch_notification(all_products)
     else:
         logger.info("ℹ️ Keine Produkte für Selenium-Verarbeitung gefunden")
     
@@ -1666,3 +1086,118 @@ def scrape_mighty_cards(keywords_map, seen, out_of_stock, only_available=False):
     logger.info(f"✅ Scraping abgeschlossen in {elapsed_time:.2f} Sekunden, {len(new_matches)} neue Treffer gefunden")
     
     return new_matches
+
+def process_cached_product(product_url, product_data, product_info, seen, out_of_stock, only_available,
+                         headers, all_products, new_matches, found_product_ids, cached_products):
+    """
+    Verarbeitet ein bereits im Cache gespeichertes Produkt
+    
+    :return: (success, error_404) - Erfolg und ob ein 404-Fehler aufgetreten ist
+    """
+    search_term = product_data.get("search_term")
+    
+    try:
+        # Produkt-Detailseite abrufen
+        try:
+            response = requests.get(product_url, headers=headers, timeout=15)
+            
+            # Wenn 404 zurückgegeben wird, müssen wir die Sitemap neu scannen
+            if response.status_code == 404:
+                return False, True
+                
+            if response.status_code != 200:
+                logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: Status {response.status_code}")
+                return False, False
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"⚠️ Fehler beim Abrufen von {product_url}: {e}")
+            return False, False
+        
+        soup = BeautifulSoup(response.content, "html.parser")
+        
+        # Titel extrahieren
+        title_elem = soup.find('title')
+        link_text = title_elem.text.strip() if title_elem else ""
+        
+        # VERBESSERT: Strikte Prüfung auf exakte Übereinstimmung mit dem Suchbegriff
+        tokens = keywords_map.get(search_term, [])
+        
+        # Extrahiere Produkttyp aus Suchbegriff und Titel
+        search_term_type = extract_product_type_from_text(search_term)
+        title_product_type = extract_product_type_from_text(link_text)
+        
+        # Wenn nach einem bestimmten Produkttyp gesucht wird, muss dieser im Titel übereinstimmen
+        if search_term_type in ["display", "etb", "ttb"] and title_product_type != search_term_type:
+            logger.debug(f"⚠️ Produkttyp-Diskrepanz: Suche nach '{search_term_type}', aber Produkt ist '{title_product_type}': {link_text}")
+            return True, False
+        
+        # Strengere Keyword-Prüfung mit Berücksichtigung des Produkttyps
+        from utils.matcher import is_keyword_in_text
+        if not is_keyword_in_text(tokens, link_text, log_level='None'):
+            logger.debug(f"⚠️ Produkt entspricht nicht mehr dem Suchbegriff '{search_term}': {link_text}")
+            return True, False
+        
+        # Aktualisiere die letzte Prüfzeit
+        product_data["last_checked"] = time.time()
+        
+        # Prüfe Verfügbarkeit mit BeautifulSoup
+        is_available, price, status_text = check_product_availability(soup)
+        
+        # Falls BeautifulSoup keine klare Erkennung liefert und Selenium verfügbar ist,
+        # verwende Selenium für präzisere Erkennung
+        if is_available is None and selenium_manager.is_selenium_available():
+            try:
+                selenium_data = extract_product_info_with_selenium(product_url)
+                is_available = selenium_data.get("is_available", False)
+                price = selenium_data.get("price", price)
+                status_text = selenium_data.get("status_text", status_text)
+            except Exception as e:
+                logger.warning(f"⚠️ Selenium-Extraktion fehlgeschlagen, verwende BeautifulSoup-Daten: {e}")
+                # Fallback auf konservative Annahme bei unklarer BeautifulSoup-Erkennung
+                is_available = False
+        elif is_available is None:
+            # Fallback auf konservative Annahme, wenn Selenium nicht verfügbar
+            is_available = False
+        
+        # Aktualisiere Cache-Eintrag
+        product_data["is_available"] = is_available
+        product_data["price"] = price
+        
+        # Aktualisiere Produkt-Status und prüfe, ob Benachrichtigung gesendet werden soll
+        product_id = product_data.get("product_id") or create_product_id(link_text)
+        should_notify, is_back_in_stock = update_product_status(
+            product_id, is_available, seen, out_of_stock
+        )
+        
+        if should_notify and (not only_available or is_available):
+            # Wenn Produkt wieder verfügbar ist, anpassen
+            if is_back_in_stock:
+                status_text = "🎉 Wieder verfügbar!"
+            # Wenn kein Status-Text vorhanden ist, erstellen
+            elif not status_text or status_text == "[?] Status unbekannt":
+                from utils.stock import get_status_text
+                status_text = get_status_text(is_available, is_back_in_stock)
+            
+            # Produkt-Informationen sammeln für Batch-Benachrichtigung
+            product_data = {
+                "title": link_text,
+                "url": product_url,
+                "price": price,
+                "status_text": status_text,
+                "is_available": is_available,
+                "matched_term": search_term,
+                "product_type": title_product_type,
+                "shop": "mighty-cards.de"
+            }
+            
+            # Deduplizierung innerhalb eines Durchlaufs
+            if product_id not in found_product_ids:
+                all_products.append(product_data)
+                new_matches.append(product_id)
+                found_product_ids.add(product_id)
+                logger.info(f"✅ Cache-Treffer: {link_text} - {status_text}")
+        
+        return True, False
+    
+    except Exception as e:
+        logger.error(f"❌ Fehler bei der Verarbeitung von gecachtem Produkt {product_url}: {e}")
+        return False, False

@@ -3,9 +3,13 @@ import time
 import logging
 import traceback
 from datetime import datetime
-import concurrent.futures
+import concurrent.futures  # Expliziter Import, löst den 'concurrent not defined' Fehler
 import random
 import atexit
+
+# Neue Importe für Selenium-Management
+import selenium_manager
+import mighty_cards_extraction
 
 # Neue Importe für verbesserte Konfigurationsverwaltung und Request-Handling
 from utils.config_manager import (
@@ -20,7 +24,7 @@ from utils.requests_handler import get_page_content, fetch_url
 from scrapers.tcgviert import scrape_tcgviert
 from scrapers.generic import scrape_generic
 from scrapers.sapphire_cards import scrape_sapphire_cards
-from scrapers.mighty_cards import scrape_mighty_cards, initialize_browser_pool, shutdown_browser_pool
+from scrapers.mighty_cards import scrape_mighty_cards
 from scrapers.games_island import scrape_games_island  # Neuer Import für games-island.eu
 
 # Logger-Konfiguration
@@ -44,7 +48,7 @@ def cleanup_selenium():
     if selenium_initialized:
         logger.info("[CLEANUP] Schließe Selenium-Browser-Pool")
         try:
-            shutdown_browser_pool()
+            selenium_manager.shutdown_browser_pool()
             selenium_initialized = False
         except Exception as e:
             logger.error(f"[ERROR] Fehler beim Schließen des Browser-Pools: {e}")
@@ -88,8 +92,9 @@ def run_once(only_available=False, reset_seen=False, use_selenium=True):
     if use_selenium and any("mighty-cards.de" in url for url in all_urls):
         try:
             logger.info("[SELENIUM] Initialisiere Browser-Pool für mighty-cards.de")
-            initialize_browser_pool()
-            selenium_initialized = True
+            selenium_initialized = selenium_manager.initialize_browser_pool()
+            if not selenium_initialized:
+                logger.warning("[WARNING] Browser-Pool konnte nicht initialisiert werden. Fortfahren im Fallback-Modus.")
         except Exception as e:
             logger.error(f"[ERROR] Fehler bei der Initialisierung des Browser-Pools: {e}")
             logger.warning("[WARNING] Fortfahren ohne Selenium für mighty-cards.de")
@@ -410,11 +415,14 @@ def test_mighty_cards():
     out_of_stock = set()
     
     try:
-        # Initialisiere Browser-Pool für Selenium-Unterstützung
+        # Versuche Browser-Pool zu initialisieren, aber lasse den Scraper trotzdem laufen, wenn es fehlschlägt
         logger.info("[SELENIUM] Initialisiere Browser-Pool für Test")
-        initialize_browser_pool()
+        selenium_available = selenium_manager.initialize_browser_pool()
         
-        # Führe Test aus
+        if not selenium_available:
+            logger.warning("[WARNING] Browser-Pool konnte nicht initialisiert werden. Scraper wird mit eingeschränkter Funktionalität ausgeführt.")
+        
+        # Führe Scraper aus
         matches = scrape_mighty_cards(keywords_map, seen, out_of_stock)
         
         if matches:
@@ -426,7 +434,7 @@ def test_mighty_cards():
     finally:
         # Stelle sicher, dass Browser-Pool geschlossen wird
         logger.info("[CLEANUP] Schließe Browser-Pool nach Test")
-        shutdown_browser_pool()
+        selenium_manager.shutdown_browser_pool()
 
 def test_mighty_cards_selenium():
     """Testet die Selenium-Funktionalität für Mighty-Cards isoliert"""
@@ -436,14 +444,15 @@ def test_mighty_cards_selenium():
     
     try:
         # Initialisiere Browser-Pool
-        from scrapers.mighty_cards import initialize_browser_pool, extract_product_info_with_selenium, shutdown_browser_pool
-        
         logger.info("[SELENIUM] Initialisiere Browser-Pool für Test")
-        initialize_browser_pool()
+        success = selenium_manager.initialize_browser_pool()
+        
+        if not success:
+            logger.warning("[WARNING] Browser-Pool konnte nicht initialisiert werden. Test wird mit eingeschränkter Funktionalität fortgesetzt.")
         
         # Teste die Extraktion
         logger.info(f"[TEST] Extrahiere Produktinfos von {test_url}")
-        result = extract_product_info_with_selenium(test_url)
+        result = mighty_cards_extraction.extract_product_info_with_selenium(test_url)
         
         logger.info(f"[RESULT] Ergebnis: {result}")
         
@@ -454,7 +463,7 @@ def test_mighty_cards_selenium():
     finally:
         # Stelle sicher, dass Browser-Pool geschlossen wird
         logger.info("[CLEANUP] Schließe Browser-Pool nach Test")
-        shutdown_browser_pool()
+        selenium_manager.shutdown_browser_pool()
 
 def test_games_island():
     """Testet den Games-Island Scraper isoliert"""
@@ -473,6 +482,20 @@ def test_games_island():
         logger.info(f"[SUCCESS] Test erfolgreich, {len(matches)} Treffer gefunden")
     else:
         logger.warning("[WARNING] Test möglicherweise fehlgeschlagen, keine Treffer gefunden")
+
+def check_selenium_availability():
+    """Prüft, ob Selenium korrekt funktioniert"""
+    try:
+        logger.info("[CHECK] Teste Selenium-Verfügbarkeit")
+        if selenium_manager.is_selenium_available():
+            logger.info("[CHECK] Selenium funktioniert korrekt")
+            return True
+        else:
+            logger.warning("[CHECK] Selenium ist nicht verfügbar")
+            return False
+    except Exception as e:
+        logger.error(f"[CHECK] Fehler bei der Prüfung der Selenium-Verfügbarkeit: {e}")
+        return False
 
 def monitor_out_of_stock():
     """Zeigt die aktuell ausverkauften Produkte an, die überwacht werden"""
@@ -536,7 +559,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pokémon TCG Scraper mit verbesserten Filtern")
     parser.add_argument("--mode", choices=["once", "loop", "test", "match_test", "availability_test", 
                                           "sapphire_test", "mighty_cards_test", "games_island_test", "mighty_cards_selenium_test",
-                                          "request_test", "show_out_of_stock", "clean"], 
+                                          "request_test", "show_out_of_stock", "clean", "check_selenium"], 
                         default="loop", help="Ausführungsmodus")
     parser.add_argument("--only-available", action="store_true", 
                         help="Nur verfügbare Produkte melden (nicht ausverkaufte)")
@@ -546,6 +569,8 @@ if __name__ == "__main__":
                         default="INFO", help="Log-Level einstellen")
     parser.add_argument("--no-selenium", action="store_true",
                         help="Selenium für mighty-cards.de deaktivieren (nur BeautifulSoup verwenden)")
+    parser.add_argument("--check-selenium", action="store_true",
+                        help="Überprüft die Selenium-Verfügbarkeit")
     args = parser.parse_args()
 
     # Log-Level entsprechend setzen
@@ -583,3 +608,5 @@ if __name__ == "__main__":
         monitor_out_of_stock()
     elif args.mode == "clean":
         clean_database()
+    elif args.mode == "check_selenium":
+        check_selenium_availability()
